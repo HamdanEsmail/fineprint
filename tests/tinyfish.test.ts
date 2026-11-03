@@ -101,9 +101,37 @@ describe("tinyfishFetch", () => {
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(TinyFishError);
     expect(err).toMatchObject({ status: 402, code: "INSUFFICIENT_CREDITS" });
-    expect((err as Error).message).toContain("Top up your account");
+    // The message holds the status and the code only: no text from the response body.
+    expect((err as Error).message).toBe("TinyFish HTTP 402 INSUFFICIENT_CREDITS");
+    expect((err as Error).message).not.toContain("Top up your account");
     expect((err as Error).message).not.toContain("test-tinyfish-key");
     expect(await spendRows()).toEqual([]);
+  });
+
+  it("keeps whatever the response echoes (a rejected webhook url with its secret) out of the error message", async () => {
+    const webhook = `https://fineprint.test/hooks/monitor/${env.WEBHOOK_SECRET}`;
+    const echoes = [
+      { status: 400, json: { error: { code: "INVALID_WEBHOOK_URL", message: `webhook_url ${webhook} is not allowed` } } },
+      { status: 400, json: { code: "BAD_INPUT", message: `rejected ${webhook}` } },
+      { status: 400, json: { error: `rejected ${webhook}` } },
+      { status: 502, body: `<html>upstream saw ${webhook}</html>` },
+    ];
+    const messages: string[] = [];
+    for (const reply of echoes) {
+      fetchMock.intercept({ method: "POST", url: BROWSER_API, reply });
+      const err = await tinyfishFetch(env, BROWSER_API, { method: "POST", body: JSON.stringify({ webhook_url: webhook }) }).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(TinyFishError);
+      messages.push((err as Error).message);
+    }
+    expect(messages).toEqual([
+      "TinyFish HTTP 400 INVALID_WEBHOOK_URL",
+      "TinyFish HTTP 400 BAD_INPUT",
+      "TinyFish HTTP 400 http_400",
+      "TinyFish HTTP 502 http_502",
+    ]);
+    expect(messages.join("\n")).not.toContain(env.WEBHOOK_SECRET);
   });
 
   it("falls back to body.code, then to http_<status> for a body that is not JSON", async () => {
@@ -111,9 +139,11 @@ describe("tinyfishFetch", () => {
     fetchMock.intercept({ url: BROWSER_API, reply: { status: 502, body: "<html>Bad gateway</html>" } });
     const first = await tinyfishFetch(env, BROWSER_API, { method: "POST" }).catch((e: unknown) => e);
     expect(first).toMatchObject({ status: 400, code: "BAD_INPUT" });
+    expect((first as Error).message).toBe("TinyFish HTTP 400 BAD_INPUT");
     const second = await tinyfishFetch(env, BROWSER_API, { method: "POST" }).catch((e: unknown) => e);
     expect(second).toBeInstanceOf(TinyFishError);
     expect(second).toMatchObject({ status: 502, code: "http_502" });
+    expect((second as Error).message).toBe("TinyFish HTTP 502 http_502");
     expect((second as Error).message).not.toContain("test-tinyfish-key");
   });
 });

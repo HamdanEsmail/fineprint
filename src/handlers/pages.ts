@@ -20,7 +20,7 @@ import {
   updatePage,
   type PagePatch,
 } from "../db/pages";
-import { publicAddsToday, recordPublicAdd } from "../db/publicAdds";
+import { claimPublicAdd, publicAddsToday, releasePublicAdd } from "../db/publicAdds";
 import { insertRun } from "../db/runs";
 import type { PageKind, PageRow } from "../db/types";
 import { insertVersion, listVersions } from "../db/versions";
@@ -179,8 +179,14 @@ function parseWatchUrl(raw: unknown): string | null {
 
 const codeOf = (err: unknown): string => (err instanceof TinyFishError ? err.code : "request_failed");
 
+// Logs what failed without anything an upstream could have echoed back: for a TinyFish
+// failure only its name, status and code; for any other error its name and message.
 function logError(what: string, err: unknown): void {
-  console.error(what, err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 200) : "unknown error");
+  if (err instanceof TinyFishError) {
+    console.error(what, `${err.name} status=${err.status} code=${err.code}`);
+  } else {
+    console.error(what, err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 200) : "unknown error");
+  }
 }
 
 /** Best effort: a Monitor nobody has a page for would hold a slot and bill twice a day. */
@@ -214,6 +220,48 @@ async function nextPublicSlotAt(db: D1Database): Promise<string | null> {
     .map((p) => p.expires_at as string)
     .sort();
   return expiries[0] ?? null;
+}
+
+type CapHit = "watchlist_full" | "public_slots_full";
+
+/**
+ * Which cap an add runs into, if any. `held` is the number of Monitors now held and `extra`
+ * is 1 before the add (is there room for one more?) and 0 after its page is stored (is the
+ * count over the cap?).
+ */
+async function capHit(db: D1Database, admin: boolean, held: number, extra: 0 | 1): Promise<CapHit | null> {
+  if (held + extra > MAX_MONITORS) return "watchlist_full";
+  if (!admin && (await countMonitors(db, "public")) + extra > PUBLIC_SLOTS) return "public_slots_full";
+  return null;
+}
+
+/** The 409 for a cap, the same body before and after the Monitor was created. */
+async function capRefusal(c: AppContext, hit: CapHit): Promise<Response> {
+  if (hit === "watchlist_full") {
+    return c.json(
+      { error: "watchlist_full", reason: `Fineprint already watches its maximum of ${MAX_MONITORS} pages` },
+      409,
+    );
+  }
+  const retryAfter = await nextPublicSlotAt(c.env.DB);
+  return c.json(
+    {
+      error: "public_slots_full",
+      reason: `All ${PUBLIC_SLOTS} public slots are in use. Public pages are removed after ${PUBLIC_TTL_DAYS} days${
+        retryAfter ? `; the next slot frees up at ${retryAfter}` : ""
+      }`,
+      retry_after: retryAfter,
+    },
+    409,
+  );
+}
+
+async function releaseQuietly(db: D1Database, ipHash: string): Promise<void> {
+  try {
+    await releasePublicAdd(db, ipHash);
+  } catch (err) {
+    logError("add: giving back the daily add failed", err);
+  }
 }
 
 // --- Routes -----------------------------------------------------------------
@@ -258,34 +306,36 @@ pagesRouter.post("/", async (c) => {
   if (existing) return c.json({ error: "already_watched", page_id: existing.id }, 409);
 
   const held = await countMonitors(db);
-  if (held >= MAX_MONITORS) {
-    return c.json(
-      { error: "watchlist_full", reason: `Fineprint already watches its maximum of ${MAX_MONITORS} pages` },
-      409,
-    );
-  }
+  const full = await capHit(db, admin, held, 1);
+  if (full) return capRefusal(c, full);
 
-  let ipHash: string | null = null;
-  if (!admin) {
-    if ((await countMonitors(db, "public")) >= PUBLIC_SLOTS) {
-      const retryAfter = await nextPublicSlotAt(db);
-      return c.json(
-        {
-          error: "public_slots_full",
-          reason: `All ${PUBLIC_SLOTS} public slots are in use. Public pages are removed after ${PUBLIC_TTL_DAYS} days${
-            retryAfter ? `; the next slot frees up at ${retryAfter}` : ""
-          }`,
-          retry_after: retryAfter,
-        },
-        409,
-      );
-    }
-    const ip = c.req.header("CF-Connecting-IP") || "unknown";
-    ipHash = await hashText(ip + c.env.WEBHOOK_SECRET);
-    if ((await publicAddsToday(db, ipHash)) >= PUBLIC_ADDS_PER_IP_PER_DAY) {
-      return c.json({ error: "daily_limit", reason: "One public page per day per visitor" }, 429);
-    }
+  if (admin) return createPage(c, { url, fields, admin, held });
+
+  // A public visitor gets one add a day. The plain check answers the common case without a
+  // write; the claim is the one that holds when several adds arrive at once (it is a single
+  // statement, so only one of them can take the last add).
+  const ip = c.req.header("CF-Connecting-IP") || "unknown";
+  const ipHash = await hashText(ip + c.env.WEBHOOK_SECRET);
+  const dailyLimit = () => c.json({ error: "daily_limit", reason: "One public page per day per visitor" }, 429);
+  if ((await publicAddsToday(db, ipHash)) >= PUBLIC_ADDS_PER_IP_PER_DAY) return dailyLimit();
+  if (!(await claimPublicAdd(db, ipHash, PUBLIC_ADDS_PER_IP_PER_DAY))) return dailyLimit();
+
+  // The add is given back unless a page was created, whichever way the rest ends.
+  let res: Response | undefined;
+  try {
+    res = await createPage(c, { url, fields, admin, held });
+    return res;
+  } finally {
+    if (res?.status !== 201) await releaseQuietly(db, ipHash);
   }
+});
+
+type NewPageRequest = { url: string; fields: Fields; admin: boolean; held: number };
+
+/** Steps 3 to 6 of the add flow: validate with TinyFetch, create the Monitor, store the page. */
+async function createPage(c: AppContext, req: NewPageRequest): Promise<Response> {
+  const db = c.env.DB;
+  const { url, fields, admin, held } = req;
 
   // 3. TinyFetch validation (free). A page that cannot be read now cannot be watched.
   let fetched: Awaited<ReturnType<typeof fetchPage>>;
@@ -350,40 +400,50 @@ pagesRouter.post("/", async (c) => {
     return c.json({ error: "internal_error" }, 500);
   }
 
+  // Adds that arrive together all pass the checks above before any of them has written, so each
+  // counts again now that its own page is stored. One that finds a cap exceeded takes its
+  // Monitor and page back (a rare pair may both back out; the visitor can try again).
+  let overCap: CapHit | null = null;
   try {
-    const outcome = await insertRun(db, {
-      id: runId,
-      page_id: pageId,
-      monitor_run_id: monitor.baselineRunId,
-      outcome: "baseline",
-      is_baseline: 1,
-      judgment_relevant: null,
-      judgment_summary: null,
-      diff_truncated: 0,
-      noise_suppressed: 0,
-      noise_reason: null,
-      raw_key: null,
-      received_at: nowIso,
-    });
-    if (outcome === "duplicate") throw new Error("the baseline run id is already recorded");
-    await insertVersion(db, {
-      id: versionId,
-      page_id: pageId,
-      run_id: runId,
-      is_baseline: 1,
-      captured_at: nowIso,
-      text: monitor.baselineText,
-      normalized_hash: await hashText(normalize(monitor.baselineText, ignorePatterns).text),
-      judgment_summary: null,
-      capture_status: "pending",
-    });
-    // The visitor's daily add is used up only by an add that worked.
-    if (ipHash !== null) await recordPublicAdd(db, ipHash);
+    overCap = await capHit(db, admin, await countMonitors(db), 0);
+    if (overCap === null) {
+      const outcome = await insertRun(db, {
+        id: runId,
+        page_id: pageId,
+        monitor_run_id: monitor.baselineRunId,
+        outcome: "baseline",
+        is_baseline: 1,
+        judgment_relevant: null,
+        judgment_summary: null,
+        diff_truncated: 0,
+        noise_suppressed: 0,
+        noise_reason: null,
+        raw_key: null,
+        received_at: nowIso,
+      });
+      if (outcome === "duplicate") throw new Error("the baseline run id is already recorded");
+      await insertVersion(db, {
+        id: versionId,
+        page_id: pageId,
+        run_id: runId,
+        is_baseline: 1,
+        captured_at: nowIso,
+        text: monitor.baselineText,
+        normalized_hash: await hashText(normalize(monitor.baselineText, ignorePatterns).text),
+        judgment_summary: null,
+        capture_status: "pending",
+      });
+    }
   } catch (err) {
     logError("add: baseline insert failed", err);
     await rollbackAdd(db, pageId);
     await dropMonitor(c.env, monitor.monitorId);
     return c.json({ error: "internal_error" }, 500);
+  }
+  if (overCap !== null) {
+    await rollbackAdd(db, pageId);
+    await dropMonitor(c.env, monitor.monitorId);
+    return capRefusal(c, overCap);
   }
 
   // 6. Every page gets a day-zero screenshot and source (spec 4.4).
@@ -394,7 +454,7 @@ pagesRouter.post("/", async (c) => {
   const row = await getPage(db, pageId);
   if (!row) return c.json({ error: "internal_error" }, 500);
   return c.json({ page: pageToJson(row), baseline_version_id: versionId }, 201);
-});
+}
 
 pagesRouter.patch("/:id", adminOnly, async (c) => {
   const db = c.env.DB;

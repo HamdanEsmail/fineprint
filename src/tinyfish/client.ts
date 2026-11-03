@@ -18,30 +18,27 @@ export class TinyFishError extends Error {
 
 export type SpendNote = { kind: SpendKind; amountUsd: number; ref: string };
 
-const MAX_MESSAGE_CHARS = 300;
-
 function pickString(...values: unknown[]): string | null {
   for (const v of values) if (typeof v === "string" && v !== "") return v;
   return null;
 }
 
-// Reads an error response tolerantly: JSON with `error.code` / `code`, or any text.
+// Reads an error response tolerantly: JSON with `error.code` / `code`, else `http_<status>`.
+// The message carries the status and the code and nothing else from the response: an
+// upstream body can echo what we sent (a rejected webhook_url holds the webhook secret),
+// and error messages end up in logs.
 async function errorFrom(res: Response): Promise<TinyFishError> {
   const text = await res.text().catch(() => "");
   let body: unknown = null;
   try {
     body = JSON.parse(text);
   } catch {
-    // not JSON; fall back to the text below
+    // not JSON: there is no code in it
   }
   const obj = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : {};
   const inner = obj.error !== null && typeof obj.error === "object" ? (obj.error as Record<string, unknown>) : {};
   const code = pickString(inner.code, obj.code) ?? `http_${res.status}`;
-  const detail =
-    pickString(inner.message, obj.message, typeof obj.error === "string" ? obj.error : null) ??
-    (body === null ? text.trim() : "");
-  const message = `TinyFish HTTP ${res.status} ${code}${detail ? `: ${detail.slice(0, MAX_MESSAGE_CHARS)}` : ""}`;
-  return new TinyFishError(res.status, code, message);
+  return new TinyFishError(res.status, code, `TinyFish HTTP ${res.status} ${code}`);
 }
 
 export async function tinyfishFetch(

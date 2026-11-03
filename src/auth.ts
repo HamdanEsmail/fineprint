@@ -7,9 +7,12 @@ import type { Env } from "./env";
 const BEARER = /^Bearer[ \t]+(.+)$/i;
 const encoder = new TextEncoder();
 
-// Compares two strings in time that depends on their lengths only, not on where they
-// first differ. Different lengths never match, but still cost one full comparison.
-function safeEqual(a: string, b: string): boolean {
+/**
+ * Compares two strings in time that depends on their lengths only, not on where they
+ * first differ. Different lengths never match, but still cost one full comparison.
+ * Use it for every secret comparison (admin token, webhook path secret).
+ */
+export function safeEqual(a: string, b: string): boolean {
   const x = encoder.encode(a);
   const y = encoder.encode(b);
   if (x.byteLength !== y.byteLength) {

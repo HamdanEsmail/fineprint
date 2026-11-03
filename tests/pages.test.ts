@@ -1,11 +1,12 @@
 import { applyD1Migrations, createExecutionContext, reset, waitOnExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { safeEqual } from "../src/auth";
 import { MAX_MONITORS, PUBLIC_SLOTS, PUBLIC_TTL_DAYS } from "../src/core/limits";
 import { hashText, normalize } from "../src/core/normalize";
 import { PURPOSE } from "../src/core/schedule";
-import { getPage, getPageByUrl, insertPage, type NewPage } from "../src/db/pages";
-import { publicAddsToday } from "../src/db/publicAdds";
+import { countMonitors, getPage, getPageByUrl, insertPage, type NewPage } from "../src/db/pages";
+import { claimPublicAdd, publicAddsToday, releasePublicAdd } from "../src/db/publicAdds";
 import { insertRun } from "../src/db/runs";
 import type { PageRow, VersionRow } from "../src/db/types";
 import { pageToJson } from "../src/handlers/pages";
@@ -38,21 +39,49 @@ function agentCalls(from = 0) {
 
 let monitorSeq = 0;
 
-/** TinyFetch answers with the pricing fixture; each Monitor create gets ids mon-N / mrun-N. */
-function mockTinyFish() {
-  fetchMock.intercept({ method: "POST", url: FETCH_API, reply: { json: fetchFixture }, times: Infinity });
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function monitorCreated(): Response {
+  const n = ++monitorSeq;
+  const body = structuredClone(monitorCreate);
+  body.monitor.id = `mon-${n}`;
+  body.run.id = `mrun-${n}`;
+  return Response.json(body, { status: 201 });
+}
+
+/**
+ * TinyFetch answers with the pricing fixture (after `fetchDelayMs`); each Monitor create gets ids
+ * mon-N / mrun-N. With `holdCreatesUntil` set, a Monitor create is answered only once that many
+ * creates have arrived (or after 2 s), so that many adds are all past their checks before any of
+ * them writes a row. Deleting a Monitor named mon-N is always answered.
+ */
+function mockTinyFish(opts: { fetchDelayMs?: number; holdCreatesUntil?: number } = {}) {
+  let arrived = 0;
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => (open = resolve));
+  if (opts.holdCreatesUntil !== undefined) setTimeout(open, 2000);
+  fetchMock.intercept({
+    method: "POST",
+    url: FETCH_API,
+    times: Infinity,
+    reply: async () => {
+      if (opts.fetchDelayMs) await sleep(opts.fetchDelayMs);
+      return Response.json(fetchFixture);
+    },
+  });
   fetchMock.intercept({
     method: "POST",
     url: MONITORS_API,
     times: Infinity,
-    reply: () => {
-      const n = ++monitorSeq;
-      const body = structuredClone(monitorCreate);
-      body.monitor.id = `mon-${n}`;
-      body.run.id = `mrun-${n}`;
-      return Response.json(body, { status: 201 });
+    reply: async () => {
+      if (opts.holdCreatesUntil !== undefined) {
+        if (++arrived >= opts.holdCreatesUntil) open();
+        await gate;
+      }
+      return monitorCreated();
     },
   });
+  fetchMock.intercept({ method: "DELETE", url: /\/v1\/monitors\/mon-\d+$/, times: Infinity, reply: { status: 204 } });
 }
 
 function mockMonitorDelete(id: string, reply: { status?: number; json?: unknown } = { status: 204 }) {
@@ -842,7 +871,186 @@ describe("DELETE /api/pages/:id", () => {
   });
 });
 
+describe("parallel adds", () => {
+  it("claimPublicAdd takes adds up to the limit, releasePublicAdd gives one back and never goes below zero", async () => {
+    expect(await claimPublicAdd(env.DB, "ip-a", 0)).toBe(false);
+    expect(await publicAddsToday(env.DB, "ip-a")).toBe(0);
+    expect(await claimPublicAdd(env.DB, "ip-a", 1)).toBe(true);
+    expect(await claimPublicAdd(env.DB, "ip-a", 1)).toBe(false);
+    expect(await publicAddsToday(env.DB, "ip-a")).toBe(1);
+    await releasePublicAdd(env.DB, "ip-a");
+    expect(await publicAddsToday(env.DB, "ip-a")).toBe(0);
+    await releasePublicAdd(env.DB, "ip-a"); // nothing to give back
+    await releasePublicAdd(env.DB, "ip-never-seen");
+    expect(await publicAddsToday(env.DB, "ip-a")).toBe(0);
+    expect(await claimPublicAdd(env.DB, "ip-a", 2)).toBe(true);
+    expect(await claimPublicAdd(env.DB, "ip-a", 2)).toBe(true);
+    expect(await claimPublicAdd(env.DB, "ip-a", 2)).toBe(false);
+    expect(await publicAddsToday(env.DB, "ip-b")).toBe(0); // other keys are separate
+  });
+
+  it("lets exactly the limit through when claims race", async () => {
+    const results = await Promise.all(Array.from({ length: 6 }, () => claimPublicAdd(env.DB, "ip-race", 2)));
+    expect(results.filter(Boolean)).toHaveLength(2);
+    expect(await publicAddsToday(env.DB, "ip-race")).toBe(2);
+  });
+
+  it("creates exactly one Monitor when one visitor fires several adds at once", async () => {
+    // TinyFetch is slow, so every request is past the plain daily check before any has written.
+    mockTinyFish({ fetchDelayMs: 25 });
+    const ip = { "CF-Connecting-IP": "203.0.113.70" };
+    const urls = [1, 2, 3, 4, 5].map((n) => `https://example.com/terms-${n}`);
+    const responses = await Promise.all(urls.map((url) => addPage({ url }, ip)));
+
+    expect(responses.map((r) => r.status).sort()).toEqual([201, 429, 429, 429, 429]);
+    for (const res of responses.filter((r) => r.status === 429)) {
+      expect(await json(res)).toEqual({ error: "daily_limit", reason: "One public page per day per visitor" });
+    }
+    expect(callsTo("POST", MONITORS_API)).toHaveLength(1);
+    expect(callsTo("POST", FETCH_API)).toHaveLength(1); // the losers never got as far as TinyFetch
+    expect(await count("pages")).toBe(1);
+    expect(await publicAddsToday(env.DB, await hashText("203.0.113.70" + env.WEBHOOK_SECRET))).toBe(1);
+  });
+
+  it("gives the daily add back when the add fails, so the visitor can try again", async () => {
+    const ip = { "CF-Connecting-IP": "203.0.113.71" };
+    const used = async () => publicAddsToday(env.DB, await hashText("203.0.113.71" + env.WEBHOOK_SECRET));
+
+    fetchMock.intercept({
+      method: "POST",
+      url: FETCH_API,
+      reply: { json: { results: [], errors: [{ url: PRICING_URL, error: "bot_blocked" }] } },
+    });
+    expect((await addPage({ url: PRICING_URL }, ip)).status).toBe(422);
+    expect(await used()).toBe(0);
+
+    fetchMock.intercept({
+      method: "POST",
+      url: FETCH_API,
+      reply: { json: { results: [{ url: PRICING_URL, final_url: PRICING_URL, title: "Blank", text: " " }], errors: [] } },
+    });
+    expect((await addPage({ url: PRICING_URL }, ip)).status).toBe(422);
+    expect(await used()).toBe(0);
+
+    fetchMock.intercept({ method: "POST", url: FETCH_API, reply: { json: fetchFixture } });
+    fetchMock.intercept({
+      method: "POST",
+      url: MONITORS_API,
+      reply: { status: 402, json: { error: { code: "INSUFFICIENT_CREDITS" } } },
+    });
+    expect((await addPage({ url: PRICING_URL }, ip)).status).toBe(502);
+    expect(await used()).toBe(0);
+
+    mockTinyFish();
+    expect((await addPage({ url: PRICING_URL }, ip)).status).toBe(201);
+    expect(await used()).toBe(1);
+    expect((await addPage({ url: "https://example.com/other" }, ip)).status).toBe(429);
+  });
+
+  it("never holds more than 24 Monitors when adds race for the last slot, and takes the losers' Monitors back", async () => {
+    for (let i = 0; i < MAX_MONITORS - 1; i++) await seed({ id: `p${i}` });
+    // All three adds see room for one more and create a Monitor before any of them has stored a page.
+    mockTinyFish({ holdCreatesUntil: 3 });
+    const responses = await Promise.all(
+      ["a", "b", "c"].map((n) => addPage({ url: `https://${n}.example.com/terms` }, ADMIN)),
+    );
+
+    const won = responses.filter((r) => r.status === 201).length;
+    const lost = responses.filter((r) => r.status === 409);
+    expect(won).toBeLessThanOrEqual(1);
+    expect(won + lost.length).toBe(3);
+    for (const res of lost) expect(await json(res)).toMatchObject({ error: "watchlist_full" });
+
+    expect(callsTo("POST", MONITORS_API)).toHaveLength(3); // each was billed
+    expect(fetchMock.calls.filter((c) => c.method === "DELETE")).toHaveLength(lost.length);
+    expect(await countMonitors(env.DB)).toBe(MAX_MONITORS - 1 + won);
+    // No loser left a half-written add behind.
+    expect(await count("pages")).toBe(MAX_MONITORS - 1 + won);
+    expect(await count("versions")).toBe(won);
+    expect(await count("runs")).toBe(won);
+  });
+
+  it("never holds more than the public slots when visitors race for the last one, and frees the losers' daily add", async () => {
+    for (let i = 0; i < PUBLIC_SLOTS - 1; i++) {
+      await seed({ id: `pub${i}`, added_by: "public", expires_at: `2026-12-0${i + 1}T00:00:00.000Z` });
+    }
+    mockTinyFish({ holdCreatesUntil: 3 });
+    const ips = ["203.0.113.81", "203.0.113.82", "203.0.113.83"];
+    const responses = await Promise.all(
+      ips.map((ip, i) => addPage({ url: `https://v${i}.example.com/terms` }, { "CF-Connecting-IP": ip })),
+    );
+
+    const won = responses.filter((r) => r.status === 201).length;
+    const lost = responses.filter((r) => r.status === 409);
+    expect(won).toBeLessThanOrEqual(1);
+    expect(won + lost.length).toBe(3);
+    for (const res of lost) {
+      const body = await json(res);
+      expect(body).toMatchObject({ error: "public_slots_full" });
+      expect(typeof body.reason).toBe("string");
+      expect(body.retry_after).toBe("2026-12-01T00:00:00.000Z");
+    }
+
+    expect(callsTo("POST", MONITORS_API)).toHaveLength(3);
+    expect(fetchMock.calls.filter((c) => c.method === "DELETE")).toHaveLength(lost.length);
+    expect(await countMonitors(env.DB, "public")).toBe(PUBLIC_SLOTS - 1 + won);
+    expect(await count("pages")).toBe(PUBLIC_SLOTS - 1 + won);
+    const used = await Promise.all(ips.map(async (ip) => publicAddsToday(env.DB, await hashText(ip + env.WEBHOOK_SECRET))));
+    expect(used.reduce((a, b) => a + b, 0)).toBe(won); // only the winner's visitor used the daily add
+  });
+});
+
+describe("secrets in logs and responses", () => {
+  it("never writes or returns the webhook secret when TinyFish echoes the webhook url back", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const webhook = `https://fineprint.test/hooks/monitor/${env.WEBHOOK_SECRET}`;
+    const echo = {
+      status: 400,
+      json: { error: { code: "INVALID_WEBHOOK_URL", message: `webhook_url ${webhook} is not allowed` } },
+    };
+    try {
+      fetchMock.intercept({ method: "POST", url: FETCH_API, reply: { json: fetchFixture } });
+      fetchMock.intercept({ method: "POST", url: MONITORS_API, reply: echo });
+      const add = await addPage({ url: PRICING_URL }, ADMIN);
+      expect(add.status).toBe(502);
+      expect(await add.text()).toBe('{"error":"monitor_create_failed","reason":"INVALID_WEBHOOK_URL"}');
+
+      await seed({ id: "p1" });
+      fetchMock.intercept({ method: "PATCH", url: `${MONITORS_API}/mon-p1`, reply: echo });
+      const patch = await patchPage("p1", { schedule_cron: "30 6,18 * * *" });
+      expect(patch.status).toBe(502);
+      expect(await patch.text()).toBe('{"error":"monitor_update_failed","reason":"INVALID_WEBHOOK_URL"}');
+
+      fetchMock.intercept({ method: "DELETE", url: `${MONITORS_API}/mon-p1`, reply: echo });
+      const del = await deletePage("p1");
+      expect(del.status).toBe(502);
+      expect(await del.text()).toBe('{"error":"monitor_delete_failed","reason":"INVALID_WEBHOOK_URL"}');
+
+      // Each failure was logged, with its status and code and nothing the upstream said.
+      expect(logged).toHaveBeenCalledTimes(3);
+      const lines = JSON.stringify(logged.mock.calls);
+      expect(lines).toContain("TinyFishError status=400 code=INVALID_WEBHOOK_URL");
+      expect(lines).not.toContain(env.WEBHOOK_SECRET);
+      expect(lines).not.toContain("is not allowed");
+    } finally {
+      logged.mockRestore();
+    }
+  });
+});
+
 describe("admin token", () => {
+  it("safeEqual is true only for identical strings", () => {
+    expect(safeEqual("test-admin", "test-admin")).toBe(true);
+    expect(safeEqual("", "")).toBe(true);
+    expect(safeEqual("pässword", "pässword")).toBe(true);
+    expect(safeEqual("test-admin", "test-admiN")).toBe(false);
+    expect(safeEqual("test-admin", "test-admin ")).toBe(false);
+    expect(safeEqual("test-admin", "")).toBe(false);
+    expect(safeEqual("", "x")).toBe(false);
+    expect(safeEqual("pässword", "passwörd")).toBe(false);
+  });
+
+
   it("never authenticates when the Worker has no ADMIN_TOKEN, even with an empty bearer token", async () => {
     await seed({ id: "p1" });
     const noToken = { DB: env.DB, STORE: env.STORE, TINYFISH_API_KEY: "k", ADMIN_TOKEN: "", WEBHOOK_SECRET: "s", PUBLIC_BASE_URL: "https://fineprint.test" };
