@@ -134,6 +134,16 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 - Task 13 tests: 13 in `tests/cronTick.test.ts`, 21 in `tests/pull.test.ts`, and additions to the client, db (the 0002 backfill on a database 0001 left), history, webhook, pages and cron tests (the step-order test now runs a real pull between facts upkeep and expiry). `tests/cron.test.ts` seeds its pages with no schedule, so the overdue step leaves them alone whatever the clock says, and its `cronDeps.pull` throws if called. Mutations that skip the raw-equality check, compare the tick with `>` instead of `>=`, sort newest tick first, skip the cron's spend pause, select paused pages, record spend in the client, or store a first pulled version as not a baseline each make tests fail.
 - Task 13, known limits: the admin replay reads stored raw bodies with `parsePayload`, which expects a webhook payload; a pulled run's raw body is run-now's `{run: {...}}`, so replay skips pulled `changed` runs (counted nowhere). The spec's anti-goal "Every version comes from a scheduled Monitor run" and its section 3 note that run-now is "never" used to make a version predate the section 2 amendment quoted in Task 13 and are not edited here.
 
+## Go-live, 3 Nov 2026
+
+- **Deploy.** D1 `fineprint` created (WEUR) and its id committed in `wrangler.jsonc`; R2 bucket `fineprint` created; migration 0001 applied (the first attempt got a Cloudflare 502 and applied nothing; the retry applied it); first deploy; `WEBHOOK_SECRET`, `ADMIN_TOKEN` and `TINYFISH_API_KEY` put as Worker secrets from files outside the repo; `PUBLIC_BASE_URL` set to https://fineprint.hamdanesmail12-7a9.workers.dev and redeployed. Later deploys carried Tasks 9, 11 and 13; migration 0002 was applied before the deploy that writes `trigger_kind`.
+- **Webhook rehearsal (spec section 9): TinyFish ran no scheduled check.** The spike Monitor was re-pointed at the Worker on `*/10 * * * *` and resumed at 14:17:53 UTC with a temporary page row. Structured log tails from 14:29 to 14:53 UTC saw no request from TinyFish, and the TinyFish dashboard showed no scheduled check executed after the resume (only a manual run, which by design sends no webhook). A second probe Monitor created with a webhook also never posted. The secret path itself was verified live (a probe with the production secret answered `unknown_monitor`). The spike Monitor was paused at 15:15:25 UTC. The cause is on TinyFish's side and has been raised with TinyFish.
+- **Design amendment and Task 13.** Webhooks stay the primary trigger; an overdue check (no run 15 minutes after its scheduled time) is pulled with run-now by the hourly cron, one Worker invocation per pull through a self service binding, recorded under TinyFish's run id with trigger `pull`. Fallback rehearsal at 16:07 UTC: TinyFish run `bb6427b7-4d5f-4373-801e-66fd27c41b07`, outcome `baseline`, screenshot and source captured. Run-now works on a paused Monitor.
+- **Vercel pricing reuses the rehearsal Monitor.** The rehearsal page row was converted into the real Vercel pricing page (new page id, label and kind from `pages.json`, schedule `0 0,12 * * *`, standard purpose) and the spike Monitor `e92c04d7-9243-4abe-b7fa-09a769c5a9c7` was re-pointed and resumed, so the 20 pages run on 20 Monitors. Its first version is the 16:07 pull; its baseline facts went through the single facts queue.
+- **Registration, 16:17 to 16:26 UTC.** 20 of 20: 19 new pages plus Vercel. Item 5 (US visa bulletin) was refused by TinyFetch (`target_http_error`), so item 21 was used. Details in `docs/registration-log.md`. All 20 baselines have their screenshot and source; the facts for the 13 pricing and fee pages run one at a time, chained by TinyAgent's completion callback (which does reach the Worker) and the hourly cron.
+- **Webhook secret rotated, 16:28 UTC.** The previous secret appeared in a dashboard screenshot, so a new `WEBHOOK_SECRET` was put on the Worker and `POST /api/admin/rotate-webhook` re-pointed all 20 Monitors (`{updated: 20, failed: []}`); the new secret is accepted and the old one rejected. Facts runs started just before the rotation carry the old callback URL; the cron's follow-up records them instead.
+- **Spend at 16:28 UTC (from `/api/stats`):** $0.30 in total: 20 Monitor checks $0.10 (19 baselines at creation, 1 pull), 20 screenshots $0.04, Agent steps $0.16 so far. The remaining facts runs add roughly $1 over the next hours.
+
 ## Live TinyFish calls during the build
 
 | When (UTC) | Call | Why | Cost |
@@ -146,6 +156,13 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 | 2026-11-03 13:26 | TinyFetch POST, `axa-schengen.com/en/travel-insurance/benefits` | Task 12a: confirm first insurance pick (200, 12,943 characters, no per-URL error) | $0.00 |
 | 2026-11-03 13:26 | TinyFetch POST, `dni.ae/personal-insurance/medical/dha_ebp/` | Task 12a: confirm second insurance pick (200, 1,946 characters, no per-URL error) | $0.00 |
 
+| 2026-11-03 14:17-15:15 | spike Monitor GET and PATCHes (re-point, resume, pause) | webhook rehearsal | $0.00 |
+| 2026-11-03 14:5x, 16:28 | `GET /v1/monitors` (counts only) | check list paging; count monitors after registration and rotation | $0.00 |
+| 2026-11-03 16:07 | run-now pull through `/api/admin/pull` | Task 13 fallback rehearsal | $0.005 check + $0.002 screenshot |
+| 2026-11-03 16:17-16:26 | 19 page adds (TinyFetch validation, Monitor create with baseline, screenshot, HTML source) | registration | $0.095 checks + $0.038 screenshots |
+| 2026-11-03 16:2x onward | TinyAgent facts runs, one at a time | baseline facts for the 13 pricing and fee pages | $0.016 per step, recorded in the spend table |
+| 2026-11-03 16:28 | 20 Monitor PATCHes via rotate-webhook | secret rotation | $0.00 |
+
 A few earlier TinySearch and TinyFetch calls were made to pick the four pages chosen during the build before a machine restart. They are free ($0.00) and are not itemised because no record of them survived the restart. The four rows above are the confirmation calls made afterwards.
 
-Total so far: $0.002
+Total during the build: $0.002. From go-live on, the app's own spend ledger (`/api/stats`) is the record: $0.30 at 16:28 UTC on 3 Nov.
