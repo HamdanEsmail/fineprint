@@ -55,6 +55,14 @@ export async function tinyfishFetch(
   headers.set("Content-Type", "application/json");
   const res = await fetch(url, { ...rest, headers });
   if (!res.ok) throw await errorFrom(res);
-  if (spend) await recordSpend(env.DB, spend.kind, spend.amountUsd, spend.ref);
+  if (spend) {
+    // A 2xx is billed and may have created something (a Monitor); a failed ledger write must
+    // not discard the response. Only the kind is logged: no key, url or error text.
+    try {
+      await recordSpend(env.DB, spend.kind, spend.amountUsd, spend.ref);
+    } catch {
+      console.error("spend write failed", spend.kind);
+    }
+  }
   return res;
 }

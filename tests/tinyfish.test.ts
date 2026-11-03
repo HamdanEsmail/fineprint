@@ -64,6 +64,30 @@ describe("tinyfishFetch", () => {
     expect(await spendRows()).toEqual([{ kind: "screenshot", amount_usd: 0.002, ref: PRICING_URL }]);
   });
 
+  it("returns the response and logs, instead of throwing, when the spend write fails after a 2xx", async () => {
+    fetchMock.intercept({ method: "POST", url: BROWSER_API, reply: { json: { session: "made" } } });
+    const brokenDb = {
+      prepare() {
+        throw new Error("D1 is down");
+      },
+    } as unknown as D1Database;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await tinyfishFetch({ ...env, DB: brokenDb, TINYFISH_API_KEY: env.TINYFISH_API_KEY }, BROWSER_API, {
+        method: "POST",
+        body: "{}",
+        spend: { kind: "screenshot", amountUsd: 0.002, ref: PRICING_URL },
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ session: "made" });
+      expect(logged).toHaveBeenCalledWith("spend write failed", "screenshot");
+      // The log line names the kind only: no key, no url, no error text.
+      expect(JSON.stringify(logged.mock.calls)).not.toContain("test-tinyfish-key");
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
   it("maps a 402 to TinyFishError INSUFFICIENT_CREDITS and records no spend", async () => {
     fetchMock.intercept({
       method: "POST",
