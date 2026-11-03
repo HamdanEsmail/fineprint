@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fineprint",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fineprint",
+      "database_id": "TBD-after-create",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "STORE",
+      "bucket_name": "fineprint"
+    }
+  ],
+  "triggers": {
+    "crons": ["0 * * * *"]
+  },
+  "vars": {
+    "PUBLIC_BASE_URL": "http://localhost:8787"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

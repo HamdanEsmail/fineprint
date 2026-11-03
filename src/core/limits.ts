@@ -1,0 +1,22 @@
+// Hard caps. Every limit in the product comes from here.
+
+/** Monitors we will ever hold on TinyFish at once. */
+export const MAX_MONITORS = 24;
+/** Of those, slots open to public visitors. */
+export const PUBLIC_SLOTS = 4;
+/** Public pages are recorded for this long, then removed. */
+export const PUBLIC_TTL_DAYS = 7;
+export const PUBLIC_ADDS_PER_IP_PER_DAY = 1;
+
+/** The facts run on a pricing page may take at most this many Agent steps... */
+export const AGENT_MAX_STEPS = 6;
+/** ...and this long. */
+export const AGENT_MAX_DURATION_SECONDS = 120;
+
+/** A version whose capture keeps failing is retried this many times, then left as it is. */
+export const CAPTURE_MAX_ATTEMPTS = 3;
+/** Full-page screenshots are cut off at this height in pixels. */
+export const SCREENSHOT_MAX_HEIGHT = 8000;
+
+/** When total spend reaches this many US dollars, the Worker pauses everything that costs money. */
+export const SPEND_PAUSE_USD = 8;

@@ -1,0 +1,31 @@
+{
+  "name": "fineprint",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Fineprint: a version history for the terms, fees and rules of web pages, recorded from TinyFish Monitor webhooks.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit && vitest run && wrangler deploy --dry-run",
+    "migrate:local": "wrangler d1 migrations apply fineprint --local",
+    "migrate:remote": "wrangler d1 migrations apply fineprint --remote"
+  },
+  "dependencies": {
+    "diff": "9.0.0",
+    "hono": "4.13.16"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.5.0",
+    "@cloudflare/workers-types": "5.20261103.1",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0",
+    "wrangler": "4.156.2"
+  }
+}
