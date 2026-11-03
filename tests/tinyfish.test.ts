@@ -402,7 +402,7 @@ describe("agent", () => {
     expect(sleep).toHaveBeenCalledTimes(1);
   });
 
-  it("getRun asks for no screenshots or html and returns status, result and step count", async () => {
+  it("getRun asks for no screenshots or html and returns status, result, step count and start time", async () => {
     const id = agentSchemaRun.run_id;
     fetchMock.intercept({
       method: "GET",
@@ -412,14 +412,19 @@ describe("agent", () => {
         return Response.json(agentSchemaRun);
       },
     });
-    expect(await getRun(env, id)).toEqual({ status: "COMPLETED", result: { plans: [] }, num_of_steps: 3 });
+    expect(await getRun(env, id)).toEqual({
+      status: "COMPLETED",
+      result: { plans: [] },
+      num_of_steps: 3,
+      created_at: agentSchemaRun.created_at,
+    });
 
     fetchMock.intercept({
       method: "GET",
       url: "https://agent.tinyfish.ai/v1/runs/r2?screenshots=none&html=none",
       reply: { json: { run_id: "r2", status: "RUNNING" } },
     });
-    expect(await getRun(env, "r2")).toEqual({ status: "RUNNING", result: null, num_of_steps: null });
+    expect(await getRun(env, "r2")).toEqual({ status: "RUNNING", result: null, num_of_steps: null, created_at: null });
   });
 
   it("parseFacts accepts the schema shape and rejects junk", () => {

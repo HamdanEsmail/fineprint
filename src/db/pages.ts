@@ -1,4 +1,4 @@
-import type { AddedBy, PageRow } from "./types";
+import type { AddedBy, PageRow, PageStatus } from "./types";
 
 export type NewPage = Omit<PageRow, "created_at" | "last_run_at" | "last_change_at">;
 
@@ -108,6 +108,45 @@ export async function updatePage(db: D1Database, id: string, patch: PagePatch): 
     .prepare(`UPDATE pages SET ${sets.join(", ")} WHERE id = ?`)
     .bind(...values, id)
     .run();
+}
+
+/**
+ * Sets a page's status only while it is one of `from`; true when it was changed. A status
+ * worked out from an earlier read (the cron's) then never overwrites a newer one.
+ */
+export async function setPageStatusIf(
+  db: D1Database,
+  id: string,
+  status: PageStatus,
+  from: readonly PageStatus[],
+): Promise<boolean> {
+  if (from.length === 0) return false;
+  const result = await db
+    .prepare(`UPDATE pages SET status = ? WHERE id = ? AND status IN (${from.map(() => "?").join(", ")})`)
+    .bind(status, id, ...from)
+    .run();
+  return result.meta.changes === 1;
+}
+
+/** Public pages whose week is over (`expires_at` at or before `nowIso`) and that are not yet expired, oldest expiry first. */
+export async function expiredPublicPages(db: D1Database, nowIso: string): Promise<PageRow[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM pages
+       WHERE added_by = 'public' AND expires_at IS NOT NULL AND expires_at <= ? AND status != 'expired'
+       ORDER BY expires_at, rowid`,
+    )
+    .bind(nowIso)
+    .all<PageRow>();
+  return results;
+}
+
+/** Active pages that hold a Monitor, ordered by creation: the ones the health check compares with TinyFish. */
+export async function activeMonitoredPages(db: D1Database): Promise<(PageRow & { monitor_id: string })[]> {
+  const { results } = await db
+    .prepare("SELECT * FROM pages WHERE status = 'active' AND monitor_id IS NOT NULL ORDER BY created_at, rowid")
+    .all<PageRow & { monitor_id: string }>();
+  return results;
 }
 
 /**

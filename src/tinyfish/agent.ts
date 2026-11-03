@@ -31,8 +31,11 @@ export const FACTS_SCHEMA = {
   required: ["items"],
 };
 
-/** What the Agent run looks like to the rest of the Worker. */
-export type AgentRun = { status: string; result: unknown; num_of_steps: number | null };
+/**
+ * What the Agent run looks like to the rest of the Worker. `created_at` is when TinyAgent
+ * accepted the run, as TinyAgent writes it (e.g. "2026-11-03T07:35:08Z"), or null.
+ */
+export type AgentRun = { status: string; result: unknown; num_of_steps: number | null; created_at: string | null };
 
 /** The account allows 2 concurrent runs, shared with other projects: wait and retry when full. */
 const RATE_LIMIT_WAIT_MS = 60_000;
@@ -84,11 +87,12 @@ export async function getRun(env: Env, runId: string): Promise<AgentRun> {
   const res = await tinyfishFetch(env, `${RUNS_API}/${encodeURIComponent(runId)}?screenshots=none&html=none`, {
     method: "GET",
   });
-  const json = (await res.json()) as { status?: unknown; result?: unknown; num_of_steps?: unknown };
+  const json = (await res.json()) as { status?: unknown; result?: unknown; num_of_steps?: unknown; created_at?: unknown };
   return {
     status: typeof json.status === "string" ? json.status : "UNKNOWN",
     result: json.result ?? null,
     num_of_steps: typeof json.num_of_steps === "number" ? json.num_of_steps : null,
+    created_at: typeof json.created_at === "string" ? json.created_at : null,
   };
 }
 

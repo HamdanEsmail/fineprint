@@ -325,6 +325,42 @@ export async function claimFactsSlot(db: D1Database, versionId: string, token: s
   return result.meta.changes === 1;
 }
 
+/**
+ * Every version that holds a `claim:<iso>` token in `agent_run_id`, whatever its status (a
+ * start that may have created a run keeps its claim even after it used the last attempt),
+ * oldest first. The cron releases the stale ones.
+ */
+export async function listFactsClaims(db: D1Database): Promise<{ id: string; agent_run_id: string }[]> {
+  const { results } = await db
+    .prepare("SELECT id, agent_run_id FROM versions WHERE agent_run_id LIKE 'claim:%' ORDER BY captured_at, rowid")
+    .all<{ id: string; agent_run_id: string }>();
+  return results;
+}
+
+/** A version with a facts run in flight. */
+export type InFlightRun = VersionSummary & { agent_run_id: string };
+
+/**
+ * Versions with a facts run in flight: a real run id (not a claim token) and no facts yet,
+ * captured at or before `olderThanIso`, oldest first, without `text`. Selected by the run
+ * id, never by `capture_status`: a version can hold the slot while it is `partial` or even
+ * `failed`.
+ */
+export async function inFlightFactsRuns(db: D1Database, olderThanIso: string): Promise<InFlightRun[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT ${summaryColumns()} FROM versions
+       WHERE agent_run_id IS NOT NULL
+         AND agent_run_id NOT LIKE 'claim:%'
+         AND facts_json IS NULL
+         AND captured_at <= ?
+       ORDER BY captured_at, rowid`,
+    )
+    .bind(olderThanIso)
+    .all<InFlightRun>();
+  return results;
+}
+
 /** A version waiting in the facts queue, with its page's url. */
 export type FactsCandidate = VersionSummary & { url: string };
 
