@@ -24,6 +24,13 @@ export const CAPTURE_MAX_ATTEMPTS = 3;
 export const REPAIR_PER_TICK = 3;
 /** The cron's health check looks up at most this many Monitors missing from the list, one request each, per tick. */
 export const MONITOR_LOOKUPS_PER_TICK = 3;
+/**
+ * The cron pulls at most this many overdue checks per tick (run-now, each in its own Worker
+ * invocation), oldest overdue tick first. Each pull is one of the cron's 50 subrequests, beside
+ * facts upkeep, expiry, health and repair; with staggered twice-daily schedules about two pages come
+ * due an hour, so the cap only matters for catching up.
+ */
+export const PULLS_PER_TICK = 20;
 /** Full-page screenshots are cut off at this height in pixels. */
 export const SCREENSHOT_MAX_HEIGHT = 8000;
 

@@ -67,6 +67,7 @@ function runInput(over: Partial<RunRow> = {}): RunRow {
     noise_reason: null,
     raw_key: "raw/mrun-1.json",
     received_at: T1,
+    trigger_kind: "webhook",
     ...over,
   };
 }
@@ -229,6 +230,46 @@ describe("runs", () => {
     // A different monitor_run_id is a new run.
     expect(await insertRun(db, runInput({ id: "run-3", monitor_run_id: "mrun-3" }))).toBe("inserted");
     expect(await countRuns(db)).toBe(2);
+  });
+
+  it("insertRun stores the run's trigger", async () => {
+    for (const [n, trigger] of (["create", "webhook", "pull"] as const).entries()) {
+      await insertRun(db, runInput({ id: `run-${trigger}`, monitor_run_id: `mrun-t${n}`, trigger_kind: trigger }));
+    }
+    const { results } = await db.prepare("SELECT id, trigger_kind FROM runs ORDER BY rowid").all();
+    expect(results).toEqual([
+      { id: "run-create", trigger_kind: "create" },
+      { id: "run-webhook", trigger_kind: "webhook" },
+      { id: "run-pull", trigger_kind: "pull" },
+    ]);
+  });
+
+  it("migration 0002 marks the add-page baselines create, every other recorded run webhook, and empties the diff cache", async () => {
+    // A database as 0001 left it, with the rows the add flow and the webhook wrote before 0002.
+    await reset();
+    const [first, second] = env.TEST_MIGRATIONS;
+    expect(second!.name).toBe("0002_run_trigger.sql");
+    await applyD1Migrations(db, [first!]);
+    const insert = db.prepare(
+      "INSERT INTO runs (id, page_id, monitor_run_id, outcome, is_baseline, raw_key, received_at) VALUES (?, 'page-1', ?, ?, ?, ?, ?)",
+    );
+    await db.batch([
+      insert.bind("run-base", "mrun-base", "baseline", 1, null, T1),
+      insert.bind("run-same", "mrun-same", "unchanged", 0, "raw/mrun-same.json", T2),
+      insert.bind("run-changed", "mrun-changed", "changed", 0, "raw/mrun-changed.json", T3),
+    ]);
+    await putCachedDiff(db, "v1", "v2", '{"from":{},"to":{}}');
+
+    await applyD1Migrations(db, env.TEST_MIGRATIONS);
+
+    const { results } = await db.prepare("SELECT id, trigger_kind FROM runs ORDER BY rowid").all();
+    expect(results).toEqual([
+      { id: "run-base", trigger_kind: "create" },
+      { id: "run-same", trigger_kind: "webhook" },
+      { id: "run-changed", trigger_kind: "webhook" },
+    ]);
+    // A diff stored before 0002 has no trigger on its ends; it is computed again on the next request.
+    expect(await getCachedDiff(db, "v1", "v2")).toBeNull();
   });
 
   it("insertRun stores booleans as 1/0 and keeps unset judgment fields NULL", async () => {

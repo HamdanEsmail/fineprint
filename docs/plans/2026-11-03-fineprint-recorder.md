@@ -671,6 +671,61 @@ git commit -m "feat: curated page list, registration script, deploy runbook and 
 
 ---
 
+### Task 13: Overdue-check fallback (pull with run-now)
+
+*Added 3 Nov 2026 after the day-1 rehearsal: TinyFish's scheduler executed no scheduled check for our monitors, so no webhook arrived. Webhook delivery stays the primary trigger; pulling an overdue check with run-now is the documented fallback. Spec amendment (section 2): "Fineprint never reads a page itself; every version comes from a TinyFish Monitor run, delivered by webhook or, when a scheduled run is overdue, pulled with run-now and recorded under that run's id."*
+
+**Files:**
+- Create: `migrations/0002_run_trigger.sql`, `src/core/cronTick.ts`, `src/handlers/pull.ts` (or a route in `src/handlers/admin.ts` if Task 10 created it), `tests/cronTick.test.ts`, `tests/pull.test.ts`
+- Modify: `wrangler.jsonc` (self service binding), `src/env.ts`, `src/index.ts`, `src/cron.ts`, `src/handlers/pages.ts` (baseline run trigger), `src/handlers/webhooks.ts` (trigger on webhook runs), `src/handlers/history.ts` (expose trigger), `src/db/runs.ts`, `src/db/versions.ts`, `src/core/limits.ts`, `src/tinyfish/monitor.ts` (`runMonitorNow`), `README.md` (one paragraph), `docs/plans/2026-11-03-fineprint-recorder.md` (this task's text), `docs/build-log.md`, existing tests as needed
+
+**Interfaces:**
+- `migrations/0002_run_trigger.sql`: `ALTER TABLE runs ADD COLUMN trigger_kind TEXT NOT NULL DEFAULT 'webhook'` and `UPDATE runs SET trigger_kind = 'create' WHERE is_baseline = 1 AND outcome = 'baseline'`. Values: `create` (the baseline returned by Monitor creation), `webhook` (a scheduled run delivered to `/hooks/monitor`), `pull` (an overdue check pulled with run-now). The column is named `trigger_kind` (TRIGGER is an SQL keyword); the API exposes it as `trigger`.
+- `src/core/cronTick.ts`: `lastTickAtOrBefore(cron: string, at: Date): Date | null` for standard 5-field UTC cron (`*`, numbers, lists, ranges, `*/n` and `a-b/n` steps; day-of-month and day-of-week use the usual OR rule when both are restricted). Bounded search (iterate days backwards at most 400 days; within a day, hours and minutes descending), so it costs microseconds for our schedules. Returns null for an unparseable cron.
+- `src/tinyfish/monitor.ts`: `runMonitorNow(env, monitorId): Promise<{ runId: string; text: string | null; errors: unknown[]; raw: string }>` — `POST /v1/monitors/{id}/runs`; the 201 body is `{run: {id, is_baseline, results: [{text, ...}], errors}}` (verified in the spike, `tests/fixtures/tinyfish/monitor-runnow.json`). Through `tinyfishFetch`; spend `{kind: "monitor_check", amountUsd: PRICES.monitor_check}` is recorded ONLY when the run has text and no errors (TinyFish does not bill failed checks), so it is recorded after the body is inspected rather than via the client's spend option (or the option is passed only on success); the choice is noted in the build log.
+- `POST /api/admin/pull/:pageId` (adminOnly): the one place a pull happens. Loads the page (404 unknown; 409 `{error: "not_pullable"}` when status is `expired` or there is no `monitor_id`); calls `runMonitorNow`; if the run has no text or has errors → 200 `{ok: true, pulled: false, reason}` and records nothing (the page stays overdue for the next tick); otherwise stores the raw 201 body at `raw/<run id>.json`, then records the run through the SAME path a webhook payload takes (the shared gate, reused, not copied): `insertRun` with `monitor_run_id = run id` (idempotent: a duplicate id → 200 `{ok: true, duplicate: true}` and nothing else), `trigger_kind "pull"`, `judgment_*` null, `received_at = now`; outcome computed by Fineprint (below); spend; `pages.last_run_at`; and for a real change a version (`captured_at = received_at`, `judgment_summary` null, `capture_status "pending"`) with `c.executionCtx.waitUntil(captureVersion(...))` — in this invocation, exactly as the webhook does.
+- **Outcome for a pull (ruling R71):** no version yet → `baseline` and a version is created; `run text === latest version text` (plain string equality, no normalization) → `unchanged` (heartbeat run, nothing else); otherwise → `changed`, then the normal gate: normalized-identical → suppressed noise (`noise_suppressed 1`, reason `normalized_identical`), else a new version. This matches the webhook's semantics (TinyFish says `changed` only when the markdown differs) and skips normalization in the common unchanged case.
+- **Fan-out (ruling R69):** every pull runs in its own Worker invocation so it gets the same CPU (10 ms) and subrequest (50) budget a webhook gets. `wrangler.jsonc` gains a self service binding `services: [{ binding: "SELF", service: "fineprint" }]`; `Env` gains `SELF: Fetcher`. The cron calls `env.SELF.fetch(new Request("https://fineprint.internal/api/admin/pull/<pageId>", {method: "POST", headers: {Authorization: "Bearer <ADMIN_TOKEN>"}}))` per overdue page, sequentially, through a seam `cronDeps.pull(env, pageId)` so tests can call the handler in-process. Verify (and record in the build log): `wrangler deploy --dry-run` accepts the self binding; the vitest plugin starts with it (if the plugin cannot resolve a self binding, give tests a stub `SELF` binding or rely on the seam — keep `npm run check` green). If a self binding proves impossible, stop and report (do not loop pulls inline: 20 normalizations would exceed the CPU limit).
+- **Overdue rule:** for each page with `status = 'active'` and a `monitor_id`: `T = lastTickAtOrBefore(page.schedule_cron, now − 15 min)`; overdue iff `T` is not null and there is no run row for the page with `received_at >= T` (any trigger). Pages created after `T` have their `create` run after `T`, so they are not overdue.
+- **Cron:** a new step "overdue pulls" runs right after facts upkeep and before expiry/health/repair. Skips everything when the spend pause is reached. At most `PULLS_PER_TICK = 20` pulls per tick (ruling R70: 25 pulls plus upkeep ~6, expiry ≤4, health ≤4 and repair ≤15 would exceed 50 subrequests; with staggered twice-daily schedules about 2 pages come due per hour, so the cap only matters for catch-up), oldest overdue tick first. Each pull's failure is logged (status/code only) and does not stop the others. `runCron` returns `pulled` in its result and summary log line.
+- **Visible honesty:** `GET /api/pages/:id/versions/:vid`, as-of, the diff's `from`/`to` blocks, and `/api/changes` items expose `trigger` (the trigger of the run that created the version; `create` for a baseline). `/api/stats` adds `runs_by_trigger: {create, webhook, pull}` (all keys always present). README gains one paragraph: "Monitor webhooks are the primary trigger. When a scheduled check is overdue (no run 15 minutes after its scheduled time), the hourly job asks TinyFish to run that Monitor now and records the result under TinyFish's run id, marked `pull`. Fineprint never fetches a page to detect changes itself." — kept accurate to the code.
+- The add-page path records its baseline run with `trigger_kind "create"`; the webhook path with `"webhook"`.
+
+**Tests (tests/pull.test.ts, tests/cronTick.test.ts, plus updates):**
+- cronTick: `"0 0,12 * * *"`, `"31 1,13 * * *"`, `"*/10 * * * *"`, `"0 */6 * * *"`, `"17 3,15 * * *"`, a dom/dow OR case, an invalid cron → null; boundary: `at` exactly on a tick returns that tick.
+- an overdue page gets exactly one pull and one run row (`trigger_kind pull`), with spend 0.005; a pull whose text differs creates a version and schedules capture in that invocation
+- a page whose webhook run arrived after the tick is not pulled; a page with no tick yet past grace is not pulled; paused and expired pages are never pulled; nothing is pulled at the spend pause; the cap (21 overdue → 20 pulls, oldest tick first)
+- a duplicate run id (a late webhook with the pulled run's id, or a second pull answering the same id) is a no-op
+- a pull whose response has no text or has errors records nothing (no run, no spend, no raw object) and the page is pulled again next tick
+- unchanged raw text → `unchanged` run, no normalization path taken (assert no version and no noise flag); raw differs but normalized equal → `changed` + suppressed
+- `trigger` appears in the version JSON, the changes feed and `runs_by_trigger` in stats
+- admin pull endpoint: 401 without token; 404 unknown page; 409 expired page
+
+**Deploy note:** run `npm run migrate:remote` (0002) BEFORE the deploy that writes `trigger_kind`.
+
+- [ ] **Step 1: Write the failing tests** (`tests/cronTick.test.ts`, `tests/pull.test.ts`, and the updates to the cron, history, db, webhook, pages and client tests)
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `npx vitest run tests/cronTick.test.ts tests/pull.test.ts`
+Expected: FAIL
+
+- [ ] **Step 3: Implement the migration, `lastTickAtOrBefore`, `runMonitorNow`, the pull route, the cron step and the `trigger` fields**
+
+- [ ] **Step 4: Run the full check**
+
+Run: `npm run check`
+Expected: typecheck clean, all test files pass, `wrangler deploy --dry-run` lists `env.SELF`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add migrations/0002_run_trigger.sql src tests wrangler.jsonc README.md docs
+git commit -m "feat: pull overdue Monitor checks with run-now as a recorded fallback"
+```
+
+---
+
 ## After Task 12
 
 Stop. Do not deploy, do not create the D1 database or R2 bucket, and do not push, until the Cloudflare account is ready and the GitHub repo exists. Then follow `docs/runbook.md` exactly, record the registration log, and report `/api/stats` output plus the first real webhook payload's shape.

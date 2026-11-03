@@ -424,6 +424,7 @@ async function createPage(c: AppContext, req: NewPageRequest): Promise<Response>
         noise_reason: null,
         raw_key: null,
         received_at: nowIso,
+        trigger_kind: "create",
       });
       if (outcome === "duplicate") throw new Error("the baseline run id is already recorded");
       await insertVersion(db, {

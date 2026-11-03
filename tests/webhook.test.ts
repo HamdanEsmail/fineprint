@@ -178,6 +178,7 @@ describe("POST /hooks/monitor/:secret", () => {
     expect(run).toMatchObject({
       page_id: pageIdFor(unchanged),
       monitor_run_id: unchanged.id,
+      trigger_kind: "webhook",
       outcome: "unchanged",
       is_baseline: 0,
       judgment_relevant: null,
@@ -239,6 +240,7 @@ describe("POST /hooks/monitor/:secret", () => {
 
     expect(run).toMatchObject({
       monitor_run_id: changedReal.id,
+      trigger_kind: "webhook",
       outcome: "changed",
       judgment_relevant: 1,
       judgment_summary: changedReal.judgment.summary,

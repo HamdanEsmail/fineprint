@@ -162,7 +162,8 @@ function logError(what: string, err: unknown): void {
 
 // --- Spend --------------------------------------------------------------------------
 
-async function spendPaused(db: D1Database): Promise<boolean> {
+/** True once total spend has reached SPEND_PAUSE_USD: nothing that costs money starts (captures, facts runs, overdue pulls). */
+export async function spendPaused(db: D1Database): Promise<boolean> {
   const row = await db.prepare("SELECT COALESCE(SUM(amount_usd), 0) AS total FROM spend").first<{ total: number }>();
   return (row?.total ?? 0) >= SPEND_PAUSE_USD;
 }

@@ -4,12 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { captureDeps } from "../src/capture";
 import { CAPTURE_MAX_ATTEMPTS, REPAIR_PER_TICK } from "../src/core/limits";
 import { PRICES } from "../src/core/spend";
-import { runCron } from "../src/cron";
+import { cronDeps, runCron } from "../src/cron";
 import { getPage, insertPage, type NewPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { PageRow, SpendRow, VersionRow } from "../src/db/types";
 import { getVersion, insertVersion, listVersions, type NewVersion } from "../src/db/versions";
 import worker from "../src/index";
+import { callWorker } from "./helpers/app";
 import { fetchMock } from "./helpers/fetch-mock";
 
 const FETCH_API = "https://api.fetch.tinyfish.ai/";
@@ -52,7 +53,9 @@ async function seedPage(over: Partial<NewPage> = {}): Promise<string> {
     label: id,
     kind: "policy",
     monitor_id: monitorOf(id),
-    schedule_cron: "0 0,12 * * *",
+    // No schedule, so the overdue-pull step leaves these pages alone whatever the clock says
+    // (tests/pull.test.ts covers that step); a test that wants a pull sets one.
+    schedule_cron: null,
     purpose: "watch",
     status: "active",
     added_by: "curated",
@@ -80,6 +83,7 @@ async function seedVersion(pageId: string, over: Partial<NewVersion> = {}): Prom
     noise_reason: null,
     raw_key: null,
     received_at: ago(180),
+    trigger_kind: "create",
   });
   await insertVersion(env.DB, {
     id,
@@ -164,6 +168,7 @@ const callList = () => fetchMock.calls.map((c) => `${c.method} ${c.url}`);
 
 // --- Setup ----------------------------------------------------------------------------
 
+const realPull = cronDeps.pull;
 let shot: MockInstance<typeof captureDeps.screenshotFullPage>;
 let sleep: MockInstance<(ms: number) => Promise<void>>;
 let log: MockInstance<typeof console.log>;
@@ -192,11 +197,16 @@ beforeEach(async () => {
   captureDeps.sleep = instant.sleep;
   log = vi.spyOn(console, "log").mockImplementation(() => {});
   errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+  // A pull nobody expected fails the step, which logs it, which fails the test.
+  cronDeps.pull = async () => {
+    throw new Error("unexpected pull");
+  };
 });
 
 afterEach(() => {
   const unexpected = errorLog.mock.calls.flat().map(String).join(" ");
   fetchMock.reset();
+  cronDeps.pull = realPull;
   shot.mockRestore();
   log.mockRestore();
   errorLog.mockRestore();
@@ -221,10 +231,10 @@ describe("repair", () => {
     // Under 10 minutes old: the webhook's own capture may still be running, so it is left alone.
     const fresh = await seedVersion(pageId, { html_key: "html/f.html", capture_status: "partial", capture_attempts: 1, captured_at: ago(5) });
 
-    expect(await runCron(env)).toEqual({ repaired: 1, expired: 0, unhealthy: [] });
+    expect(await runCron(env)).toEqual({ repaired: 1, expired: 0, unhealthy: [], pulled: 0 });
     expect(await version(old)).toMatchObject({ capture_status: "partial", capture_attempts: 2 });
 
-    expect(await runCron(env)).toEqual({ repaired: 1, expired: 0, unhealthy: [] });
+    expect(await runCron(env)).toEqual({ repaired: 1, expired: 0, unhealthy: [], pulled: 0 });
     expect(await version(old)).toMatchObject({
       screenshot_key: null,
       html_key: "html/h.html",
@@ -234,7 +244,7 @@ describe("repair", () => {
     });
 
     // Failed: never retried again.
-    expect(await runCron(env)).toEqual({ repaired: 0, expired: 0, unhealthy: [] });
+    expect(await runCron(env)).toEqual({ repaired: 0, expired: 0, unhealthy: [], pulled: 0 });
     expect(shot).toHaveBeenCalledTimes(2);
     expect(await version(fresh)).toMatchObject({ capture_status: "partial", capture_attempts: 1 });
     expect(fetchMock.calls.filter((c) => c.url === FETCH_API)).toEqual([]); // the source was already stored
@@ -556,7 +566,7 @@ describe("expiry", () => {
 
     const result = await runCron(env);
 
-    expect(result).toEqual({ repaired: 0, expired: 1, unhealthy: [] });
+    expect(result).toEqual({ repaired: 0, expired: 1, unhealthy: [], pulled: 0 });
     expect(deleteCalls()).toEqual([monitorUrl(monitorOf(due))]);
     expect(await page(due)).toMatchObject({ status: "expired", added_by: "public" });
     expect((await listVersions(env.DB, due)).map((x) => x.id)).toEqual([v]);
@@ -596,13 +606,13 @@ describe("health", () => {
     const pause = (list: MonitorEntry[]) => list.map((m) => (m.id === monitorOf(paused) ? { ...m, status: "paused" } : m));
     mockMonitors(pause, 1);
 
-    expect(await runCron(env)).toEqual({ repaired: 0, expired: 0, unhealthy: [paused] });
+    expect(await runCron(env)).toEqual({ repaired: 0, expired: 0, unhealthy: [paused], pulled: 0 });
     expect((await page(paused)).status).toBe("failed");
     expect((await page(fine)).status).toBe("active");
 
     // Health only flags: the Monitor running again does not un-fail the page.
     mockMonitors(undefined, 1);
-    expect(await runCron(env)).toEqual({ repaired: 0, expired: 0, unhealthy: [] });
+    expect(await runCron(env)).toEqual({ repaired: 0, expired: 0, unhealthy: [], pulled: 0 });
     expect((await page(paused)).status).toBe("failed");
   });
 
@@ -708,32 +718,42 @@ describe("runCron", () => {
     let result: unknown;
     const logged = await quietErrors(async () => (result = await runCron(env)));
 
-    expect(result).toEqual({ repaired: 1, expired: 1, unhealthy: [] });
+    expect(result).toEqual({ repaired: 1, expired: 1, unhealthy: [], pulled: 0 });
     expect(await version(repairable)).toMatchObject({ capture_status: "complete" });
     expect((await page(due)).status).toBe("expired");
     expect(logged).toContain("INTERNAL");
     expect(logged).not.toContain("test-tinyfish-key");
-    expect(log).toHaveBeenCalledWith("cron", { repaired: 1, expired: 1, unhealthy: 0 });
+    expect(log).toHaveBeenCalledWith("cron", { repaired: 1, expired: 1, unhealthy: 0, pulled: 0 });
   });
 
-  it("steps run in order: facts upkeep, expiry, health, and repair last, so the capped repair cannot hold up the others", async () => {
+  it("steps run in order: facts upkeep, overdue pulls, expiry, health, and repair last, so the capped repair cannot hold up the others", async () => {
     mockMonitors();
     mockFetchHtml();
     await seedVersion(await seedPage({ kind: "pricing" }), { ...STORED, agent_run_id: "agent-run-X", captured_at: ago(20) });
     mockGetRun("agent-run-X", { status: "RUNNING", created_at: runTime(2) });
+    // Every minute is a tick and its last run was three hours ago: overdue whatever the clock says.
+    const overdue = await seedPage({ schedule_cron: "* * * * *" });
+    await seedVersion(overdue, { ...STORED, capture_status: "complete" });
+    fetchMock.intercept({
+      method: "POST",
+      url: `${monitorUrl(monitorOf(overdue))}/runs`,
+      reply: { status: 201, json: { run: { id: "tf-run-order", is_baseline: false, results: [{ text: "Pro $20/mo." }], errors: [] } } },
+    });
+    cronDeps.pull = (_env, pageId) => callWorker(`/api/admin/pull/${pageId}`, { method: "POST", headers: { Authorization: "Bearer test-admin" } });
     const due = await seedPage({ added_by: "public", expires_at: ago(1) });
     fetchMock.intercept({ method: "DELETE", url: monitorUrl(monitorOf(due)), reply: { status: 200, json: {} } });
     const repairable = await seedVersion(await seedPage(), { captured_at: ago(20) });
 
-    expect(await runCron(env)).toEqual({ repaired: 1, expired: 1, unhealthy: [] });
+    expect(await runCron(env)).toEqual({ repaired: 1, expired: 1, unhealthy: [], pulled: 1 });
 
     const order = callList();
     const at = (call: string) => order.indexOf(call);
     expect(at(`GET ${runUrl("agent-run-X")}`)).toBe(0); // facts upkeep
-    expect(at(`DELETE ${monitorUrl(monitorOf(due))}`)).toBe(1); // expiry
-    expect(at(`GET ${MONITORS_API}`)).toBe(2); // health
-    expect(at(`POST ${FETCH_API}`)).toBe(3); // repair
-    expect(order).toHaveLength(4);
+    expect(at(`POST ${monitorUrl(monitorOf(overdue))}/runs`)).toBe(1); // overdue pulls
+    expect(at(`DELETE ${monitorUrl(monitorOf(due))}`)).toBe(2); // expiry
+    expect(at(`GET ${MONITORS_API}`)).toBe(3); // health
+    expect(at(`POST ${FETCH_API}`)).toBe(4); // repair
+    expect(order).toHaveLength(5);
     expect(await version(repairable)).toMatchObject({ capture_status: "complete" });
   });
 
@@ -747,6 +767,6 @@ describe("runCron", () => {
     await waitOnExecutionContext(ctx);
 
     expect(await version(id)).toMatchObject({ capture_status: "complete" });
-    expect(log).toHaveBeenCalledWith("cron", { repaired: 1, expired: 0, unhealthy: 0 });
+    expect(log).toHaveBeenCalledWith("cron", { repaired: 1, expired: 0, unhealthy: 0, pulled: 0 });
   });
 });

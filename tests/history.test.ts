@@ -95,6 +95,7 @@ function runInput(id: string, over: Partial<RunRow> = {}): RunRow {
     noise_reason: null,
     raw_key: null,
     received_at: T1,
+    trigger_kind: "webhook",
     ...over,
   };
 }
@@ -124,7 +125,7 @@ const noise = (id: string, receivedAt: string, pageId = PAGE): RunRow =>
 async function seed(): Promise<void> {
   await insertPage(db, pageInput());
 
-  await insertRun(db, runInput("run-1", { outcome: "baseline", is_baseline: 1, received_at: T1 }));
+  await insertRun(db, runInput("run-1", { outcome: "baseline", is_baseline: 1, received_at: T1, trigger_kind: "create" }));
   await insertVersion(db, versionInput("ver-1", { run_id: "run-1", is_baseline: 1, captured_at: T1, text: text1, facts_json: JSON.stringify(facts1) }));
 
   await insertRun(db, noise("noise-at-start", T1)); // on the lower edge of (T1, T3]: not counted
@@ -190,7 +191,25 @@ describe("GET /api/pages/:id/versions/:vid", () => {
       live_url: URL1,
       judgment_summary: SUMMARY2,
       capture_status: "complete",
+      trigger: "webhook",
     });
+  });
+
+  it("says which way the version's run arrived: create for the baseline, else its run's trigger, null without a run", async () => {
+    await seed();
+    await insertRun(db, runInput("run-pulled", { outcome: "changed", received_at: "2026-11-04T00:00:00.000Z", trigger_kind: "pull" }));
+    await insertVersion(db, versionInput("ver-pulled", { run_id: "run-pulled", captured_at: "2026-11-04T00:00:00.000Z" }));
+    await insertVersion(db, versionInput("ver-norun", { captured_at: "2026-11-05T00:00:00.000Z" }));
+    // A baseline whose run row is missing is still the create baseline.
+    await insertPage(db, pageInput({ id: "page-3", url: "https://example.com/3", monitor_id: "mon-3" }));
+    await insertVersion(db, versionInput("ver-orphan-base", { page_id: "page-3", is_baseline: 1 }));
+
+    const trigger = async (page: string, id: string) => (await getJson(`/api/pages/${page}/versions/${id}`)).body.trigger;
+    expect(await trigger(PAGE, "ver-1")).toBe("create");
+    expect(await trigger(PAGE, "ver-3")).toBe("webhook");
+    expect(await trigger(PAGE, "ver-pulled")).toBe("pull");
+    expect(await trigger(PAGE, "ver-norun")).toBeNull();
+    expect(await trigger("page-3", "ver-orphan-base")).toBe("create");
   });
 
   it("says is_baseline true for the baseline and gives a null url for a capture that is missing", async () => {
@@ -336,8 +355,8 @@ describe("GET /api/pages/:id/diff", () => {
     const firstText = await first.text();
     expect(JSON.parse(firstText)).toEqual({
       page: { id: PAGE, url: URL1, label: "Vercel pricing" },
-      from: { version_id: "ver-1", captured_at: T1, screenshot_url: `${BASE}/shots/ver-1.jpg`, source_url: `${BASE}/sources/ver-1.html` },
-      to: { version_id: "ver-3", captured_at: T3, screenshot_url: null, source_url: `${BASE}/sources/ver-3.html` },
+      from: { version_id: "ver-1", captured_at: T1, screenshot_url: `${BASE}/shots/ver-1.jpg`, source_url: `${BASE}/sources/ver-1.html`, trigger: "create" },
+      to: { version_id: "ver-3", captured_at: T3, screenshot_url: null, source_url: `${BASE}/sources/ver-3.html`, trigger: "webhook" },
       summary: SUMMARY3,
       blocks: {
         added: [
@@ -408,7 +427,7 @@ describe("GET /api/pages/:id/diff", () => {
     // The feed's "compare" link on a fresh catch: no screenshot, no source, no facts yet.
     const early = await getJson(diffPath(T3, T4));
     expect(early.status).toBe(200);
-    expect(early.body.to).toEqual({ version_id: "ver-4", captured_at: T4, screenshot_url: null, source_url: null });
+    expect(early.body.to).toEqual({ version_id: "ver-4", captured_at: T4, screenshot_url: null, source_url: null, trigger: null });
     expect(early.body.facts).toBeNull();
     expect(early.body.blocks.changed).toEqual([
       { section: "Pro", before: "$25 per month per seat. Includes 10 projects.", after: "$30 per month per seat. Includes 10 projects." },
@@ -431,6 +450,7 @@ describe("GET /api/pages/:id/diff", () => {
       captured_at: T4,
       screenshot_url: `${BASE}/shots/ver-4.jpg`,
       source_url: `${BASE}/sources/ver-4.html`,
+      trigger: null, // seeded without a run
     });
     expect(late.body.facts).toEqual({ added: [], removed: [], changed: [{ name: "Pro", field: "price", before: "$25", after: "$30" }] });
     const rows = await cacheRows();
@@ -635,6 +655,7 @@ describe("GET /api/changes", () => {
       captured_at: T3,
       summary: SUMMARY3,
       screenshot_url: null,
+      trigger: "webhook",
     });
     expect(all.body.changes[1]).toEqual({
       version_id: "n-2",
@@ -644,6 +665,7 @@ describe("GET /api/changes", () => {
       captured_at: "2026-11-02T10:00:00.000Z",
       summary: "Plus went up.",
       screenshot_url: `${BASE}/shots/n-2.jpg`,
+      trigger: null, // seeded without a run
     });
 
     const limited = await getJson("/api/changes?limit=2");
@@ -808,6 +830,8 @@ describe("GET /api/stats", () => {
       monitors: { active: 2, paused: 1, failed: 1, expired: 1 },
       // Two catches: the baseline is not one.
       cost_per_catch_usd: 0.0255,
+      // run-1 is the create baseline; the other nine arrived by webhook.
+      runs_by_trigger: { create: 1, webhook: 9, pull: 0 },
     });
   });
 
@@ -823,6 +847,7 @@ describe("GET /api/stats", () => {
       spend_by_kind: { monitor_check: 0, screenshot: 0, agent_step: 0, fetch: 0, search: 0 },
       monitors: { active: 0, paused: 0, failed: 0, expired: 0 },
       cost_per_catch_usd: null,
+      runs_by_trigger: { create: 0, webhook: 0, pull: 0 },
     });
   });
 

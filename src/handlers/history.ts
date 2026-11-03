@@ -17,17 +17,19 @@ import { normalize } from "../core/normalize";
 import { PRICES, type SpendKind } from "../core/spend";
 import { getCachedDiff, putCachedDiff } from "../db/diffCache";
 import { getPage, listPages } from "../db/pages";
-import { countNoiseBetween } from "../db/runs";
-import type { PageRow, PageStatus, VersionRow } from "../db/types";
+import { countNoiseBetween, countRunsByTrigger } from "../db/runs";
+import type { PageRow, PageStatus, TriggerKind, VersionRow } from "../db/types";
 import {
   baselineVersion,
   countVersionsBetween,
   getVersion,
+  getVersionWithTrigger,
   listAllVersionSummaries,
   listChanges,
   versionAsOf,
   versionSummaryAsOf,
   type VersionSummary,
+  type WithTrigger,
 } from "../db/versions";
 import type { Env } from "../env";
 import { pageToJson } from "./pages";
@@ -103,8 +105,12 @@ async function noVersionAt(c: AppContext, pageId: string, reason: "before_baseli
   return c.json({ error: "no_versions" }, 404);
 }
 
-/** A version with its text, as versions/:vid and as-of return it. */
-function versionJson(env: Env, page: PageRow, v: VersionRow) {
+/**
+ * A version with its text, as versions/:vid and as-of return it. `trigger` says which way the run
+ * that made it arrived: `create` (the baseline), `webhook` (a scheduled run) or `pull` (an overdue
+ * check run with run-now).
+ */
+function versionJson(env: Env, page: PageRow, v: WithTrigger<VersionRow>) {
   return {
     id: v.id,
     page_id: v.page_id,
@@ -116,6 +122,7 @@ function versionJson(env: Env, page: PageRow, v: VersionRow) {
     live_url: page.url,
     judgment_summary: v.judgment_summary,
     capture_status: v.capture_status,
+    trigger: v.trigger_kind,
   };
 }
 
@@ -124,7 +131,7 @@ function versionJson(env: Env, page: PageRow, v: VersionRow) {
 historyRouter.get("/pages/:id/versions/:vid", async (c) => {
   const page = await getPage(c.env.DB, c.req.param("id"));
   if (!page) return notFound(c);
-  const version = await getVersion(c.env.DB, c.req.param("vid"));
+  const version = await getVersionWithTrigger(c.env.DB, c.req.param("vid"));
   if (!version || version.page_id !== page.id) return notFound(c);
   return c.json(versionJson(c.env, page, version));
 });
@@ -142,7 +149,13 @@ historyRouter.get("/pages/:id/as-of", async (c) => {
 
 // --- Diff -------------------------------------------------------------------------------------
 
-type DiffEnd = { version_id: string; captured_at: string; screenshot_url: string | null; source_url: string | null };
+type DiffEnd = {
+  version_id: string;
+  captured_at: string;
+  screenshot_url: string | null;
+  source_url: string | null;
+  trigger: TriggerKind | null;
+};
 
 type DiffJson = {
   page: { id: string; url: string; label: string };
@@ -155,10 +168,12 @@ type DiffJson = {
   noise_suppressed_between: number;
 };
 
-const diffEnd = (env: Env, v: VersionSummary): DiffEnd => ({
+// A version's trigger never changes, so a stored diff keeps it.
+const diffEnd = (env: Env, v: WithTrigger<VersionSummary>): DiffEnd => ({
   version_id: v.id,
   captured_at: v.captured_at,
   ...objectUrls(env, v),
+  trigger: v.trigger_kind,
 });
 
 /**
@@ -168,7 +183,12 @@ const diffEnd = (env: Env, v: VersionSummary): DiffEnd => ({
  * ignore patterns, as the change gate does. One version on both sides is an empty diff and reads
  * no text.
  */
-async function buildDiff(env: Env, page: PageRow, from: VersionSummary, to: VersionSummary): Promise<DiffJson | null> {
+async function buildDiff(
+  env: Env,
+  page: PageRow,
+  from: WithTrigger<VersionSummary>,
+  to: WithTrigger<VersionSummary>,
+): Promise<DiffJson | null> {
   let blocks: StructuredDiff = { added: [], removed: [], changed: [] };
   let hops = 0;
   let noiseBetween = 0;
@@ -268,6 +288,7 @@ historyRouter.get("/changes", async (c) => {
       captured_at: row.captured_at,
       summary: row.judgment_summary,
       screenshot_url: objectUrls(c.env, row).screenshot_url,
+      trigger: row.trigger_kind,
     })),
   });
 });
@@ -312,7 +333,7 @@ const dollars = (amount: number): number => Math.round(amount * 1e6) / 1e6;
 
 historyRouter.get("/stats", async (c) => {
   const db = c.env.DB;
-  const [totals, spendRows, statusRows] = await Promise.all([
+  const [totals, spendRows, statusRows, runsByTrigger] = await Promise.all([
     db
       .prepare(
         `SELECT
@@ -326,6 +347,7 @@ historyRouter.get("/stats", async (c) => {
       .first<{ pages: number; runs: number; versions: number; catches: number; noise_suppressed: number; spend_usd: number }>(),
     db.prepare("SELECT kind, SUM(amount_usd) AS usd FROM spend GROUP BY kind").all<{ kind: string; usd: number | null }>(),
     db.prepare("SELECT status, COUNT(*) AS n FROM pages GROUP BY status").all<{ status: string | null; n: number }>(),
+    countRunsByTrigger(db),
   ]);
 
   const spendByKind = Object.fromEntries(SPEND_KINDS.map((kind) => [kind, 0])) as Record<SpendKind, number>;
@@ -349,5 +371,7 @@ historyRouter.get("/stats", async (c) => {
     monitors,
     // A catch is a real change, not a baseline.
     cost_per_catch_usd: catches > 0 ? dollars(spend / catches) : null,
+    // Which way the runs arrived: the add-page baselines, scheduled runs by webhook, overdue checks pulled.
+    runs_by_trigger: runsByTrigger,
   });
 });

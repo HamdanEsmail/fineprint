@@ -7,7 +7,7 @@ import { FACTS_GOAL, FACTS_SCHEMA, getRun, parseFacts, startFactsRun } from "../
 import { screenshotFullPage } from "../src/tinyfish/browser";
 import { TinyFishError, tinyfishFetch } from "../src/tinyfish/client";
 import { fetchPage } from "../src/tinyfish/fetch";
-import { createMonitor, deleteMonitor, getMonitor, listMonitors, setMonitorStatus, updateMonitor } from "../src/tinyfish/monitor";
+import { createMonitor, deleteMonitor, getMonitor, listMonitors, runMonitorNow, setMonitorStatus, updateMonitor } from "../src/tinyfish/monitor";
 import { discoverFinePrint } from "../src/tinyfish/search";
 import { fetchMock } from "./helpers/fetch-mock";
 import agentSchemaRun from "./fixtures/tinyfish/agent-schema-run.json";
@@ -15,6 +15,7 @@ import browserCreate from "./fixtures/tinyfish/browser-create.json";
 import fetchFixture from "./fixtures/tinyfish/fetch.json";
 import monitorCreate from "./fixtures/tinyfish/monitor-create.json";
 import monitorGet from "./fixtures/tinyfish/monitor-get.json";
+import monitorRunNow from "./fixtures/tinyfish/monitor-runnow.json";
 import searchFixture from "./fixtures/tinyfish/search.json";
 
 const FETCH_API = "https://api.fetch.tinyfish.ai";
@@ -339,6 +340,46 @@ describe("monitors", () => {
     // A 2xx whose body is not a Monitor is a failure, not a missing Monitor.
     fetchMock.intercept({ method: "GET", url, reply: { json: { unexpected: true } } });
     await expect(getMonitor(env, "gone")).rejects.toMatchObject({ code: "unexpected_body" });
+    expect(await spendRows()).toEqual([]);
+  });
+
+  it("runMonitorNow posts to the Monitor's runs and returns the run id, text, errors and the raw body, recording no spend itself", async () => {
+    const id = monitorCreate.monitor.id;
+    const raw = JSON.stringify(monitorRunNow);
+    fetchMock.intercept({
+      method: "POST",
+      url: `${MONITORS_API}/${id}/runs`,
+      reply: (req) => {
+        expect(req.headers.get("X-API-Key")).toBe("test-tinyfish-key");
+        return new Response(raw, { status: 201, headers: { "content-type": "application/json" } });
+      },
+    });
+
+    const out = await runMonitorNow(env, id);
+
+    expect(out).toEqual({ runId: monitorRunNow.run.id, text: monitorRunNow.run.results[0]!.text, errors: [], raw });
+    expect(out.text!.length).toBeGreaterThan(1000);
+    expect(callsTo("POST", `${MONITORS_API}/${id}/runs`)).toHaveLength(1);
+    // A pulled check is billed by the recording path once the run is claimed, never twice.
+    expect(await spendRows()).toEqual([]);
+  });
+
+  it("runMonitorNow reads a run without text or with errors as it is, and throws on a body without a run id or a non-2xx", async () => {
+    const url = `${MONITORS_API}/m%2F1/runs`;
+    const errors = [{ url: PRICING_URL, error: "bot_blocked" }];
+    fetchMock.intercept({ method: "POST", url, reply: { status: 201, json: { run: { id: "r-1", is_baseline: false, results: [], errors } } } });
+    expect(await runMonitorNow(env, "m/1")).toMatchObject({ runId: "r-1", text: null, errors });
+    fetchMock.intercept({ method: "POST", url, reply: { status: 201, json: { run: { id: "r-2", results: [{ text: 42 }] } } } });
+    expect(await runMonitorNow(env, "m/1")).toMatchObject({ runId: "r-2", text: null, errors: [] });
+
+    fetchMock.intercept({ method: "POST", url, reply: { status: 201, json: { run: { results: [{ text: "page" }] } } } });
+    await expect(runMonitorNow(env, "m/1")).rejects.toMatchObject({ code: "unexpected_body" });
+    fetchMock.intercept({ method: "POST", url, reply: { status: 201, body: "not json" } });
+    await expect(runMonitorNow(env, "m/1")).rejects.toMatchObject({ code: "unexpected_body" });
+    fetchMock.intercept({ method: "POST", url, reply: { status: 201, json: { run: { id: "x".repeat(201), results: [] } } } });
+    await expect(runMonitorNow(env, "m/1")).rejects.toMatchObject({ code: "unexpected_body" });
+    fetchMock.intercept({ method: "POST", url, reply: { status: 429, json: { error: { code: "RATE_LIMIT_EXCEEDED" } } } });
+    await expect(runMonitorNow(env, "m/1")).rejects.toMatchObject({ status: 429, code: "RATE_LIMIT_EXCEEDED" });
     expect(await spendRows()).toEqual([]);
   });
 });

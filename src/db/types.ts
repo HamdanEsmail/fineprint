@@ -35,10 +35,17 @@ export interface PageRow {
   last_change_at: string | null;
 }
 
+/**
+ * Which way a run reached Fineprint (migrations/0002_run_trigger.sql): create, the baseline the
+ * Monitor create returned; webhook, a scheduled run TinyFish delivered; pull, an overdue check
+ * the hourly cron ran with run-now. The API calls it `trigger`.
+ */
+export type TriggerKind = "create" | "webhook" | "pull";
+
 export interface RunRow {
   id: string;
   page_id: string;
-  /** TinyFish's run id; unique, so a webhook retry cannot create a second row. */
+  /** TinyFish's run id; unique, so a webhook retry or a second pull of one run cannot create a second row. */
   monitor_run_id: string;
   outcome: string;
   /** 1 or 0. */
@@ -53,6 +60,7 @@ export interface RunRow {
   noise_reason: string | null;
   raw_key: string | null;
   received_at: string;
+  trigger_kind: TriggerKind;
 }
 
 export interface VersionRow {

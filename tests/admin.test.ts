@@ -130,6 +130,7 @@ async function seedRun({ n, at, raw, over }: SeedRun): Promise<string> {
     noise_reason: null,
     raw_key: key,
     received_at: at,
+    trigger_kind: "webhook",
     ...over,
   });
   return id;
@@ -608,6 +609,7 @@ describe("POST /api/pages/:id/replay", () => {
       noise_reason: null,
       raw_key: "raw/mrun-x.json",
       received_at: T1,
+      trigger_kind: "webhook",
     });
 
     expect(await (await replay()).json()).toEqual({ created: 0, suppressed: 0 });

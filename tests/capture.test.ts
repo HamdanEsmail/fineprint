@@ -78,6 +78,7 @@ async function seedVersion(pageId: string, over: SeedOptions = {}): Promise<stri
       noise_reason: null,
       raw_key: null,
       received_at: "2026-11-01T00:00:00.000Z",
+      trigger_kind: isBaseline ? "create" : "webhook",
     });
   }
   await insertVersion(env.DB, {

@@ -1,17 +1,18 @@
-import type { RunRow } from "./types";
+import type { RunRow, TriggerKind } from "./types";
 
 /**
  * Inserts a run. A run whose `monitor_run_id` already exists (a TinyFish
- * webhook retry) is left alone and reported as "duplicate". Any other
- * constraint failure (for example a clashing `id`) still throws.
+ * webhook retry, or a pull answered with a run already recorded) is left alone
+ * and reported as "duplicate". Any other constraint failure (for example a
+ * clashing `id`) still throws.
  */
 export async function insertRun(db: D1Database, r: RunRow): Promise<"inserted" | "duplicate"> {
   const result = await db
     .prepare(
       `INSERT INTO runs
          (id, page_id, monitor_run_id, outcome, is_baseline, judgment_relevant, judgment_summary,
-          diff_truncated, noise_suppressed, noise_reason, raw_key, received_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          diff_truncated, noise_suppressed, noise_reason, raw_key, received_at, trigger_kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(monitor_run_id) DO NOTHING`,
     )
     .bind(
@@ -27,9 +28,46 @@ export async function insertRun(db: D1Database, r: RunRow): Promise<"inserted" |
       r.noise_reason,
       r.raw_key,
       r.received_at,
+      r.trigger_kind,
     )
     .run();
   return result.meta.changes === 0 ? "duplicate" : "inserted";
+}
+
+/** An active page that holds a Monitor, with the receipt time of its newest run (any trigger). */
+export type PullCandidate = {
+  id: string;
+  schedule_cron: string | null;
+  last_received_at: string | null;
+};
+
+/**
+ * Every active page that holds a Monitor, with the newest `received_at` among its runs, in creation
+ * order: the pages the cron's overdue check looks at. One query, however many pages there are.
+ */
+export async function pullCandidates(db: D1Database): Promise<PullCandidate[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT p.id, p.schedule_cron,
+         (SELECT MAX(r.received_at) FROM runs r WHERE r.page_id = p.id) AS last_received_at
+       FROM pages p
+       WHERE p.status = 'active' AND p.monitor_id IS NOT NULL
+       ORDER BY p.created_at, p.rowid`,
+    )
+    .all<PullCandidate>();
+  return results;
+}
+
+/** How many runs arrived each way. */
+export async function countRunsByTrigger(db: D1Database): Promise<Record<TriggerKind, number>> {
+  const counts: Record<TriggerKind, number> = { create: 0, webhook: 0, pull: 0 };
+  const { results } = await db
+    .prepare("SELECT trigger_kind, COUNT(*) AS n FROM runs GROUP BY trigger_kind")
+    .all<{ trigger_kind: string; n: number }>();
+  for (const row of results) {
+    if (Object.hasOwn(counts, row.trigger_kind)) counts[row.trigger_kind as TriggerKind] = row.n;
+  }
+  return counts;
 }
 
 /** One run by our own id, or null. */

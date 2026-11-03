@@ -1,23 +1,46 @@
 // The hourly cron (spec 4.4): the safety net behind the webhook's waitUntil work. It keeps
 // the serial facts queue moving (stale claims, runs whose callback was lost, rate-limited
-// starts), retires public pages at the end of their week, flags pages whose Monitor TinyFish
-// no longer runs, and retries captures that did not finish.
+// starts), pulls Monitor checks whose scheduled run never arrived, retires public pages at the
+// end of their week, flags pages whose Monitor TinyFish no longer runs, and retries captures
+// that did not finish.
 //
 // Repair comes last and is capped (REPAIR_PER_TICK): each capture makes several outbound
 // requests, the free plan allows 50 per invocation, and a backlog must never starve the
-// cheap steps before it. Each step is wrapped on its own, so one failing step never stops
-// the others, and runCron never throws. It logs one summary line; errors are logged by
-// code, never with a secret or page text.
-import { captureVersion, recordFactsResult, startNextFacts } from "./capture";
-import { CAPTURE_MAX_ATTEMPTS, MONITOR_LOOKUPS_PER_TICK, REPAIR_PER_TICK } from "./core/limits";
+// cheap steps before it. Pulls are capped too (PULLS_PER_TICK), and each runs in its own Worker
+// invocation. Each step is wrapped on its own, so one failing step never stops the others, and
+// runCron never throws. It logs one summary line; errors are logged by code, never with a
+// secret or page text.
+import { captureVersion, recordFactsResult, spendPaused, startNextFacts } from "./capture";
+import { lastTickAtOrBefore } from "./core/cronTick";
+import { CAPTURE_MAX_ATTEMPTS, MONITOR_LOOKUPS_PER_TICK, PULLS_PER_TICK, REPAIR_PER_TICK } from "./core/limits";
 import { activeMonitoredPages, expiredPublicPages, setPageStatusIf } from "./db/pages";
+import { pullCandidates } from "./db/runs";
 import { inFlightFactsRuns, listFactsClaims, pendingCaptures, updateIfFactsHolder } from "./db/versions";
 import type { Env } from "./env";
 import { getRun } from "./tinyfish/agent";
 import { TinyFishError } from "./tinyfish/client";
 import { deleteMonitor, getMonitor, listMonitors } from "./tinyfish/monitor";
 
+/**
+ * The seams tests use instead of vi.mock (which does not work in the Workers pool). `pull` runs one
+ * overdue-check pull: by default a request through the SELF service binding to the admin pull route,
+ * so the pull is a Worker invocation of its own with a request's CPU and subrequest budget (one
+ * normalization per invocation, never twenty in the cron's). `now` is the overdue check's clock.
+ */
+export const cronDeps = {
+  pull: (env: Env, pageId: string): Promise<Response> =>
+    env.SELF.fetch(
+      new Request(`https://fineprint.internal/api/admin/pull/${encodeURIComponent(pageId)}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` },
+      }),
+    ),
+  now: (): Date => new Date(),
+};
+
 const MINUTE_MS = 60_000;
+/** A scheduled run that has not arrived this long after its tick is overdue. */
+const OVERDUE_AFTER_MS = 15 * MINUTE_MS;
 /** A version this old whose capture is unfinished is retried: the webhook's own capture has ended by then. */
 const REPAIR_AFTER_MS = 10 * MINUTE_MS;
 /** A claim token this old belongs to a start that was cut off or may have created a run. */
@@ -37,15 +60,23 @@ export type CronResult = {
   expired: number;
   /** Pages marked failed because TinyFish does not run their Monitor. */
   unhealthy: string[];
+  /** Overdue checks pulled with run-now and recorded. */
+  pulled: number;
 };
 
 export async function runCron(env: Env): Promise<CronResult> {
-  const result: CronResult = { repaired: 0, expired: 0, unhealthy: [] };
+  const result: CronResult = { repaired: 0, expired: 0, unhealthy: [], pulled: 0 };
   await step("facts upkeep", () => factsUpkeep(env));
+  await step("overdue pulls", () => pullOverdue(env, result));
   await step("expiry", () => expire(env, result));
   await step("health", () => health(env, result));
   await step("repair", () => repair(env, result));
-  console.log("cron", { repaired: result.repaired, expired: result.expired, unhealthy: result.unhealthy.length });
+  console.log("cron", {
+    repaired: result.repaired,
+    expired: result.expired,
+    unhealthy: result.unhealthy.length,
+    pulled: result.pulled,
+  });
   return result;
 }
 
@@ -141,7 +172,61 @@ async function recordStale(env: Env, runId: string): Promise<void> {
   await recordFactsResult(env, runId, "STALE", null, null);
 }
 
-// --- 2. Expiry ------------------------------------------------------------------------
+// --- 2. Overdue pulls -------------------------------------------------------------------
+
+const CODE_SHAPE = /^[A-Za-z0-9_.-]{1,64}$/;
+
+/** A short code from a pull's JSON answer (`reason`, else `error`), or "unknown". */
+function codeIn(body: unknown): string {
+  const record = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+  for (const value of [record.reason, record.error]) {
+    if (typeof value === "string" && CODE_SHAPE.test(value)) return value;
+  }
+  return "unknown";
+}
+
+/**
+ * Webhooks are the primary trigger; this is the fallback when one never came. For each active page
+ * with a Monitor, T is its schedule's last tick at or before now − 15 minutes; the page is overdue
+ * when T exists and none of its runs (any trigger) was received at or after T. A page created after
+ * T has its create run after T, so it is not overdue. Nothing is pulled at the spend pause. At most
+ * PULLS_PER_TICK pages are pulled, oldest T first, one at a time, each through `cronDeps.pull` (its
+ * own Worker invocation); a pull that fails is logged by status and code and the next one goes on.
+ * A page whose pull recorded nothing (no text, a fetch error) stays overdue for the next tick.
+ */
+async function pullOverdue(env: Env, result: CronResult): Promise<void> {
+  if (await spendPaused(env.DB)) {
+    console.warn("cron overdue pulls skipped: the spend pause is reached");
+    return;
+  }
+  const cutoff = new Date(cronDeps.now().getTime() - OVERDUE_AFTER_MS);
+  const due: { id: string; tick: number }[] = [];
+  for (const page of await pullCandidates(env.DB)) {
+    const tick = page.schedule_cron === null ? null : lastTickAtOrBefore(page.schedule_cron, cutoff);
+    if (tick === null) continue;
+    if (page.last_received_at !== null && page.last_received_at >= tick.toISOString()) continue;
+    due.push({ id: page.id, tick: tick.getTime() });
+  }
+  due.sort((a, b) => a.tick - b.tick); // stable: pages due at the same tick keep their creation order
+
+  for (const { id } of due.slice(0, PULLS_PER_TICK)) {
+    try {
+      const res = await cronDeps.pull(env, id);
+      const body: unknown = await res.json().catch(() => null);
+      if (!res.ok) {
+        console.error(`cron pull of page ${id} failed`, `status=${res.status} code=${codeIn(body)}`);
+      } else if ((body as { pulled?: unknown } | null)?.pulled === true) {
+        result.pulled += 1;
+      } else if ((body as { pulled?: unknown } | null)?.pulled === false) {
+        console.warn(`cron pull of page ${id} recorded nothing`, `reason=${codeIn(body)}`);
+      }
+    } catch (err) {
+      logError(`cron pull of page ${id} failed`, err);
+    }
+  }
+}
+
+// --- 3. Expiry ------------------------------------------------------------------------
 
 /**
  * Public pages past `expires_at`: the Monitor is deleted (a 404 counts as deleted), then the
@@ -159,7 +244,7 @@ async function expire(env: Env, result: CronResult): Promise<void> {
   }
 }
 
-// --- 3. Health ------------------------------------------------------------------------
+// --- 4. Health ------------------------------------------------------------------------
 
 /**
  * One list of the account's Monitors. An active page whose Monitor is in it with a status other
@@ -207,7 +292,7 @@ async function health(env: Env, result: CronResult): Promise<void> {
   }
 }
 
-// --- 4. Repair ------------------------------------------------------------------------
+// --- 5. Repair ------------------------------------------------------------------------
 
 /**
  * Retries, one at a time, the REPAIR_PER_TICK oldest pending or partial captures older than 10

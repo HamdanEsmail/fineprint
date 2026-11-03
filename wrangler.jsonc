@@ -17,6 +17,14 @@
       "bucket_name": "fineprint"
     }
   ],
+  // The Worker itself: the hourly cron runs each overdue-check pull as its own invocation
+  // (POST /api/admin/pull/:pageId), so every pull gets a request's CPU and subrequest budget.
+  "services": [
+    {
+      "binding": "SELF",
+      "service": "fineprint"
+    }
+  ],
   "triggers": {
     "crons": ["0 * * * *"]
   },

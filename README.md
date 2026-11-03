@@ -15,6 +15,8 @@ The Worker is deployed. Recording of the curated pages has not started: the list
 - **Every version is kept with evidence:** the extracted text, a full-page screenshot, the HTML source, TinyFish's summary of the change, and, for pricing and fee pages, the plans and prices as structured facts.
 - **Any page can be added at run time** with `POST /api/pages`. The URL is validated first, so a page that cannot be fetched is refused with a reason instead of failing silently later.
 
+Monitor webhooks are the primary trigger. When a scheduled check is overdue (no run 15 minutes after its scheduled time), the hourly job asks TinyFish to run that Monitor now and records the result under TinyFish's run id, marked `pull`. Fineprint never fetches a page to detect changes itself.
+
 ## How TinyFish is used
 
 | Product | What Fineprint uses it for | Where in the code |
@@ -46,6 +48,7 @@ Read endpoints are public JSON. Endpoints marked admin need `Authorization: Bear
 | POST | `/api/discover` | `{domain}`: find that site's pricing, terms, privacy and fee pages | planned |
 | POST | `/api/pages/:id/replay` | Admin: re-run the noise gate over stored webhook payloads | planned |
 | POST | `/api/admin/rotate-webhook` | Admin: re-point every Monitor at the current host | planned |
+| POST | `/api/admin/pull/:pageId` | Admin: run the page's Monitor now and record the run, marked `pull` (what the hourly job does for an overdue check) | built |
 
 TinyFish calls `POST /hooks/monitor/<secret>` on every scheduled run. That path is not part of the public API.
 

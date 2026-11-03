@@ -246,7 +246,7 @@ describe("POST /api/pages as admin", () => {
     expect(version.normalized_hash).toBe(await hashText(normalize(version.text).text));
 
     const run = await env.DB.prepare("SELECT * FROM runs WHERE page_id = ?").bind(body.page.id).first<Json>();
-    expect(run).toMatchObject({ outcome: "baseline", is_baseline: 1, monitor_run_id: "mrun-1", noise_suppressed: 0 });
+    expect(run).toMatchObject({ outcome: "baseline", is_baseline: 1, monitor_run_id: "mrun-1", noise_suppressed: 0, trigger_kind: "create" });
     expect(version.run_id).toBe(run.id);
 
     // The capture of the baseline version is scheduled with waitUntil.
@@ -436,6 +436,7 @@ describe("POST /api/pages as admin", () => {
       noise_reason: null,
       raw_key: null,
       received_at: "2026-11-03T10:00:00.000Z",
+      trigger_kind: "webhook",
     });
     mockMonitorDelete("mon-1");
 

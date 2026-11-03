@@ -68,6 +68,48 @@ export async function createMonitor(
   );
 }
 
+// The run id becomes an R2 key (`raw/<id>.json`), as a webhook's does; a longer one is refused.
+const MAX_RUN_ID_LENGTH = 200;
+
+/**
+ * Runs a Monitor's check now (`POST /v1/monitors/{id}/runs`): the overdue-check fallback when a
+ * scheduled run never arrived. The 201 body is `{run: {id, is_baseline, results: [{text}], errors}}`
+ * (no outcome, diff or judgment) and TinyFish does not call the webhook for it. `text` is null when
+ * there is no result text. A body without a run id is an `unexpected_body` failure.
+ *
+ * No spend is recorded here: TinyFish bills a completed check only, so the caller records it after
+ * it has read the run and claimed it (src/record.ts), once per run id.
+ */
+export async function runMonitorNow(
+  env: Env,
+  monitorId: string,
+): Promise<{ runId: string; text: string | null; errors: unknown[]; raw: string }> {
+  const res = await tinyfishFetch(env, `${monitorUrl(monitorId)}/runs`, { method: "POST" });
+  const raw = await res.text();
+  let body: unknown = null;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    // not JSON: there is no run in it
+  }
+  const run = isRecord(body) && isRecord(body.run) ? body.run : {};
+  const runId = run.id;
+  if (typeof runId !== "string" || runId === "" || runId.length > MAX_RUN_ID_LENGTH) {
+    throw new TinyFishError(502, "unexpected_body", "TinyFish answered run-now without a run id");
+  }
+  const first = Array.isArray(run.results) ? run.results[0] : undefined;
+  return {
+    runId,
+    text: isRecord(first) && typeof first.text === "string" ? first.text : null,
+    errors: Array.isArray(run.errors) ? run.errors : [],
+    raw,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export async function updateMonitor(
   env: Env,
   id: string,

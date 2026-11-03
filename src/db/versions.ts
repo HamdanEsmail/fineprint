@@ -1,5 +1,5 @@
 import { CAPTURE_MAX_ATTEMPTS } from "../core/limits";
-import type { CaptureStatus, VersionRow } from "./types";
+import type { CaptureStatus, TriggerKind, VersionRow } from "./types";
 
 /** What a caller supplies to insertVersion; the capture columns default to a fresh, uncaptured version. */
 export type NewVersion = Pick<
@@ -35,8 +35,21 @@ export type CapturePatch = Partial<
 /** A version row without its (large) page text. */
 export type VersionSummary = Omit<VersionRow, "text">;
 
+/**
+ * A version with the trigger of the run that made it (create, webhook or pull): its run's
+ * `trigger_kind`; a baseline whose run row is missing counts as `create`; any other version without
+ * a run row has none.
+ */
+export type WithTrigger<T> = T & { trigger_kind: TriggerKind | null };
+
 /** A non-baseline version joined with its page, for the changes feed. */
-export type ChangeRow = VersionSummary & { page_label: string; url: string };
+export type ChangeRow = WithTrigger<VersionSummary> & { page_label: string; url: string };
+
+/** The `trigger_kind` column of WithTrigger, for a query over `versions` named `table`. */
+function triggerColumn(table: string): string {
+  return `COALESCE((SELECT r.trigger_kind FROM runs r WHERE r.id = ${table}.run_id),
+    CASE WHEN ${table}.is_baseline = 1 THEN 'create' END) AS trigger_kind`;
+}
 
 // Every version column except `text`. List queries select these so a page's
 // full text is never read just to draw a timeline.
@@ -106,6 +119,14 @@ export function getVersion(db: D1Database, id: string): Promise<VersionRow | nul
   return db.prepare("SELECT * FROM versions WHERE id = ?").bind(id).first<VersionRow>();
 }
 
+/** One version with its text and its run's trigger, or null. */
+export function getVersionWithTrigger(db: D1Database, id: string): Promise<WithTrigger<VersionRow> | null> {
+  return db
+    .prepare(`SELECT *, ${triggerColumn("versions")} FROM versions WHERE id = ?`)
+    .bind(id)
+    .first<WithTrigger<VersionRow>>();
+}
+
 /** The newest version of a page, with its text, or null when it has none. */
 export function latestVersion(db: D1Database, pageId: string): Promise<VersionRow | null> {
   return db
@@ -164,16 +185,17 @@ async function findAsOf<T>(
 
 /**
  * What the page said at a moment: the latest version captured at or before
- * `atIso` (the baseline counts). "before_baseline" when the page has versions
- * but all are later; "no_versions" when it has none. Timestamps are ISO 8601
- * UTC strings from toISOString(), so they compare correctly as text.
+ * `atIso` (the baseline counts), with its run's trigger. "before_baseline" when
+ * the page has versions but all are later; "no_versions" when it has none.
+ * Timestamps are ISO 8601 UTC strings from toISOString(), so they compare
+ * correctly as text.
  */
 export function versionAsOf(
   db: D1Database,
   pageId: string,
   atIso: string,
-): Promise<VersionRow | "before_baseline" | "no_versions"> {
-  return findAsOf<VersionRow>(db, pageId, atIso, "*");
+): Promise<WithTrigger<VersionRow> | "before_baseline" | "no_versions"> {
+  return findAsOf<WithTrigger<VersionRow>>(db, pageId, atIso, `*, ${triggerColumn("versions")}`);
 }
 
 /** `versionAsOf` without the version's text, for a caller that may not need it (a cached diff). */
@@ -181,8 +203,8 @@ export function versionSummaryAsOf(
   db: D1Database,
   pageId: string,
   atIso: string,
-): Promise<VersionSummary | "before_baseline" | "no_versions"> {
-  return findAsOf<VersionSummary>(db, pageId, atIso, summaryColumns());
+): Promise<WithTrigger<VersionSummary> | "before_baseline" | "no_versions"> {
+  return findAsOf<WithTrigger<VersionSummary>>(db, pageId, atIso, `${summaryColumns()}, ${triggerColumn("versions")}`);
 }
 
 /** The oldest version of a page (its baseline) without `text`, or null when it has none. */
@@ -218,8 +240,8 @@ export async function listAllVersionSummaries(db: D1Database): Promise<VersionSu
 /**
  * Real changes across all pages: non-baseline versions, newest first,
  * captured at or after `sinceIso` when given, joined with the page's label and
- * url. Never selects `text`. A limit below 1 (or NaN) returns nothing; it never
- * becomes SQLite's "no limit".
+ * url and the run's trigger. Never selects `text`. A limit below 1 (or NaN)
+ * returns nothing; it never becomes SQLite's "no limit".
  */
 export async function listChanges(
   db: D1Database,
@@ -227,7 +249,7 @@ export async function listChanges(
   limit: number,
 ): Promise<ChangeRow[]> {
   const max = Math.max(0, Math.trunc(limit)) || 0;
-  const select = `SELECT ${summaryColumns("v.")}, p.label AS page_label, p.url AS url
+  const select = `SELECT ${summaryColumns("v.")}, ${triggerColumn("v")}, p.label AS page_label, p.url AS url
        FROM versions v JOIN pages p ON p.id = v.page_id`;
   const order = "ORDER BY v.captured_at DESC, v.rowid DESC LIMIT ?";
   const statement =

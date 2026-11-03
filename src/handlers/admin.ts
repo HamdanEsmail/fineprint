@@ -1,16 +1,18 @@
 // Admin-only operations (spec 4.8): replay a page's stored raw payloads through the change gate,
-// and re-point every Monitor's webhook at a new host. Each route checks the admin token first,
-// so an unknown page or a bad body never tells a stranger anything.
+// re-point every Monitor's webhook at a new host, and pull one overdue Monitor check. Each route
+// checks the admin token first, so an unknown page or a bad body never tells a stranger anything.
 import { Hono } from "hono";
 import { adminOnly } from "../auth";
-import { isFetchFailure, normalizedHash, readIgnorePatterns } from "../core/gate";
+import { spendPaused } from "../capture";
+import { isFetchFailure, judgeChange, normalizedHash, readIgnorePatterns, type Verdict } from "../core/gate";
 import { changedRunsForReplay, clearNoise, markNoise } from "../db/runs";
 import { deleteCachedDiffsOfPage } from "../db/diffCache";
 import { getPage, listPages, updatePage } from "../db/pages";
-import { baselineVersion, getVersion, insertVersion } from "../db/versions";
+import { baselineVersion, getVersion, insertVersion, latestVersion } from "../db/versions";
 import type { Env } from "../env";
+import { recordMonitorRun, type MonitorRun } from "../record";
 import { TinyFishError } from "../tinyfish/client";
-import { updateMonitor } from "../tinyfish/monitor";
+import { runMonitorNow, updateMonitor } from "../tinyfish/monitor";
 import { codeOf, readBody } from "./pages";
 import { parsePayload, type MonitorPayload } from "./webhooks";
 
@@ -172,4 +174,78 @@ adminRouter.post("/admin/rotate-webhook", adminOnly, async (c) => {
     }
   }
   return c.json({ updated, failed });
+});
+
+// --- Pull an overdue check ------------------------------------------------------------------------
+
+/**
+ * The one place an overdue check is pulled (the hourly cron calls it through the SELF service
+ * binding, one Worker invocation per page, so each pull has a request's own CPU and subrequests).
+ * It asks TinyFish to run the page's Monitor now and records that run under TinyFish's run id,
+ * marked `pull`, through the same recording path a webhook run takes.
+ *
+ * - An expired or paused page, or one without a Monitor, is not pulled (409 `not_pullable`); at the
+ *   spend pause nothing is called (200, `pulled: false`).
+ * - A run with no text or with errors records nothing: TinyFish does not bill a failed check, and the
+ *   page stays overdue for the next tick (200, `pulled: false` with the reason).
+ * - Otherwise the raw 201 body is stored at `raw/<run id>.json` and the outcome is Fineprint's own
+ *   (R71): no version yet is the `baseline` and becomes one; text equal to the latest version's
+ *   (plain string equality) is `unchanged` and is not normalized; anything else is `changed` and
+ *   goes through the change gate. A run id already recorded is a duplicate and writes nothing.
+ */
+adminRouter.post("/admin/pull/:pageId", adminOnly, async (c) => {
+  const db = c.env.DB;
+  const page = await getPage(db, c.req.param("pageId"));
+  if (!page) return c.json({ error: "not_found" }, 404);
+  if (page.status === "expired" || page.status === "paused" || page.monitor_id === null) {
+    return c.json({ error: "not_pullable" }, 409);
+  }
+  if (await spendPaused(db)) return c.json({ ok: true, pulled: false, reason: "spend_paused" });
+
+  let pulled: Awaited<ReturnType<typeof runMonitorNow>>;
+  try {
+    pulled = await runMonitorNow(c.env, page.monitor_id);
+  } catch (err) {
+    logFailure(`pull: run-now failed for page ${page.id}`, err);
+    return c.json({ error: "run_now_failed", reason: codeOf(err) }, 502);
+  }
+
+  const run: MonitorRun = {
+    id: pulled.runId,
+    outcome: "unchanged", // worked out below
+    isBaseline: false,
+    diffTruncated: false,
+    judgmentRelevant: null,
+    judgmentSummary: null,
+    text: pulled.text ?? "",
+    hasErrors: pulled.errors.length > 0,
+  };
+  if (isFetchFailure(run)) return c.json({ ok: true, pulled: false, reason: run.hasErrors ? "fetch_error" : "no_text" });
+
+  const receivedAt = new Date().toISOString();
+  const rawKey = `raw/${run.id}.json`;
+  await c.env.STORE.put(rawKey, pulled.raw, { httpMetadata: { contentType: "application/json" } });
+
+  // As the webhook does, the run is judged before it is claimed (src/record.ts).
+  let verdict: Verdict | null = null;
+  const latest = await latestVersion(db, page.id);
+  if (latest === null) {
+    run.outcome = "baseline";
+    run.isBaseline = true;
+    verdict = { kind: "new_version", hash: await normalizedHash(run.text, readIgnorePatterns(page.ignore_patterns)), baseline: true };
+  } else if (run.text !== latest.text) {
+    run.outcome = "changed";
+    verdict = await judgeChange(db, page, run);
+  }
+
+  const recorded = await recordMonitorRun(c.env, c.executionCtx, { page, run, trigger: "pull", rawKey, receivedAt, verdict });
+  if (recorded.kind === "duplicate") return c.json({ ok: true, duplicate: true });
+  return c.json({
+    ok: true,
+    pulled: true,
+    run_id: recorded.runId,
+    outcome: run.outcome,
+    ...(recorded.versionId !== null ? { version_id: recorded.versionId } : {}),
+    ...(recorded.suppressed ? { suppressed: true } : {}),
+  });
 });
