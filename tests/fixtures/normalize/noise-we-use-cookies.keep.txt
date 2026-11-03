@@ -1,3 +1,4 @@
 ## Pricing
 Cookies expire after 30 days
+We use cookies and similar technologies to keep you signed in, remember your language, measure how the pricing page is used and show you plans in your currency. Essential cookies are always on. Analytics cookies are off until you opt in, and you can withdraw consent at any time from your account settings. We keep analytics data for 13 months and never sell it to third parties. Questions: privacy@example.com.
 Pro $25 /mo

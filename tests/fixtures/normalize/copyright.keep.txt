@@ -1,3 +1,5 @@
 ## Contact
 Email support@example.com
 Photos remain the copyright of their authors
+Copyright and trademark complaints: send notices to legal@x.com
+© Vercel

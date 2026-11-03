@@ -145,24 +145,38 @@ function isDateStamp(stamp: string): boolean {
 
 // --- Other whole-line rules -------------------------------------------------
 
-// "(c)" and "©" lines are footers. "copyright" must be a whole word, so
-// "Copyrighted material..." stays.
-const COPYRIGHT = /^(?:©|copyright(?![\p{L}\d]))/iu;
+// A copyright footer starts with "©", "(c)" or the whole word "copyright" and
+// carries a year ("Copyright © 2026 Example Inc. All rights reserved."). A policy
+// sentence that merely starts with the word ("Copyright and trademark complaints:
+// send notices to legal@x.com") has no year and stays, and so does "Copyrighted...".
+const COPYRIGHT = /^(?:©|\(c\)|copyright(?![\p{L}\d]))/iu;
+const YEAR_19XX_20XX = /\b(?:19|20)\d{2}\b/;
+// Footers are one short line; a longer line starting this way is policy text.
+const MAX_COPYRIGHT_LENGTH = 200;
+
 const RELATIVE_TIME = /\b\d+ (?:seconds?|minutes?|hours?|days?) ago\b/i;
 
-// Cookie banners and navigation shortcuts: the phrase anywhere in the line.
-const BANNER_PHRASE = /skip to content|we use cookies|accept all cookies|cookie settings/i;
+// Cookie banners and buttons are short; a long line that says "we use cookies" is a
+// privacy-policy paragraph, which is content (and a real change if it moves).
+const MAX_COOKIE_BANNER_LENGTH = 300;
+const COOKIE_BANNER_PHRASE = /we use cookies|accept all cookies|cookie settings/i;
+const SKIP_TO_CONTENT = /skip to content/i;
 // "23 people viewing", "1,204 others are viewing". The digit run is bounded so a
 // long run of digits and commas cannot make the scan quadratic.
 const VIEWER_COUNTER = /\b\d[\d,]{0,11} (?:people|others)(?: are)? viewing\b/i;
 // A line that is only "1.2k shares" / "12 Shares". "Revenue share" stays.
 const SHARE_COUNTER = /^\d[\d,]*(?:\.\d+)?[km]? shares?$/i;
 
+function isCopyrightFooter(line: string, body: string): boolean {
+  return line.length <= MAX_COPYRIGHT_LENGTH && COPYRIGHT.test(body) && YEAR_19XX_20XX.test(line);
+}
+
 function isNoiseLine(line: string, body: string, ignore: readonly RegExp[]): boolean {
   if (isMetadataLine(body)) return true;
-  if (COPYRIGHT.test(body)) return true;
+  if (isCopyrightFooter(line, body)) return true;
   if (RELATIVE_TIME.test(line)) return true;
-  if (BANNER_PHRASE.test(line) || VIEWER_COUNTER.test(line)) return true;
+  if (SKIP_TO_CONTENT.test(line) || VIEWER_COUNTER.test(line)) return true;
+  if (line.length <= MAX_COOKIE_BANNER_LENGTH && COOKIE_BANNER_PHRASE.test(line)) return true;
   if (SHARE_COUNTER.test(body.replace(/[*_`]/g, ""))) return true;
   return ignore.some((re) => re.test(line));
 }

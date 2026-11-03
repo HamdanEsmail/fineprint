@@ -181,12 +181,39 @@ describe("normalize: metadata lines", () => {
 });
 
 describe("normalize: copyright and relative time", () => {
-  it.each(["© 2026 Example Inc.", "Copyright 2026 Example Inc.", "Copyright (c) 2026 Example", "**Copyright** © 2026", "> © Example"])("drops copyright line %j", (line) => {
+  it.each([
+    "© 2026 Example Inc.",
+    "Copyright 2026 Example Inc.",
+    "Copyright © 2026 Vercel Inc. All rights reserved.",
+    "Copyright (c) 2026 Example",
+    "(c) 2026 Example",
+    "(C) 1999-2026 Example Inc.",
+    "**Copyright** © 2026",
+    "> © 2026 Example",
+  ])("drops copyright line %j", (line) => {
     expect(normalize(`A\n${line}`)).toEqual({ text: "A", suppressed: [line] });
   });
 
-  it.each(["Photos remain the copyright of their authors", "Copyrighted material is removed within 24 hours", "Terms | © 2026 Example"])("keeps %j", (line) => {
+  it.each([
+    "Photos remain the copyright of their authors",
+    "Copyrighted material is removed within 24 hours",
+    "Terms | © 2026 Example",
+    "© Vercel",
+    "Copyright Example Inc. All rights reserved.",
+    "(c) Example",
+    "Copyright and trademark complaints: send notices to legal@x.com",
+    "Copyright holders may file a claim within 30 days of the removal",
+    "Copyright 12026 Example",
+  ])("keeps %j", (line) => {
     expect(normalize(line)).toEqual({ text: line, suppressed: [] });
+  });
+
+  it("drops a copyright footer of up to 200 characters and keeps a longer line that starts the same way", () => {
+    const footer = (length: number) => `Copyright © 2026 ${"x".repeat(length - "Copyright © 2026 ".length)}`;
+    expect(footer(200)).toHaveLength(200);
+    expect(normalize(footer(200))).toEqual({ text: "", suppressed: [footer(200)] });
+    expect(footer(201)).toHaveLength(201);
+    expect(normalize(footer(201))).toEqual({ text: footer(201), suppressed: [] });
   });
 
   it.each(["3 hours ago", "Posted 1 day ago by admin", "Edited 45 Minutes AGO", "12 seconds ago", "Checked 2 days ago"])("drops relative time line %j", (line) => {
@@ -232,6 +259,35 @@ describe("normalize: built-in noise list", () => {
     "Cookie policy",
   ])("keeps %j", (line) => {
     expect(normalize(line)).toEqual({ text: line, suppressed: [] });
+  });
+});
+
+describe("normalize: cookie banner length cap", () => {
+  it("drops a banner line of up to 300 characters and keeps a longer line with the same phrase", () => {
+    const banner = (length: number) => `We use cookies ${"x".repeat(length - "We use cookies ".length)}`;
+    expect(banner(300)).toHaveLength(300);
+    expect(normalize(banner(300))).toEqual({ text: "", suppressed: [banner(300)] });
+    expect(banner(301)).toHaveLength(301);
+    expect(normalize(banner(301))).toEqual({ text: banner(301), suppressed: [] });
+  });
+
+  it.each(["we use cookies", "accept all cookies", "cookie settings"])("applies the cap to %j anywhere in the line", (phrase) => {
+    const short = `Intro. ${phrase}. ${"y".repeat(100)}`;
+    const long = `Intro. ${phrase}. ${"y".repeat(400)}`;
+    expect(normalize(short).text).toBe("");
+    expect(normalize(long)).toEqual({ text: long, suppressed: [] });
+  });
+
+  it("keeps a 400-character privacy-policy paragraph that says 'we use cookies'", () => {
+    const paragraph =
+      "We use cookies and similar technologies to keep you signed in, remember your language, measure how the pricing page is used and show you plans in your currency. Essential cookies are always on. Analytics cookies are off until you opt in, and you can withdraw consent at any time from your account settings. We keep analytics data for 13 months and never sell it to third parties.";
+    expect(paragraph.length).toBeGreaterThan(300);
+    expect(normalize(paragraph)).toEqual({ text: paragraph, suppressed: [] });
+  });
+
+  it("does not cap 'skip to content'", () => {
+    const long = `Skip to content ${"z".repeat(400)}`;
+    expect(normalize(long)).toEqual({ text: "", suppressed: [long] });
   });
 });
 
@@ -357,6 +413,14 @@ describe("normalize: fixture pairs (one suppressed, one near-miss per rule)", ()
     const files = Object.keys(fixtures).map((p) => p.replace("./fixtures/normalize/", ""));
     const expected = Object.keys(RULES).flatMap((r) => [`${r}.suppress.txt`, `${r}.keep.txt`]);
     expect(files.sort()).toEqual(expected.sort());
+  });
+
+  it("the cookie and copyright near-miss fixtures exercise the length cap and the year rule", () => {
+    const cookies = lines(fixtures["./fixtures/normalize/noise-we-use-cookies.keep.txt"]!);
+    expect(cookies.some((l) => l.length > 300 && /we use cookies/i.test(l))).toBe(true);
+    const copyright = lines(fixtures["./fixtures/normalize/copyright.keep.txt"]!);
+    expect(copyright.some((l) => /^copyright/i.test(l) && !/\d{4}/.test(l))).toBe(true);
+    expect(copyright.some((l) => /^©/.test(l) && !/\d{4}/.test(l))).toBe(true);
   });
 
   describe.each(Object.entries(RULES))("%s", (name, rule) => {
