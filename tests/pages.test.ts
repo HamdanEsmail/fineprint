@@ -1,7 +1,8 @@
 import { applyD1Migrations, createExecutionContext, reset, waitOnExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { safeEqual } from "../src/auth";
+import { captureDeps } from "../src/capture";
 import { MAX_MONITORS, PUBLIC_SLOTS, PUBLIC_TTL_DAYS } from "../src/core/limits";
 import { hashText, normalize } from "../src/core/normalize";
 import { PURPOSE } from "../src/core/schedule";
@@ -18,6 +19,7 @@ import monitorCreate from "./fixtures/tinyfish/monitor-create.json";
 
 const FETCH_API = "https://api.fetch.tinyfish.ai";
 const MONITORS_API = "https://agent.tinyfish.ai/v1/monitors";
+const RUN_ASYNC_API = "https://agent.tinyfish.ai/v1/automation/run-async";
 const PRICING_URL = "https://vercel.com/pricing";
 const PRICING_TITLE = "Vercel Pricing: Hobby, Pro, and Enterprise plans";
 const ADMIN = { Authorization: "Bearer test-admin" };
@@ -53,7 +55,8 @@ function monitorCreated(): Response {
  * TinyFetch answers with the pricing fixture (after `fetchDelayMs`); each Monitor create gets ids
  * mon-N / mrun-N. With `holdCreatesUntil` set, a Monitor create is answered only once that many
  * creates have arrived (or after 2 s), so that many adds are all past their checks before any of
- * them writes a row. Deleting a Monitor named mon-N is always answered.
+ * them writes a row. Deleting a Monitor named mon-N is always answered, and so is the facts run
+ * the capture of a pricing page's baseline starts (agent-run-N).
  */
 function mockTinyFish(opts: { fetchDelayMs?: number; holdCreatesUntil?: number } = {}) {
   let arrived = 0;
@@ -82,6 +85,13 @@ function mockTinyFish(opts: { fetchDelayMs?: number; holdCreatesUntil?: number }
     },
   });
   fetchMock.intercept({ method: "DELETE", url: /\/v1\/monitors\/mon-\d+$/, times: Infinity, reply: { status: 204 } });
+  let agentRuns = 0;
+  fetchMock.intercept({
+    method: "POST",
+    url: RUN_ASYNC_API,
+    times: Infinity,
+    reply: () => Response.json({ run_id: `agent-run-${++agentRuns}` }),
+  });
 }
 
 function mockMonitorDelete(id: string, reply: { status?: number; json?: unknown } = { status: 204 }) {
@@ -144,14 +154,28 @@ async function count(table: "pages" | "runs" | "versions") {
   return row!.n;
 }
 
+// An add schedules the real capture of its baseline (src/capture.ts). The screenshot is
+// stubbed here; the source comes from the TinyFetch interceptor of mockTinyFish.
+let shot: MockInstance<typeof captureDeps.screenshotFullPage>;
+
 beforeEach(async () => {
   monitorSeq = 0;
   fetchMock.activate();
   await reset();
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   scheduled = [];
+  shot = vi.spyOn(captureDeps, "screenshotFullPage").mockImplementation(async () => ({
+    bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]).buffer,
+    height: 800,
+    sessionId: "sess-test",
+  }));
+  captureDeps.sleep = async () => {};
 });
-afterEach(() => fetchMock.reset());
+afterEach(() => {
+  fetchMock.reset();
+  shot.mockRestore();
+  captureDeps.sleep = undefined;
+});
 
 describe("POST /api/pages as admin", () => {
   it("validates with TinyFetch, creates a Monitor with the staggered cron and purpose, stores the baseline version", async () => {
@@ -191,19 +215,32 @@ describe("POST /api/pages as admin", () => {
       purpose: PURPOSE,
       webhook_url: "https://fineprint.test/hooks/monitor/test-secret",
     });
-    expect(fetchMock.calls.map((c) => new URL(c.url).hostname)).toEqual(["api.fetch.tinyfish.ai", "agent.tinyfish.ai"]);
+    // After the response, the baseline's capture fetches the html source (the screenshot is stubbed;
+    // an `other` page takes no facts run).
+    expect(fetchMock.calls.map((c) => new URL(c.url).hostname)).toEqual([
+      "api.fetch.tinyfish.ai",
+      "agent.tinyfish.ai",
+      "api.fetch.tinyfish.ai",
+    ]);
+    expect(callsTo("POST", FETCH_API)[1]!.body).toMatchObject({ urls: [PRICING_URL], format: "html" });
+    expect(shot).toHaveBeenCalledTimes(1);
 
     // The baseline run and version come from the 201 body.
     const versions = await versionsOf(body.page.id);
     expect(versions).toHaveLength(1);
     const version = versions[0]!;
     expect(body.baseline_version_id).toBe(version.id);
+    // Stored as `pending` with no attempts; the capture that waitUntil ran has completed it.
     expect(version).toMatchObject({
       is_baseline: 1,
-      capture_status: "pending",
-      capture_attempts: 0,
+      capture_status: "complete",
+      capture_attempts: 1,
+      capture_error: null,
       judgment_summary: null,
-      screenshot_key: null,
+      screenshot_key: `shots/${version.id}.jpg`,
+      html_key: `html/${version.id}.html`,
+      facts_json: null,
+      agent_run_id: null,
     });
     expect(version.text.length).toBe(13696);
     expect(version.normalized_hash).toBe(await hashText(normalize(version.text).text));
@@ -212,14 +249,15 @@ describe("POST /api/pages as admin", () => {
     expect(run).toMatchObject({ outcome: "baseline", is_baseline: 1, monitor_run_id: "mrun-1", noise_suppressed: 0 });
     expect(version.run_id).toBe(run.id);
 
-    // The capture of the baseline version is scheduled with waitUntil (Task 8 builds the capture itself).
+    // The capture of the baseline version is scheduled with waitUntil.
     expect(scheduled).toHaveLength(1);
 
-    // The ledger holds the free TinyFetch and the billed baseline check.
+    // The ledger holds the free TinyFetch, the billed baseline check and the capture's free TinyFetch.
     const { results: spend } = await env.DB.prepare("SELECT kind, amount_usd, ref FROM spend ORDER BY rowid").all();
     expect(spend).toEqual([
       { kind: "fetch", amount_usd: 0, ref: PRICING_URL },
       { kind: "monitor_check", amount_usd: 0.005, ref: PRICING_URL },
+      { kind: "fetch", amount_usd: 0, ref: PRICING_URL },
     ]);
   });
 
@@ -659,7 +697,8 @@ describe("GET /api/pages", () => {
     const body = await json(res);
     expect(body.page).toMatchObject({ id: added.page.id, url: PRICING_URL, ignore_patterns: [] });
     expect(body.versions).toHaveLength(1);
-    expect(body.versions[0]).toMatchObject({ id: added.baseline_version_id, is_baseline: 1, capture_status: "pending" });
+    // The add's waitUntil capture has run by now (screenshot stubbed, html from TinyFetch).
+    expect(body.versions[0]).toMatchObject({ id: added.baseline_version_id, is_baseline: 1, capture_status: "complete" });
     expect(body.versions[0]).not.toHaveProperty("text");
   });
 
@@ -907,7 +946,11 @@ describe("parallel adds", () => {
       expect(await json(res)).toEqual({ error: "daily_limit", reason: "One public page per day per visitor" });
     }
     expect(callsTo("POST", MONITORS_API)).toHaveLength(1);
-    expect(callsTo("POST", FETCH_API)).toHaveLength(1); // the losers never got as far as TinyFetch
+    // The losers never got as far as TinyFetch: one validation, and one html fetch by the winner's capture.
+    const fetches = callsTo("POST", FETCH_API).map((c) => (c.body as { format: string }).format);
+    expect(fetches.filter((f) => f === "markdown")).toHaveLength(1);
+    expect(fetches.filter((f) => f === "html")).toHaveLength(1);
+    expect(fetches).toHaveLength(2);
     expect(await count("pages")).toBe(1);
     expect(await publicAddsToday(env.DB, await hashText("203.0.113.70" + env.WEBHOOK_SECRET))).toBe(1);
   });

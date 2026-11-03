@@ -6,16 +6,20 @@
 // `changed` run decides through the normalization gate whether the page really
 // changed. It runs on the free plan (10 ms CPU), so it does no line diffs: it
 // normalizes and hashes, and that is all.
+//
+// The Agent route receives TinyAgent's run-lifecycle callback for a facts run and
+// hands the result to the capture pipeline (src/capture.ts).
 import { Hono } from "hono";
 import { safeEqual } from "../auth";
-import { captureVersion } from "../capture";
+import { captureVersion, recordFactsResult } from "../capture";
 import { hashText, normalize } from "../core/normalize";
 import { PRICES, recordSpend } from "../core/spend";
 import { getPageByMonitorId, updatePage } from "../db/pages";
 import { deleteRun, insertRun, markNoise, setRunNote } from "../db/runs";
 import type { PageRow } from "../db/types";
-import { getVersion, insertVersion, latestVersionHash, setVersionHash } from "../db/versions";
+import { getVersion, getVersionByAgentRunId, insertVersion, latestVersionHash, setVersionHash } from "../db/versions";
 import type { Env } from "../env";
+import { getRun } from "../tinyfish/agent";
 
 export const webhooksRouter = new Hono<{ Bindings: Env }>();
 
@@ -245,4 +249,72 @@ webhooksRouter.post("/monitor/:secret", async (c) => {
     );
   }
   return c.json(response);
+});
+
+// --- Agent callback ---------------------------------------------------------------
+
+const TERMINAL_AGENT_STATUSES = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
+
+/**
+ * Settles a finished facts run. The callback may leave out the result or the step
+ * count; then the run is fetched. If the result is needed and cannot be fetched, the
+ * run is left in flight for the cron's follow-up to settle.
+ */
+async function settleAgentRun(
+  env: Env,
+  runId: string,
+  status: string,
+  given: { result: unknown; numSteps: number | null },
+): Promise<void> {
+  // Only runs Fineprint started are fetched or recorded.
+  if (runId.startsWith("claim:") || (await getVersionByAgentRunId(env.DB, runId)) === null) return;
+
+  let { result, numSteps } = given;
+  const needResult = status === "COMPLETED" && (result === null || result === undefined);
+  if (needResult || numSteps === null) {
+    try {
+      const run = await getRun(env, runId);
+      if (needResult) result = run.result;
+      numSteps ??= run.num_of_steps;
+    } catch (err) {
+      logError(`agent run ${runId.slice(0, 100)} could not be fetched`, err);
+      if (needResult) return;
+    }
+  }
+  await recordFactsResult(env, runId, status, result, numSteps);
+}
+
+webhooksRouter.post("/agent/:secret", async (c) => {
+  if (!secretMatches(c.req.param("secret"), c.env.WEBHOOK_SECRET)) return c.body(null, 404);
+
+  // Always 200 after the secret: a run we cannot use is not worth a TinyFish retry.
+  const ignored = () => c.json({ ok: true, ignored: true });
+  try {
+    let data: unknown;
+    try {
+      data = JSON.parse(await c.req.text());
+    } catch {
+      return ignored();
+    }
+    if (!isRecord(data)) return ignored();
+    const { run_id: runId, status } = data;
+    if (typeof runId !== "string" || runId === "" || runId.length > MAX_RUN_ID_LENGTH) return ignored();
+    if (typeof status !== "string" || !TERMINAL_AGENT_STATUSES.has(status.toUpperCase())) return ignored();
+
+    const given = {
+      result: data.result,
+      numSteps: typeof data.num_of_steps === "number" ? data.num_of_steps : null,
+    };
+    // Recording the result may start the next queued facts run, whose 429 retries can
+    // take minutes, so it runs after the response.
+    c.executionCtx.waitUntil(
+      settleAgentRun(c.env, runId, status.toUpperCase(), given).catch((err: unknown) =>
+        logError(`agent callback for ${runId.slice(0, 100)} failed`, err),
+      ),
+    );
+    return c.json({ ok: true });
+  } catch (err) {
+    logError("agent callback failed", err);
+    return c.json({ ok: true });
+  }
 });

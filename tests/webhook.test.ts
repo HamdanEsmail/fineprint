@@ -1,6 +1,7 @@
 import { applyD1Migrations, reset } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { captureDeps } from "../src/capture";
 import { hashText, normalize } from "../src/core/normalize";
 import { PRICES } from "../src/core/spend";
 import { getPage, insertPage, type NewPage } from "../src/db/pages";
@@ -70,15 +71,21 @@ async function seedPage(fixture: Fixture, over: Partial<NewPage> = {}): Promise<
   });
 }
 
-/** The page's baseline version, hashed the way the add flow hashes it (or with a hash of the test's choosing). */
+/**
+ * The page's baseline version, hashed the way the add flow hashes it (or with a hash of the test's
+ * choosing), and fully captured: a complete pricing baseline has its screenshot, its source and its
+ * facts. (One without facts would be the oldest entry in the facts queue, and the capture of every
+ * new version would try to start its Agent run first.)
+ */
 async function seedBaseline(
   fixture: Fixture,
   text: string,
   hash?: string,
   patterns: string[] = [],
 ): Promise<void> {
+  const id = `v-baseline-${fixture.fetch_monitor_id}`;
   await insertVersion(env.DB, {
-    id: `v-baseline-${fixture.fetch_monitor_id}`,
+    id,
     page_id: pageIdFor(fixture),
     run_id: null,
     is_baseline: 1,
@@ -86,7 +93,11 @@ async function seedBaseline(
     text,
     normalized_hash: hash ?? (await hashText(normalize(text, patterns).text)),
     judgment_summary: null,
+    screenshot_key: `shots/${id}.jpg`,
+    html_key: `html/${id}.html`,
+    facts_json: JSON.stringify([{ name: "Pro", price: "$20", unit: "per month", notes: null }]),
     capture_status: "complete",
+    capture_attempts: 0,
   });
 }
 
@@ -100,12 +111,42 @@ async function getPageRow(fixture: Fixture): Promise<PageRow> {
   return (await getPage(env.DB, pageIdFor(fixture)))!;
 }
 
+// A new version's capture (src/capture.ts) runs in waitUntil, which `post` awaits. Where a
+// test looks at the captured version it calls captureSucceeds(); elsewhere the capture's
+// TinyFish requests meet no interceptor and fail without touching the network.
+let shot: MockInstance<typeof captureDeps.screenshotFullPage> | undefined;
+
+/** The capture of a new version succeeds: the screenshot is stubbed, TinyFetch and TinyAgent answer. */
+function captureSucceeds(): void {
+  shot = vi.spyOn(captureDeps, "screenshotFullPage").mockImplementation(async () => ({
+    bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]).buffer,
+    height: 800,
+    sessionId: "sess-test",
+  }));
+  fetchMock.intercept({
+    method: "POST",
+    url: "https://api.fetch.tinyfish.ai",
+    times: Infinity,
+    reply: { json: { results: [{ text: "<html><body>Pro $25/mo.</body></html>" }] } },
+  });
+  fetchMock.intercept({
+    method: "POST",
+    url: "https://agent.tinyfish.ai/v1/automation/run-async",
+    times: Infinity,
+    reply: { json: { run_id: "agent-run-1" } },
+  });
+}
+
 beforeEach(async () => {
   fetchMock.activate(); // nothing here may reach the network; an unmatched fetch throws
   await reset();
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
 });
-afterEach(() => fetchMock.reset());
+afterEach(() => {
+  fetchMock.reset();
+  shot?.mockRestore();
+  shot = undefined;
+});
 
 describe("POST /hooks/monitor/:secret", () => {
   it("wrong secret is 404 and stores nothing", async () => {
@@ -161,6 +202,7 @@ describe("POST /hooks/monitor/:secret", () => {
 
   it("changed run with a real difference creates a version with captured_at = receipt time and keeps the raw payload in R2", async () => {
     await watch(changedReal, BASE_TEXT);
+    captureSucceeds();
     const posted = JSON.stringify(changedReal);
 
     const before = new Date().toISOString();
@@ -183,8 +225,13 @@ describe("POST /hooks/monitor/:secret", () => {
       text: realText,
       normalized_hash: await hashText(normalize(realText, []).text),
       judgment_summary: changedReal.judgment.summary,
-      capture_status: "pending",
-      capture_attempts: 0,
+      // Inserted `pending`; the capture scheduled with waitUntil then stored the screenshot and
+      // source and, the page being a pricing page and the change relevant, started a facts run.
+      capture_status: "awaiting_facts",
+      capture_attempts: 1,
+      screenshot_key: `shots/${version.id}.jpg`,
+      html_key: `html/${version.id}.html`,
+      agent_run_id: "agent-run-1",
     });
     // The webhook carries no timestamp: the version is dated by when we received it.
     expect(version.captured_at).toBe(run!.received_at);
@@ -201,7 +248,11 @@ describe("POST /hooks/monitor/:secret", () => {
     const page = await getPageRow(changedReal);
     expect(page.last_run_at).toBe(run!.received_at);
     expect(page.last_change_at).toBe(run!.received_at);
-    expect(await spendRows()).toHaveLength(1);
+    // One billed check, and the capture's free TinyFetch (the stubbed screenshot records nothing).
+    expect((await spendRows()).map((s) => [s.kind, s.amount_usd, s.ref]).sort()).toEqual([
+      ["fetch", 0, `https://example.com/${changedReal.fetch_monitor_id}`],
+      ["monitor_check", 0.005, changedReal.id],
+    ]);
 
     const raw = await env.STORE.get(`raw/${changedReal.id}.json`);
     expect(raw).not.toBeNull();
@@ -249,6 +300,9 @@ describe("POST /hooks/monitor/:secret", () => {
     const vs = await versions(changedReal);
     expect(vs).toHaveLength(2);
     expect(vs[1]!.id).toBe(firstBody.version_id);
+    // The new version's capture fails here (no interceptors), and it must not touch the complete
+    // baseline: a seeded baseline without facts would be the facts queue's oldest candidate.
+    expect(vs[0]).toMatchObject({ capture_status: "complete", capture_attempts: 0, capture_error: null, agent_run_id: null });
     // The retry is not a second check: one ledger row, and the page's change time is the first delivery's.
     expect(await spendRows()).toHaveLength(1);
     expect((await getPageRow(changedReal)).last_run_at).toBe((await runs())[0]!.received_at);
@@ -579,12 +633,14 @@ describe("POST /hooks/monitor/:secret", () => {
 
     it("a page with no version at all gets one from its first changed run", async () => {
       await seedPage(changedReal);
+      captureSucceeds();
 
       const res = await post(changedReal);
       expect(res.status).toBe(200);
       const vs = await versions(changedReal);
       expect(vs).toHaveLength(1);
-      expect(vs[0]).toMatchObject({ is_baseline: 0, text: changedReal.results[0]!.text, capture_status: "pending" });
+      // Captured by the waitUntil work `post` awaits: screenshot and source stored, facts run started.
+      expect(vs[0]).toMatchObject({ is_baseline: 0, text: changedReal.results[0]!.text, capture_status: "awaiting_facts" });
       expect(await res.json()).toEqual({ ok: true, version_id: vs[0]!.id });
     });
 

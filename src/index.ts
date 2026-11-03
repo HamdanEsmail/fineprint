@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "./env";
+import { objectsRouter } from "./handlers/objects";
 import { pagesRouter } from "./handlers/pages";
 import { webhooksRouter } from "./handlers/webhooks";
 
@@ -7,6 +8,7 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.route("/api/pages", pagesRouter);
 app.route("/hooks", webhooksRouter);
+app.route("/", objectsRouter);
 
 // Temporary: Task 9 replaces this with the real stats endpoint.
 app.get("/api/stats", async (c) => {

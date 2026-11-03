@@ -32,6 +32,11 @@ export async function insertRun(db: D1Database, r: RunRow): Promise<"inserted" |
   return result.meta.changes === 0 ? "duplicate" : "inserted";
 }
 
+/** One run by our own id, or null. */
+export function getRunById(db: D1Database, id: string): Promise<RunRow | null> {
+  return db.prepare("SELECT * FROM runs WHERE id = ?").bind(id).first<RunRow>();
+}
+
 /** Flags a run as suppressed noise and records why. */
 export async function markNoise(db: D1Database, runId: string, reason: string): Promise<void> {
   await db

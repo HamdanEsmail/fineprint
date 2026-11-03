@@ -1,3 +1,4 @@
+import { CAPTURE_MAX_ATTEMPTS } from "../core/limits";
 import type { VersionRow } from "./types";
 
 /** What a caller supplies to insertVersion; the capture columns default to a fresh, uncaptured version. */
@@ -234,4 +235,60 @@ export async function updateCapture(db: D1Database, id: string, patch: CapturePa
 /** The version whose facts run has this Agent run id, or null. */
 export function getVersionByAgentRunId(db: D1Database, runId: string): Promise<VersionRow | null> {
   return db.prepare("SELECT * FROM versions WHERE agent_run_id = ?").bind(runId).first<VersionRow>();
+}
+
+// --- The facts queue -------------------------------------------------------------
+//
+// Fineprint keeps at most one TinyAgent run in flight. A version holds the slot while
+// its `agent_run_id` is set and its `facts_json` is not: first a `claim:<iso>` token,
+// then the real run id. Stored facts free the slot (the run id stays as the record of
+// the run); a failed run clears `agent_run_id`.
+
+/**
+ * Takes the single facts slot for a version, in one statement: true when the version
+ * had no run and no facts and no other version holds the slot, and now holds `token`
+ * in `agent_run_id`. Parallel claims cannot both win.
+ */
+export async function claimFactsSlot(db: D1Database, versionId: string, token: string): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE versions SET agent_run_id = ?1
+       WHERE id = ?2 AND agent_run_id IS NULL AND facts_json IS NULL
+         AND NOT EXISTS (SELECT 1 FROM versions WHERE agent_run_id IS NOT NULL AND facts_json IS NULL)`,
+    )
+    .bind(token, versionId)
+    .run();
+  return result.meta.changes === 1;
+}
+
+/** A version waiting in the facts queue, with its page's url. */
+export type FactsCandidate = VersionSummary & { url: string };
+
+/**
+ * The oldest version (by `captured_at`) that is waiting for a facts run: its page is
+ * `pricing` or `fees`, it has no facts and no run, it is not `failed`, it has attempts
+ * left, and it is a baseline or its run was not judged irrelevant (a judgment of NULL,
+ * or no run at all, counts as relevant). Null when the queue is empty.
+ */
+export function nextFactsCandidate(
+  db: D1Database,
+  maxAttempts: number = CAPTURE_MAX_ATTEMPTS,
+): Promise<FactsCandidate | null> {
+  return db
+    .prepare(
+      `SELECT ${summaryColumns("v.")}, p.url AS url
+       FROM versions v
+       JOIN pages p ON p.id = v.page_id
+       LEFT JOIN runs r ON r.id = v.run_id
+       WHERE p.kind IN ('pricing', 'fees')
+         AND v.facts_json IS NULL
+         AND v.agent_run_id IS NULL
+         AND v.capture_status != 'failed'
+         AND v.capture_attempts < ?
+         AND (v.is_baseline = 1 OR r.judgment_relevant IS NULL OR r.judgment_relevant != 0)
+       ORDER BY v.captured_at, v.rowid
+       LIMIT 1`,
+    )
+    .bind(maxAttempts)
+    .first<FactsCandidate>();
 }
