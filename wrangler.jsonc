@@ -7,7 +7,7 @@
     {
       "binding": "DB",
       "database_name": "fineprint",
-      "database_id": "TBD-after-create",
+      "database_id": "307042e7-7267-42fd-91c4-4162cfff4280",
       "migrations_dir": "migrations"
     }
   ],
@@ -21,7 +21,7 @@
     "crons": ["0 * * * *"]
   },
   "vars": {
-    "PUBLIC_BASE_URL": "http://localhost:8787"
+    "PUBLIC_BASE_URL": "https://fineprint.hamdanesmail12-7a9.workers.dev"
   },
   "observability": {
     "enabled": true
