@@ -15,6 +15,13 @@ export const AGENT_MAX_DURATION_SECONDS = 120;
 
 /** A version whose capture keeps failing is retried this many times, then left as it is. */
 export const CAPTURE_MAX_ATTEMPTS = 3;
+/**
+ * The hourly cron repairs at most this many versions per tick, oldest first. Each capture
+ * makes several outbound requests, and the free plan allows 50 per invocation.
+ */
+export const REPAIR_PER_TICK = 3;
+/** The cron's health check looks up at most this many Monitors missing from the list, one request each, per tick. */
+export const MONITOR_LOOKUPS_PER_TICK = 3;
 /** Full-page screenshots are cut off at this height in pixels. */
 export const SCREENSHOT_MAX_HEIGHT = 8000;
 

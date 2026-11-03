@@ -193,25 +193,28 @@ export async function listChanges(
 /**
  * Versions the repair cron should retry: `pending` or `partial`, captured at or
  * before `olderThanIso`, with fewer than `maxAttempts` attempts, oldest first,
- * without `text`. Versions in `awaiting_facts` are never returned: a facts
- * queue owns them, and counting a wait for the Agent callback as a failed
- * attempt would mark them failed.
+ * without `text`, at most `limit` of them when it is given. Versions in
+ * `awaiting_facts` are never returned: a facts queue owns them, and counting a
+ * wait for the Agent callback as a failed attempt would mark them failed. Nor are
+ * versions of an expired page: its recording has ended.
  */
 export async function pendingCaptures(
   db: D1Database,
   olderThanIso: string,
   maxAttempts: number,
+  limit?: number,
 ): Promise<VersionSummary[]> {
-  const { results } = await db
-    .prepare(
-      `SELECT ${summaryColumns()} FROM versions
+  const sql = `SELECT ${summaryColumns()} FROM versions
        WHERE capture_status IN ('pending', 'partial')
          AND capture_attempts < ?
          AND captured_at <= ?
-       ORDER BY captured_at, rowid`,
-    )
-    .bind(maxAttempts, olderThanIso)
-    .all<VersionSummary>();
+         AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = versions.page_id AND p.status = 'expired')
+       ORDER BY captured_at, rowid`;
+  const statement =
+    limit === undefined
+      ? db.prepare(sql).bind(maxAttempts, olderThanIso)
+      : db.prepare(`${sql} LIMIT ?`).bind(maxAttempts, olderThanIso, Math.max(0, Math.trunc(limit)) || 0);
+  const { results } = await statement.all<VersionSummary>();
   return results;
 }
 

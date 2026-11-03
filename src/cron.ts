@@ -1,19 +1,21 @@
-// The hourly cron (spec 4.4): the safety net behind the webhook's waitUntil work. It
-// retries captures that did not finish, keeps the serial facts queue moving (stale claims,
-// runs whose callback was lost, rate-limited starts), retires public pages at the end of
-// their week, and flags pages whose Monitor TinyFish no longer runs.
+// The hourly cron (spec 4.4): the safety net behind the webhook's waitUntil work. It keeps
+// the serial facts queue moving (stale claims, runs whose callback was lost, rate-limited
+// starts), retires public pages at the end of their week, flags pages whose Monitor TinyFish
+// no longer runs, and retries captures that did not finish.
 //
-// Each step is wrapped on its own, so one failing step never stops the others, and
-// runCron never throws. It logs one summary line; errors are logged by code, never with
-// a secret or page text.
+// Repair comes last and is capped (REPAIR_PER_TICK): each capture makes several outbound
+// requests, the free plan allows 50 per invocation, and a backlog must never starve the
+// cheap steps before it. Each step is wrapped on its own, so one failing step never stops
+// the others, and runCron never throws. It logs one summary line; errors are logged by
+// code, never with a secret or page text.
 import { captureVersion, recordFactsResult, startNextFacts } from "./capture";
-import { CAPTURE_MAX_ATTEMPTS } from "./core/limits";
+import { CAPTURE_MAX_ATTEMPTS, MONITOR_LOOKUPS_PER_TICK, REPAIR_PER_TICK } from "./core/limits";
 import { activeMonitoredPages, expiredPublicPages, setPageStatusIf } from "./db/pages";
 import { inFlightFactsRuns, listFactsClaims, pendingCaptures, updateIfFactsHolder } from "./db/versions";
 import type { Env } from "./env";
 import { getRun } from "./tinyfish/agent";
 import { TinyFishError } from "./tinyfish/client";
-import { deleteMonitor, listMonitors } from "./tinyfish/monitor";
+import { deleteMonitor, getMonitor, listMonitors } from "./tinyfish/monitor";
 
 const MINUTE_MS = 60_000;
 /** A version this old whose capture is unfinished is retried: the webhook's own capture has ended by then. */
@@ -39,10 +41,10 @@ export type CronResult = {
 
 export async function runCron(env: Env): Promise<CronResult> {
   const result: CronResult = { repaired: 0, expired: 0, unhealthy: [] };
-  await step("repair", () => repair(env, result));
   await step("facts upkeep", () => factsUpkeep(env));
   await step("expiry", () => expire(env, result));
   await step("health", () => health(env, result));
+  await step("repair", () => repair(env, result));
   console.log("cron", { repaired: result.repaired, expired: result.expired, unhealthy: result.unhealthy.length });
   return result;
 }
@@ -65,19 +67,7 @@ function logError(what: string, err: unknown): void {
 
 const isoAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
 
-// --- 1. Repair ------------------------------------------------------------------------
-
-/** Retries, one at a time, every pending or partial capture older than 10 minutes with attempts left. */
-async function repair(env: Env, result: CronResult): Promise<void> {
-  const due = await pendingCaptures(env.DB, isoAgo(REPAIR_AFTER_MS), CAPTURE_MAX_ATTEMPTS);
-  // One at a time: a capture can start a facts run, and Fineprint keeps one in flight.
-  for (const version of due) {
-    result.repaired += 1;
-    await captureVersion(env, version.id); // never throws
-  }
-}
-
-// --- 2. Facts upkeep --------------------------------------------------------------------
+// --- 1. Facts upkeep --------------------------------------------------------------------
 
 async function factsUpkeep(env: Env): Promise<void> {
   await step("stale claims", () => releaseStaleClaims(env));
@@ -151,7 +141,7 @@ async function recordStale(env: Env, runId: string): Promise<void> {
   await recordFactsResult(env, runId, "STALE", null, null);
 }
 
-// --- 3. Expiry ------------------------------------------------------------------------
+// --- 2. Expiry ------------------------------------------------------------------------
 
 /**
  * Public pages past `expires_at`: the Monitor is deleted (a 404 counts as deleted), then the
@@ -169,14 +159,17 @@ async function expire(env: Env, result: CronResult): Promise<void> {
   }
 }
 
-// --- 4. Health ------------------------------------------------------------------------
+// --- 3. Health ------------------------------------------------------------------------
 
 /**
- * One list of the account's Monitors. An active page whose Monitor is missing from it, or not
- * `active` there, is marked failed. Health only flags: it never un-fails a page, and it never
- * touches a Monitor (the account is shared with other projects, whose Monitors are in the list).
- * A list that holds none of our Monitors is not trusted (a changed response shape reads as an
- * empty list), and health is skipped that tick, as it is when the list cannot be read.
+ * One list of the account's Monitors. An active page whose Monitor is in it with a status other
+ * than `active` is marked failed. A Monitor missing from the list is looked up on its own (the
+ * list may stop at a page size it does not announce), at most MONITOR_LOOKUPS_PER_TICK a tick,
+ * and its page is marked failed only when that lookup answers 404; any other answer or error
+ * leaves the page as it is. Health only flags: it never un-fails a page, and it never changes a
+ * Monitor (the account is shared with other projects, whose Monitors are in the list). A list
+ * that holds none of our Monitors is not trusted (a changed response shape reads as an empty
+ * list), and health is skipped that tick, as it is when the list cannot be read.
  */
 async function health(env: Env, result: CronResult): Promise<void> {
   const pages = await activeMonitoredPages(env.DB);
@@ -195,8 +188,35 @@ async function health(env: Env, result: CronResult): Promise<void> {
     return;
   }
 
+  let lookups = 0;
   for (const page of pages) {
-    if (statusById.get(page.monitor_id) === "active") continue;
+    const listed = statusById.get(page.monitor_id);
+    if (listed === "active") continue;
+    if (listed === undefined) {
+      if (lookups >= MONITOR_LOOKUPS_PER_TICK) continue; // looked up on a later tick
+      lookups += 1;
+      try {
+        if ((await getMonitor(env, page.monitor_id)) !== null) continue; // it exists: not missing
+      } catch (err) {
+        logError(`cron health could not look up the Monitor of page ${page.id}`, err);
+        continue;
+      }
+    }
     if (await setPageStatusIf(env.DB, page.id, "failed", ["active"])) result.unhealthy.push(page.id);
+  }
+}
+
+// --- 4. Repair ------------------------------------------------------------------------
+
+/**
+ * Retries, one at a time, the REPAIR_PER_TICK oldest pending or partial captures older than 10
+ * minutes with attempts left, skipping versions of expired pages. The rest wait for later ticks.
+ */
+async function repair(env: Env, result: CronResult): Promise<void> {
+  const due = await pendingCaptures(env.DB, isoAgo(REPAIR_AFTER_MS), CAPTURE_MAX_ATTEMPTS, REPAIR_PER_TICK);
+  // One at a time: a capture can start a facts run, and Fineprint keeps one in flight.
+  for (const version of due) {
+    result.repaired += 1;
+    await captureVersion(env, version.id); // never throws
   }
 }

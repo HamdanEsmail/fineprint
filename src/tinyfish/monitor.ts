@@ -97,6 +97,31 @@ export async function deleteMonitor(env: Env, id: string): Promise<void> {
   }
 }
 
+/**
+ * One Monitor by id, or null when TinyFish answers 404 (it does not exist). Any other
+ * failure throws, and so does a 2xx whose body is not a Monitor: only a 404 means missing.
+ */
+export async function getMonitor(env: Env, id: string): Promise<{ id: string; status: string; name: string | null } | null> {
+  let res: Response;
+  try {
+    res = await tinyfishFetch(env, monitorUrl(id), { method: "GET" });
+  } catch (err) {
+    if (err instanceof TinyFishError && err.status === 404) return null;
+    throw err;
+  }
+  const body = (await res.json()) as Record<string, unknown> | null;
+  // The spike saw the Monitor itself; a `{monitor: {...}}` wrapper is accepted too.
+  const m = body !== null && typeof body.monitor === "object" && body.monitor !== null ? (body.monitor as Record<string, unknown>) : body;
+  if (m === null || typeof m !== "object" || typeof m.id !== "string") {
+    throw new TinyFishError(502, "unexpected_body", "TinyFish answered the Monitor read without a Monitor");
+  }
+  return {
+    id: m.id,
+    status: typeof m.status === "string" ? m.status : "unknown",
+    name: typeof m.name === "string" ? m.name : null,
+  };
+}
+
 export async function listMonitors(env: Env): Promise<{ id: string; status: string; name: string | null }[]> {
   const res = await tinyfishFetch(env, MONITORS_API, { method: "GET" });
   const body = (await res.json()) as { monitors?: unknown } | unknown[];

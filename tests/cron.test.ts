@@ -2,7 +2,7 @@ import { applyD1Migrations, createExecutionContext, createScheduledController, r
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { captureDeps } from "../src/capture";
-import { CAPTURE_MAX_ATTEMPTS } from "../src/core/limits";
+import { CAPTURE_MAX_ATTEMPTS, REPAIR_PER_TICK } from "../src/core/limits";
 import { PRICES } from "../src/core/spend";
 import { runCron } from "../src/cron";
 import { getPage, insertPage, type NewPage } from "../src/db/pages";
@@ -258,6 +258,39 @@ describe("repair", () => {
     });
     expect(shot).toHaveBeenCalledTimes(1);
   });
+
+  it(`with 5 versions due only ${REPAIR_PER_TICK} are repaired in one tick, the oldest; the rest wait for the next`, async () => {
+    mockMonitors();
+    mockFetchHtml();
+    const pageId = await seedPage();
+    // Seeded out of order: the oldest are taken by capture time, not by insertion.
+    const at40 = await seedVersion(pageId, { captured_at: ago(40) });
+    const at20 = await seedVersion(pageId, { captured_at: ago(20) });
+    const at60 = await seedVersion(pageId, { captured_at: ago(60) });
+    const at30 = await seedVersion(pageId, { captured_at: ago(30) });
+    const at50 = await seedVersion(pageId, { captured_at: ago(50) });
+
+    expect((await runCron(env)).repaired).toBe(REPAIR_PER_TICK);
+
+    for (const id of [at60, at50, at40]) expect(await version(id)).toMatchObject({ capture_status: "complete", capture_attempts: 1 });
+    for (const id of [at30, at20]) expect(await version(id)).toMatchObject({ capture_status: "pending", capture_attempts: 0 });
+    expect(shot).toHaveBeenCalledTimes(REPAIR_PER_TICK);
+
+    expect((await runCron(env)).repaired).toBe(2);
+    for (const id of [at30, at20]) expect(await version(id)).toMatchObject({ capture_status: "complete" });
+  });
+
+  it("a partial version of an expired page is not repaired", async () => {
+    mockMonitors();
+    const expiredPage = await seedPage({ added_by: "public", expires_at: ago(60 * 24), status: "expired" });
+    const id = await seedVersion(expiredPage, { html_key: "html/h.html", capture_status: "partial", capture_attempts: 1, captured_at: ago(30) });
+
+    expect((await runCron(env)).repaired).toBe(0);
+
+    expect(await version(id)).toMatchObject({ capture_status: "partial", capture_attempts: 1, screenshot_key: null });
+    expect(shot).not.toHaveBeenCalled();
+    expect(fetchMock.calls).toEqual([]);
+  });
 });
 
 // --- Facts upkeep -------------------------------------------------------------------------
@@ -486,6 +519,27 @@ describe("facts upkeep", () => {
     expect(sleep.mock.calls).toEqual([[60_000]]);
     expect(await version(id)).toMatchObject({ agent_run_id: "agent-run-1", capture_status: "awaiting_facts", capture_attempts: 1 });
   });
+
+  it("a rate-limited start chained from the follow-up gives the claim back at once; then the cron's own start waits and starts it, one run in flight", async () => {
+    mockMonitors();
+    // The chained start (no wait) and the cron's first try are limited; the try after one wait gets through.
+    fetchMock.intercept({ method: "POST", url: RUN_ASYNC_API, times: 2, reply: { status: 429, body: "slow down" } });
+    mockRunAsync();
+    const first = await seedVersion(await seedPage({ kind: "pricing" }), { ...STORED, agent_run_id: "agent-run-X", captured_at: ago(20) });
+    const queued = await seedVersion(await seedPage({ kind: "fees" }), { ...STORED, captured_at: ago(19) });
+    mockGetRun("agent-run-X", { status: "COMPLETED", num_of_steps: 4, result: { items: ITEMS }, created_at: runTime(19) });
+
+    await runCron(env);
+
+    expect(await version(first)).toMatchObject({ facts_json: JSON.stringify(FACTS), capture_status: "complete" });
+    expect(runAsyncCalls()).toHaveLength(3);
+    expect(sleep.mock.calls).toEqual([[60_000]]); // only the cron's start waited
+    expect(await version(queued)).toMatchObject({ agent_run_id: "agent-run-1", capture_status: "awaiting_facts", capture_attempts: 1 });
+    const inFlight = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM versions WHERE agent_run_id IS NOT NULL AND facts_json IS NULL",
+    ).first<{ n: number }>();
+    expect(inFlight?.n).toBe(1);
+  });
 });
 
 // --- Expiry -------------------------------------------------------------------------------
@@ -552,7 +606,7 @@ describe("health", () => {
     expect((await page(paused)).status).toBe("failed");
   });
 
-  it("a page whose monitor is missing from the list is marked failed; a monitor that belongs to no page is never touched", async () => {
+  it("a page whose monitor is missing from the list and not found on its own (404) is marked failed; a monitor that belongs to no page is never touched", async () => {
     const missing = await seedPage();
     const fine = await seedPage();
     // Only active pages are checked: a paused page's Monitor may be missing too.
@@ -561,13 +615,50 @@ describe("health", () => {
       ...list.filter((m) => m.id !== monitorOf(missing) && m.id !== monitorOf(pausedPage)),
       { id: "another-project-monitor", status: "paused", name: "not ours" },
     ]);
+    fetchMock.intercept({ method: "GET", url: monitorUrl(monitorOf(missing)), reply: { status: 404, json: { error: { code: "NOT_FOUND" } } } });
 
     expect((await runCron(env)).unhealthy).toEqual([missing]);
 
     expect((await page(missing)).status).toBe("failed");
     expect((await page(fine)).status).toBe("active");
     expect((await page(pausedPage)).status).toBe("paused");
-    expect(callList()).toEqual([`GET ${MONITORS_API}`]); // nothing sent to any Monitor
+    // Read only: the list and the one missing Monitor; nothing sent to any Monitor.
+    expect(callList()).toEqual([`GET ${MONITORS_API}`, `GET ${monitorUrl(monitorOf(missing))}`]);
+  });
+
+  it("a monitor missing from the list is looked up on its own: found active it is not flagged, and a lookup that fails leaves the page", async () => {
+    const fine = await seedPage();
+    const pagedOut = await seedPage(); // beyond a page size the list did not say it had
+    const unreadable = await seedPage();
+    mockMonitors((list) => list.filter((m) => m.id === monitorOf(fine)));
+    fetchMock.intercept({
+      method: "GET",
+      url: monitorUrl(monitorOf(pagedOut)),
+      reply: { json: { id: monitorOf(pagedOut), name: pagedOut, status: "active" } },
+    });
+    fetchMock.intercept({ method: "GET", url: monitorUrl(monitorOf(unreadable)), reply: { status: 503, body: "busy" } });
+
+    let result!: Awaited<ReturnType<typeof runCron>>;
+    const logged = await quietErrors(async () => (result = await runCron(env)));
+
+    expect(result.unhealthy).toEqual([]);
+    expect((await page(pagedOut)).status).toBe("active");
+    expect((await page(unreadable)).status).toBe("active");
+    expect(logged).toContain("http_503");
+  });
+
+  it("at most 3 missing monitors are looked up in one tick: a 4th is not looked up and its page is left", async () => {
+    const fine = await seedPage();
+    const missing = [await seedPage(), await seedPage(), await seedPage(), await seedPage()];
+    mockMonitors((list) => list.filter((m) => m.id === monitorOf(fine)));
+    fetchMock.intercept({ method: "GET", url: /\/v1\/monitors\/mon-page-\d+$/, times: Infinity, reply: { status: 404, json: { error: { code: "NOT_FOUND" } } } });
+
+    expect((await runCron(env)).unhealthy).toEqual(missing.slice(0, 3));
+
+    expect(await Promise.all(missing.map(async (id) => (await page(id)).status))).toEqual(["failed", "failed", "failed", "active"]);
+    expect(callList().filter((c) => c.startsWith(`GET ${MONITORS_API}/`))).toEqual(
+      missing.slice(0, 3).map((id) => `GET ${monitorUrl(monitorOf(id))}`),
+    );
   });
 
   it.each([
@@ -583,6 +674,7 @@ describe("health", () => {
     expect((await page(a)).status).toBe("active");
     expect((await page(b)).status).toBe("active");
     expect(logged).toContain("health");
+    expect(callList()).toEqual([`GET ${MONITORS_API}`]); // no Monitor looked up on its own
   });
 });
 
@@ -606,6 +698,27 @@ describe("runCron", () => {
     expect(logged).toContain("INTERNAL");
     expect(logged).not.toContain("test-tinyfish-key");
     expect(log).toHaveBeenCalledWith("cron", { repaired: 1, expired: 1, unhealthy: 0 });
+  });
+
+  it("steps run in order: facts upkeep, expiry, health, and repair last, so the capped repair cannot hold up the others", async () => {
+    mockMonitors();
+    mockFetchHtml();
+    await seedVersion(await seedPage({ kind: "pricing" }), { ...STORED, agent_run_id: "agent-run-X", captured_at: ago(20) });
+    mockGetRun("agent-run-X", { status: "RUNNING", created_at: runTime(2) });
+    const due = await seedPage({ added_by: "public", expires_at: ago(1) });
+    fetchMock.intercept({ method: "DELETE", url: monitorUrl(monitorOf(due)), reply: { status: 200, json: {} } });
+    const repairable = await seedVersion(await seedPage(), { captured_at: ago(20) });
+
+    expect(await runCron(env)).toEqual({ repaired: 1, expired: 1, unhealthy: [] });
+
+    const order = callList();
+    const at = (call: string) => order.indexOf(call);
+    expect(at(`GET ${runUrl("agent-run-X")}`)).toBe(0); // facts upkeep
+    expect(at(`DELETE ${monitorUrl(monitorOf(due))}`)).toBe(1); // expiry
+    expect(at(`GET ${MONITORS_API}`)).toBe(2); // health
+    expect(at(`POST ${FETCH_API}`)).toBe(3); // repair
+    expect(order).toHaveLength(4);
+    expect(await version(repairable)).toMatchObject({ capture_status: "complete" });
   });
 
   it("the scheduled handler hands runCron to waitUntil", async () => {

@@ -7,7 +7,7 @@ import { FACTS_GOAL, FACTS_SCHEMA, getRun, parseFacts, startFactsRun } from "../
 import { screenshotFullPage } from "../src/tinyfish/browser";
 import { TinyFishError, tinyfishFetch } from "../src/tinyfish/client";
 import { fetchPage } from "../src/tinyfish/fetch";
-import { createMonitor, deleteMonitor, listMonitors, setMonitorStatus, updateMonitor } from "../src/tinyfish/monitor";
+import { createMonitor, deleteMonitor, getMonitor, listMonitors, setMonitorStatus, updateMonitor } from "../src/tinyfish/monitor";
 import { discoverFinePrint } from "../src/tinyfish/search";
 import { fetchMock } from "./helpers/fetch-mock";
 import agentSchemaRun from "./fixtures/tinyfish/agent-schema-run.json";
@@ -317,6 +317,28 @@ describe("monitors", () => {
       { id: monitorGet.id, status: "active", name: "spike-fineprint" },
       { id: "m2", status: "paused", name: null },
     ]);
+    expect(await spendRows()).toEqual([]);
+  });
+
+  it("getMonitor reads one Monitor, returns null on 404 and surfaces other failures", async () => {
+    fetchMock.intercept({
+      method: "GET",
+      url: `${MONITORS_API}/${monitorGet.id}`,
+      reply: (req) => {
+        expect(req.headers.get("X-API-Key")).toBe("test-tinyfish-key");
+        return Response.json(monitorGet);
+      },
+    });
+    expect(await getMonitor(env, monitorGet.id)).toEqual({ id: monitorGet.id, status: "active", name: "spike-fineprint" });
+
+    const url = `${MONITORS_API}/gone`;
+    fetchMock.intercept({ method: "GET", url, reply: { status: 404, json: { error: { code: "NOT_FOUND" } } } });
+    expect(await getMonitor(env, "gone")).toBeNull();
+    fetchMock.intercept({ method: "GET", url, reply: { status: 503, body: "busy" } });
+    await expect(getMonitor(env, "gone")).rejects.toMatchObject({ status: 503 });
+    // A 2xx whose body is not a Monitor is a failure, not a missing Monitor.
+    fetchMock.intercept({ method: "GET", url, reply: { json: { unexpected: true } } });
+    await expect(getMonitor(env, "gone")).rejects.toMatchObject({ code: "unexpected_body" });
     expect(await spendRows()).toEqual([]);
   });
 });
