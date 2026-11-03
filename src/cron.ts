@@ -105,42 +105,50 @@ async function releaseStaleClaims(env: Env): Promise<void> {
 
 /**
  * Looks up every facts run in flight on a version captured over 15 minutes ago. A finished
- * run is recorded as its callback would have been. A run that is not finished, or cannot be
- * read at all (any error, a 404 or a 429 included), is left for the next tick until it is an
- * hour old; then it is recorded as STALE, a facts failure that frees the slot, so a run that
- * never finishes or can never be read cannot hold the single slot for good. Its age comes from
- * the run's own start time: the queue starts a version's run long after the version was
- * captured when it waited behind others. Only when TinyAgent gives no readable start time (or
- * the run could not be read) is the version's capture time used.
+ * run is recorded as its callback would have been. A run that is not finished an hour after it
+ * started is recorded as STALE, a facts failure that frees the slot. Its age comes from the
+ * run's own start time: the queue starts a version's run long after the version was captured
+ * when it waited behind others. Only when TinyAgent gives no readable start time is the
+ * version's capture time used.
+ *
+ * A run that cannot be read is left for the next tick, except one TinyAgent does not know
+ * (404) on a version captured over an hour ago, which is recorded as STALE too, so a run that
+ * can never be read cannot hold the single slot for good. Any other error (a 429, a 5xx, a lost
+ * connection) is left whatever the age: with no run read there is only the capture time, and a
+ * transient error must never make a chained run that started seconds ago STALE.
  */
 async function followUpRuns(env: Env): Promise<void> {
   for (const version of await inFlightFactsRuns(env.DB, isoAgo(FOLLOW_UP_AFTER_MS))) {
     const runId = version.agent_run_id;
+    const capturedAt = Date.parse(version.captured_at);
     try {
-      let run: Awaited<ReturnType<typeof getRun>> | null = null;
+      let run: Awaited<ReturnType<typeof getRun>>;
       try {
         run = await getRun(env, runId);
       } catch (err) {
         logError(`cron could not read facts run ${runId.slice(0, 100)}`, err);
+        const notFound = err instanceof TinyFishError && err.status === 404;
+        if (notFound && Date.now() - capturedAt > RUN_STALE_AFTER_MS) await recordStale(env, runId);
+        continue;
       }
-      if (run !== null) {
-        const status = run.status.toUpperCase();
-        if (TERMINAL_AGENT_STATUSES.has(status)) {
-          await recordFactsResult(env, runId, status, run.result, run.num_of_steps);
-          continue;
-        }
+      const status = run.status.toUpperCase();
+      if (TERMINAL_AGENT_STATUSES.has(status)) {
+        await recordFactsResult(env, runId, status, run.result, run.num_of_steps);
+        continue;
       }
-      const createdAt = run === null ? null : run.created_at;
-      const startedAt = createdAt === null ? NaN : Date.parse(createdAt);
-      const since = Number.isFinite(startedAt) ? startedAt : Date.parse(version.captured_at);
-      if (Date.now() - since > RUN_STALE_AFTER_MS) {
-        console.warn(`cron recorded facts run ${runId.slice(0, 100)} as STALE`);
-        await recordFactsResult(env, runId, "STALE", null, null);
-      }
+      const startedAt = run.created_at === null ? NaN : Date.parse(run.created_at);
+      const since = Number.isFinite(startedAt) ? startedAt : capturedAt;
+      if (Date.now() - since > RUN_STALE_AFTER_MS) await recordStale(env, runId);
     } catch (err) {
       logError(`cron follow-up of facts run ${runId.slice(0, 100)} failed`, err);
     }
   }
+}
+
+/** A facts failure that frees the slot: one attempt used, then the next queued version starts. */
+async function recordStale(env: Env, runId: string): Promise<void> {
+  console.warn(`cron recorded facts run ${runId.slice(0, 100)} as STALE`);
+  await recordFactsResult(env, runId, "STALE", null, null);
 }
 
 // --- 3. Expiry ------------------------------------------------------------------------

@@ -367,16 +367,23 @@ describe("facts upkeep", () => {
     expect(await version(queued)).toMatchObject({ agent_run_id: "agent-run-1" });
   });
 
-  const UNREADABLE = [
-    ["not found (404)", { status: 404, json: { error: { code: "NOT_FOUND" } } }],
-    ["rate-limited (429)", { status: 429, body: "slow down" }],
-    ["failing (503)", { status: 503, body: "busy" }],
-  ] as const;
+  const NOT_FOUND = { status: 404, json: { error: { code: "NOT_FOUND" } } };
 
-  it.each(UNREADABLE)("a run whose read is %s under 60 minutes old is left in flight, and nothing new starts", async (_name, reply) => {
+  // Only a run TinyAgent does not know frees the slot after an hour. A transient error must never
+  // make a seconds-old chained run STALE, and with no run read the capture time is all there is.
+  it.each([
+    ["not found (404) on a version captured 59 minutes ago", NOT_FOUND, 59],
+    ["rate-limited (429) on a version captured 61 minutes ago", { status: 429, body: "slow down" }, 61],
+    ["failing (503) on a version captured 61 minutes ago", { status: 503, body: "busy" }, 61],
+    ["a lost connection on a version captured 61 minutes ago", () => Promise.reject(new TypeError("Network connection lost.")), 61],
+  ] as const)("a run whose read is %s is left in flight, and nothing new starts", async (_name, reply, capturedMinutesAgo) => {
     mockMonitors();
     mockRunAsync();
-    const id = await seedVersion(await seedPage({ kind: "pricing" }), { ...STORED, agent_run_id: "agent-run-X", captured_at: ago(59) });
+    const id = await seedVersion(await seedPage({ kind: "pricing" }), {
+      ...STORED,
+      agent_run_id: "agent-run-X",
+      captured_at: ago(capturedMinutesAgo),
+    });
     await seedVersion(await seedPage({ kind: "fees" }), { ...STORED, captured_at: ago(50) });
     fetchMock.intercept({ method: "GET", url: runUrl("agent-run-X"), reply });
 
@@ -388,7 +395,7 @@ describe("facts upkeep", () => {
     expect(logged).not.toContain("test-tinyfish-key");
   });
 
-  it.each(UNREADABLE)("a run whose read is %s over 60 minutes old is recorded as STALE: slot freed, the next queued version starts", async (_name, reply) => {
+  it("a run TinyAgent does not know (404) on a version captured over 60 minutes ago is recorded as STALE: slot freed, the next queued version starts", async () => {
     mockMonitors();
     mockRunAsync();
     // With no run to read, its age comes from the version's capture time.
@@ -400,7 +407,7 @@ describe("facts upkeep", () => {
     });
     const queuedPage = await seedPage({ kind: "fees" });
     const queued = await seedVersion(queuedPage, { ...STORED, captured_at: ago(50) });
-    fetchMock.intercept({ method: "GET", url: runUrl("agent-run-X"), reply });
+    fetchMock.intercept({ method: "GET", url: runUrl("agent-run-X"), reply: NOT_FOUND });
 
     const logged = await quietErrors(() => runCron(env));
 
