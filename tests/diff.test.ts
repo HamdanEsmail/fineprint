@@ -75,7 +75,33 @@ describe("splitBlocks", () => {
     expect(splitBlocks("")).toEqual([]);
     expect(splitBlocks("\n \n\n")).toEqual([]);
   });
+
+  it("strips an ATX closing sequence from the section but keeps the raw heading line as text", () => {
+    expect(splitBlocks("## Pro ##\n\nBody")).toEqual([
+      { section: "Pro", text: "## Pro ##" },
+      { section: "Pro", text: "Body" },
+    ]);
+    expect(splitBlocks("# Pro #   ")[0]).toEqual({ section: "Pro", text: "# Pro #" });
+    expect(splitBlocks("### Pro \t######")[0]!.section).toBe("Pro");
+  });
+
+  it("keeps a trailing '#' that is part of the heading text", () => {
+    expect(splitBlocks("# C#")[0]!.section).toBe("C#");
+    expect(splitBlocks("## Fees ###a")[0]!.section).toBe("Fees ###a");
+    expect(splitBlocks("## ##")[0]!.section).toBe("##");
+  });
 });
+
+// Deterministic pseudo-random lowercase strings: two of them share almost no
+// bigrams, so they never pair by similarity.
+function randomBlocks(count: number, seed: number, length = 40): string[] {
+  let state = seed;
+  const next = (): number => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state >>> 16;
+  };
+  return Array.from({ length: count }, () => Array.from({ length }, () => String.fromCharCode(97 + (next() % 26))).join(""));
+}
 
 describe("structuredDiff", () => {
   it("reports a removed block with its section", () => {
@@ -197,6 +223,135 @@ describe("structuredDiff", () => {
     ]);
     expect(d.added).toEqual([]);
     expect(d.removed).toEqual([]);
+  });
+});
+
+describe("structuredDiff: pairing inside a run", () => {
+  it("pairs a price edit with its new block when a new tier is inserted before it", () => {
+    const from = "# Plans\n\nPro costs $20 per month\n\nTeam costs $40 per month";
+    const to = "# Plans\n\nStarter is free forever\n\nPro costs $25 per month\n\nTeam costs $40 per month";
+    const d = structuredDiff(from, to);
+    expect(d.changed).toEqual([{ section: "Plans", before: "Pro costs $20 per month", after: "Pro costs $25 per month" }]);
+    expect(d.added).toEqual([{ section: "Plans", text: "Starter is free forever" }]);
+    expect(d.removed).toEqual([]);
+  });
+
+  it("pairs a wording edit with its new block when a block is deleted before it", () => {
+    const from = "# Policy\n\nWe may email you offers\n\nRefunds are issued within 14 days.";
+    const to = "# Policy\n\nRefunds are issued within 30 days.";
+    const d = structuredDiff(from, to);
+    expect(d.removed).toEqual([{ section: "Policy", text: "We may email you offers" }]);
+    expect(d.changed).toEqual([{ section: "Policy", before: "Refunds are issued within 14 days.", after: "Refunds are issued within 30 days." }]);
+    expect(d.added).toEqual([]);
+  });
+
+  it("picks the best-scoring added block, not the first one above the threshold", () => {
+    const from = "# Policy\n\nRefunds are issued within 14 days of purchase.";
+    const to = "# Policy\n\nRefunds are issued.\n\nRefunds are issued within 30 days of purchase.";
+    const d = structuredDiff(from, to);
+    expect(d.changed).toEqual([
+      { section: "Policy", before: "Refunds are issued within 14 days of purchase.", after: "Refunds are issued within 30 days of purchase." },
+    ]);
+    expect(d.added).toEqual([{ section: "Policy", text: "Refunds are issued." }]);
+    expect(d.removed).toEqual([]);
+  });
+
+  it("never pairs against an added block that comes before an earlier match", () => {
+    // Block A matches the second added block, so block B (whose best match is
+    // the first added block) can only look further on, finds nothing, and stays
+    // removed.
+    const a = "Parking is free for the first two hours.";
+    const b = "Late fees are charged at 5 percent per month.";
+    const d = structuredDiff(`# T\n\n${a}\n\n${b}`, `# T\n\nLate fees are charged at 6 percent per month.\n\nParking is free for the first three hours.`);
+    expect(d.changed).toEqual([{ section: "T", before: a, after: "Parking is free for the first three hours." }]);
+    expect(d.removed).toEqual([{ section: "T", text: b }]);
+    expect(d.added).toEqual([{ section: "T", text: "Late fees are charged at 6 percent per month." }]);
+  });
+
+  it("falls back to positional pairing when a run has more than 50 blocks on one side", () => {
+    // One added block that edits the 31st of 51 removed blocks. Pairing by
+    // similarity would find it; the position-by-position fallback does not,
+    // which is the price of keeping the CPU bounded.
+    const blocks = randomBlocks(51, 7);
+    const d = structuredDiff(blocks.join("\n\n"), blocks[30] + " edited");
+    expect(d.changed).toEqual([]);
+    expect(d.removed.map((b) => b.text)).toEqual(blocks);
+    expect(d.added.map((b) => b.text)).toEqual([blocks[30] + " edited"]);
+  });
+
+  it("still pairs by similarity in a run of exactly 50 blocks", () => {
+    const blocks = randomBlocks(50, 7);
+    const d = structuredDiff(blocks.join("\n\n"), blocks[30] + " edited");
+    expect(d.changed).toEqual([{ section: "", before: blocks[30]!, after: blocks[30] + " edited" }]);
+    expect(d.removed).toHaveLength(49);
+    expect(d.added).toEqual([]);
+  });
+
+  it("compares only the first 4 KB of a block", () => {
+    const head = "cat ".repeat(1024); // exactly 4096 characters
+    const tail = randomBlocks(1, 3, 3000)[0]!;
+    const d = structuredDiff(`# T\n\n${head}`, `# T\n\n${head}${tail}`);
+    expect(d.changed).toHaveLength(1);
+    expect(d.removed).toEqual([]);
+    expect(d.added).toEqual([]);
+  });
+
+  it("does not pair blocks that differ inside the first 4 KB, whatever follows", () => {
+    // The tails are identical and would make the blocks look alike if they counted.
+    const tail = randomBlocks(1, 3, 3000)[0]!;
+    const d = structuredDiff(`# T\n\n${"cat ".repeat(1024)}${tail}`, `# T\n\n${"dog ".repeat(1024)}${tail}`);
+    expect(d.changed).toEqual([]);
+    expect(d.removed).toHaveLength(1);
+    expect(d.added).toHaveLength(1);
+  });
+});
+
+describe("structuredDiff: bounded work", () => {
+  // Reversing distinct blocks leaves a longest common subsequence of one block,
+  // so an exact diff reports every block but one as removed and added. Past the
+  // edit-distance bound the diff is not run: the whole region is one removed
+  // run and one added run, paired position by position, so nothing is kept.
+  it("gives up on an exact alignment past the bound and treats the region as one removed and one added run", () => {
+    const blocks = randomBlocks(300, 1);
+    const d = structuredDiff(blocks.join("\n\n"), [...blocks].reverse().join("\n\n"));
+    expect(d.changed).toEqual([]);
+    expect(d.removed.map((b) => b.text)).toEqual(blocks);
+    expect(d.added.map((b) => b.text)).toEqual([...blocks].reverse());
+  });
+
+  it("still aligns exactly when the edit distance is within the bound", () => {
+    const blocks = randomBlocks(20, 1);
+    const reversed = [...blocks].reverse();
+    const d = structuredDiff(blocks.join("\n\n"), reversed.join("\n\n"));
+    // One block is common to both orders; every other block is removed and added.
+    expect(d.removed).toHaveLength(19);
+    expect(d.added).toHaveLength(19);
+    expect(d.changed).toEqual([]);
+  });
+
+  it("keeps unchanged blocks out of the diff after giving up, and still pairs edits that line up", () => {
+    const blocks = randomBlocks(300, 5);
+    const edited = blocks.map((b, i) => (i % 3 === 0 ? b + " (revised)" : b));
+    const d = structuredDiff(blocks.join("\n\n"), edited.join("\n\n"));
+    expect(d.changed).toHaveLength(100);
+    expect(d.changed[0]).toEqual({ section: "", before: blocks[0]!, after: blocks[0] + " (revised)" });
+    expect(d.removed).toEqual([]);
+    expect(d.added).toEqual([]);
+  });
+
+  it("stops comparing blocks once the similarity budget is spent, leaving the rest removed and added", () => {
+    // 400 revised blocks of 200 characters is far more comparison work than the
+    // budget allows, so only the first pairs (in document order) are recognised.
+    const blocks = randomBlocks(400, 21, 200);
+    const revised = blocks.map((b) => b + " (revised)");
+    const d = structuredDiff(blocks.join("\n\n"), revised.join("\n\n"));
+    expect(d.changed.length).toBeGreaterThan(20);
+    expect(d.changed.length).toBeLessThan(200);
+    expect(d.changed[0]).toEqual({ section: "", before: blocks[0]!, after: revised[0]! });
+    expect(d.removed).toHaveLength(400 - d.changed.length);
+    expect(d.added).toHaveLength(400 - d.changed.length);
+    // The blocks that did pair are the first ones.
+    expect(d.removed[0]!.text).toBe(blocks[d.changed.length]);
   });
 });
 
