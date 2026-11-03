@@ -113,6 +113,6 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 | 2026-11-03 13:26 | TinyFetch POST, `axa-schengen.com/en/travel-insurance/benefits` | Task 12a: confirm first insurance pick (200, 12,943 characters, no per-URL error) | $0.00 |
 | 2026-11-03 13:26 | TinyFetch POST, `dni.ae/personal-insurance/medical/dha_ebp/` | Task 12a: confirm second insurance pick (200, 1,946 characters, no per-URL error) | $0.00 |
 
-A few earlier TinySearch and TinyFetch calls were made to pick the four pages chosen during the build before a machine restart. They are free ($0.00) and are not itemised because no record of them survived the restart. The four rows above are the confirmation calls made after the restart.
+A few earlier TinySearch and TinyFetch calls were made to pick the four pages chosen during the build before a machine restart. They are free ($0.00) and are not itemised because no record of them survived the restart. The four rows above are the confirmation calls made afterwards.
 
 Total so far: $0.002
