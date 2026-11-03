@@ -73,3 +73,19 @@ export async function countNoise(db: D1Database): Promise<number> {
   const row = await db.prepare("SELECT COUNT(*) AS n FROM runs WHERE noise_suppressed = 1").first<{ n: number }>();
   return row?.n ?? 0;
 }
+
+/** Runs of one page suppressed as noise that were received after `afterIso` and at or before `uptoIso`. */
+export async function countNoiseBetween(
+  db: D1Database,
+  pageId: string,
+  afterIso: string,
+  uptoIso: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM runs WHERE page_id = ? AND noise_suppressed = 1 AND received_at > ? AND received_at <= ?",
+    )
+    .bind(pageId, afterIso, uptoIso)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}

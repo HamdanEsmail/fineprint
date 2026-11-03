@@ -145,26 +145,74 @@ export async function listVersions(db: D1Database, pageId: string): Promise<Vers
   return results;
 }
 
+async function findAsOf<T>(
+  db: D1Database,
+  pageId: string,
+  atIso: string,
+  columns: string,
+): Promise<T | "before_baseline" | "no_versions"> {
+  const hit = await db
+    .prepare(
+      `SELECT ${columns} FROM versions WHERE page_id = ? AND captured_at <= ? ORDER BY captured_at DESC, rowid DESC LIMIT 1`,
+    )
+    .bind(pageId, atIso)
+    .first<T>();
+  if (hit) return hit;
+  const any = await db.prepare("SELECT 1 AS found FROM versions WHERE page_id = ? LIMIT 1").bind(pageId).first();
+  return any ? "before_baseline" : "no_versions";
+}
+
 /**
  * What the page said at a moment: the latest version captured at or before
  * `atIso` (the baseline counts). "before_baseline" when the page has versions
  * but all are later; "no_versions" when it has none. Timestamps are ISO 8601
  * UTC strings from toISOString(), so they compare correctly as text.
  */
-export async function versionAsOf(
+export function versionAsOf(
   db: D1Database,
   pageId: string,
   atIso: string,
 ): Promise<VersionRow | "before_baseline" | "no_versions"> {
-  const hit = await db
-    .prepare(
-      "SELECT * FROM versions WHERE page_id = ? AND captured_at <= ? ORDER BY captured_at DESC, rowid DESC LIMIT 1",
-    )
-    .bind(pageId, atIso)
-    .first<VersionRow>();
-  if (hit) return hit;
-  const any = await db.prepare("SELECT 1 AS found FROM versions WHERE page_id = ? LIMIT 1").bind(pageId).first();
-  return any ? "before_baseline" : "no_versions";
+  return findAsOf<VersionRow>(db, pageId, atIso, "*");
+}
+
+/** `versionAsOf` without the version's text, for a caller that may not need it (a cached diff). */
+export function versionSummaryAsOf(
+  db: D1Database,
+  pageId: string,
+  atIso: string,
+): Promise<VersionSummary | "before_baseline" | "no_versions"> {
+  return findAsOf<VersionSummary>(db, pageId, atIso, summaryColumns());
+}
+
+/** The oldest version of a page (its baseline) without `text`, or null when it has none. */
+export function baselineVersion(db: D1Database, pageId: string): Promise<VersionSummary | null> {
+  return db
+    .prepare(`SELECT ${summaryColumns()} FROM versions WHERE page_id = ? ORDER BY captured_at, rowid LIMIT 1`)
+    .bind(pageId)
+    .first<VersionSummary>();
+}
+
+/** How many versions of a page were captured after `afterIso` and at or before `uptoIso`. */
+export async function countVersionsBetween(
+  db: D1Database,
+  pageId: string,
+  afterIso: string,
+  uptoIso: string,
+): Promise<number> {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS n FROM versions WHERE page_id = ? AND captured_at > ? AND captured_at <= ?")
+    .bind(pageId, afterIso, uptoIso)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/** Every version of every page, newest first, without `text`: the export reads them in one query. */
+export async function listAllVersionSummaries(db: D1Database): Promise<VersionSummary[]> {
+  const { results } = await db
+    .prepare(`SELECT ${summaryColumns()} FROM versions ORDER BY captured_at DESC, rowid DESC`)
+    .all<VersionSummary>();
+  return results;
 }
 
 /**
