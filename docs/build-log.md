@@ -40,6 +40,11 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 - Diff with `from` later than `to` returns 400 `invalid_range`.
 - Discover's 10 per IP per day limit applies to public callers only.
 - Replay walks only `changed` runs that have a raw payload, in `received_at` order from the baseline; versions it creates are `pending` with `capture_error "replayed"`, and their runs are un-marked as noise.
+- Normalization details: a metadata line is dropped when what follows the marker is made only of date and time parts (month names, years, numeric and ISO dates, clock times, weekdays, time zones, "on/at/of/the", "today"/"yesterday") with at least one real date or time part, optionally followed by "by" and up to four name words. A bare day number or a URL is not a stamp. "Updated" without a colon or "on" is not a marker, because the spec lists only "updated on" and "updated:".
+- Normalization details: copyright lines are "©" or the whole word "copyright" at line start (so "Copyrighted material..." stays). Relative time is exactly the plan's `\b\d+ (seconds?|minutes?|hours?|days?) ago\b` anywhere in a line, so "an hour ago" and "3 weeks ago" are not caught. Markdown markers (`# * _ > - + | ~` and backticks) are ignored in front of a line and around a share counter.
+- Normalization details: tracking parameter names match case-insensitively and exactly (`utm_` prefix, `ref` only, so `reference` and `ref_src` stay). The link is rebuilt from its own pieces without re-encoding, and sentence punctuation after a URL is kept. A tracking parameter on a line that is dropped anyway is not listed separately. `suppressed` keeps repeats (the same parameter on ten links appears ten times); the webhook handler decides how much of it to store.
+- Normalization details: an `ignore_patterns` entry that is not a string, is blank, or matches the empty string (such as `x*`) is skipped like an invalid regex, because it would match every line and wipe the page.
+- Normalization tests load fixtures with `import.meta.glob(..., { query: "?raw" })` because the Workers pool has no filesystem; `tests/env.d.ts` references `vite/client` for the types. A test checks that every rule has both a suppressed and a near-miss fixture.
 
 ## Live TinyFish calls during the build
 
