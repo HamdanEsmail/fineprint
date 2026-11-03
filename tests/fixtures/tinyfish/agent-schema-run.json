@@ -1,0 +1,89 @@
+{
+  "run_id": "e995dd5d-105e-42bf-98eb-ceb66631f6d4",
+  "status": "COMPLETED",
+  "goal": "Navigate to https://vercel.com/pricing to complete the goal: Read the pricing plans on this page and return them.",
+  "created_at": "2026-11-03T07:41:54Z",
+  "started_at": "2026-11-03T07:41:56Z",
+  "finished_at": "2026-11-03T07:42:15Z",
+  "num_of_steps": 3,
+  "result": {
+    "plans": []
+  },
+  "output_schema": {
+    "type": "object",
+    "required": [
+      "plans"
+    ],
+    "properties": {
+      "plans": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "name",
+            "price"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "price": {
+              "type": "string"
+            },
+            "period": {
+              "type": "string",
+              "nullable": true
+            }
+          }
+        }
+      }
+    }
+  },
+  "profile_attached": false,
+  "profile_id": null,
+  "error": null,
+  "streaming_url": "https://ip-18-145-55-151.tetra-data.production.tinyfish.io/tf-c2291d3c-4e5c-48f3-8163-bef3e765c2e8/stream/0",
+  "browser_config": {
+    "proxy_enabled": false,
+    "proxy_country_code": null
+  },
+  "video_url": null,
+  "steps": [
+    {
+      "id": "214d88fa-16fa-4a27-bb88-5e5697dd2e24",
+      "timestamp": "2026-11-03T07:41:57Z",
+      "status": "RUNNING",
+      "action": "Navigate to Vercel pricing page to read pricing plans",
+      "screenshot": null,
+      "html": null,
+      "duration": "3.4s"
+    },
+    {
+      "id": "73f5b2e9-e69a-4208-b7e4-c20dab637e00",
+      "timestamp": "2026-11-03T07:42:03Z",
+      "status": "RUNNING",
+      "action": "Extract Vercel pricing plans with names and prices",
+      "screenshot": null,
+      "html": null,
+      "duration": "3.6s"
+    },
+    {
+      "id": "f69b106c-bda8-4d84-a080-c6dc3c36b96d",
+      "timestamp": "2026-11-03T07:42:10Z",
+      "status": "RUNNING",
+      "action": "No pricing data found on page",
+      "screenshot": null,
+      "html": null,
+      "duration": "4.4s"
+    },
+    {
+      "id": "d79baf21-49b4-4ab2-8c1c-c8a88ded1725",
+      "timestamp": "2026-11-03T07:42:14Z",
+      "status": "COMPLETED",
+      "action": "Task completed",
+      "screenshot": null,
+      "html": null,
+      "duration": null
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "run_id": "601b2055-946e-4057-b445-74d2fc25b9e4",
+  "status": "COMPLETED",
+  "goal": "Navigate to https://vercel.com/pricing to complete the goal: Scroll to the bottom of the page once, then return the page title and the names of the pricing plans as JSON {title, plans: []}.",
+  "created_at": "2026-11-03T07:35:08Z",
+  "started_at": "2026-11-03T07:35:11Z",
+  "finished_at": "2026-11-03T07:35:31Z",
+  "num_of_steps": 5,
+  "result": {
+    "plans": [
+      "Hobby",
+      "Pro",
+      "Enterprise"
+    ],
+    "title": "Vercel Pricing: Hobby, Pro, and Enterprise plans"
+  },
+  "output_schema": null,
+  "profile_attached": false,
+  "profile_id": null,
+  "error": null,
+  "streaming_url": "https://ip-13-57-240-101.tetra-data.production.tinyfish.io/tf-206274a6-8c6f-483a-9f3f-53e908e80852/stream/0",
+  "browser_config": {
+    "proxy_enabled": false,
+    "proxy_country_code": null
+  },
+  "video_url": null,
+  "steps": [
+    {
+      "id": "8438ac91-dd14-4b55-8088-00420a5e1d2f",
+      "timestamp": "2026-11-03T07:35:11Z",
+      "status": "RUNNING",
+      "action": "Navigate to Vercel pricing page",
+      "screenshot": "https://agent.tinyfish.ai/runs/601b2055-946e-4057-b445-74d2fc25b9e4/steps/8438ac91-dd14-4b55-8088-00420a5e1d2f/screenshot",
+      "html": null,
+      "duration": "2.8s"
+    },
+    {
+      "id": "a2098b09-1113-477f-9936-bfc87cf33db7",
+      "timestamp": "2026-11-03T07:35:16Z",
+      "status": "RUNNING",
+      "action": "Navigate to Vercel pricing page",
+      "screenshot": "https://agent.tinyfish.ai/runs/601b2055-946e-4057-b445-74d2fc25b9e4/steps/a2098b09-1113-477f-9936-bfc87cf33db7/screenshot",
+      "html": null,
+      "duration": "2.0s"
+    },
+    {
+      "id": "c7ac9dab-32a2-4a5f-805e-60044388796c",
+      "timestamp": "2026-11-03T07:35:20Z",
+      "status": "RUNNING",
+      "action": "Scroll to the bottom of the page",
+      "screenshot": "https://agent.tinyfish.ai/runs/601b2055-946e-4057-b445-74d2fc25b9e4/steps/c7ac9dab-32a2-4a5f-805e-60044388796c/screenshot",
+      "html": null,
+      "duration": "1.3s"
+    },
+    {
+      "id": "aa894dc2-8b1c-417e-9393-8ef662d273c9",
+      "timestamp": "2026-11-03T07:35:23Z",
+      "status": "RUNNING",
+      "action": "Get page title and pricing plan names",
+      "screenshot": "https://agent.tinyfish.ai/runs/601b2055-946e-4057-b445-74d2fc25b9e4/steps/aa894dc2-8b1c-417e-9393-8ef662d273c9/screenshot",
+      "html": null,
+      "duration": "3.0s"
+    },
+    {
+      "id": "92c1b32d-dd36-4783-81e2-f11af7274fbc",
+      "timestamp": "2026-11-03T07:35:29Z",
+      "status": "RUNNING",
+      "action": "Return page title and pricing plan names as JSON",
+      "screenshot": "https://agent.tinyfish.ai/runs/601b2055-946e-4057-b445-74d2fc25b9e4/steps/92c1b32d-dd36-4783-81e2-f11af7274fbc/screenshot",
+      "html": null,
+      "duration": "0.0s"
+    },
+    {
+      "id": "15109165-e489-4209-8ba9-b71a16e24663",
+      "timestamp": "2026-11-03T07:35:31Z",
+      "status": "COMPLETED",
+      "action": "Task completed",
+      "screenshot": null,
+      "html": null,
+      "duration": null
+    }
+  ]
+}

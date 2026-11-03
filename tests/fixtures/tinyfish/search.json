@@ -1,0 +1,38 @@
+{
+  "query": "pricing plans",
+  "results": [
+    {
+      "position": 1,
+      "site_name": "vercel.com",
+      "snippet": "$20/mo. Everything you need to build and scale your app. All Hobby features, plus: $20 of included usage credit. Flat Rate CDN with traffic ...",
+      "title": "Vercel Pricing: Hobby, Pro, and Enterprise plans",
+      "url": "https://vercel.com/pricing"
+    },
+    {
+      "date": "Sep 14, 2026",
+      "position": 2,
+      "site_name": "vercel.com",
+      "snippet": "Vercel's pricing model includes billable metrics and pricing models across Managed Infrastructure and Developer Experience Platform resources.",
+      "title": "Pricing on Vercel",
+      "url": "https://vercel.com/docs/pricing"
+    },
+    {
+      "date": "Sep 18, 2026",
+      "position": 3,
+      "site_name": "vercel.com",
+      "snippet": "Vercel offers multiple account plans: Hobby, Pro, and Enterprise. The Hobby plan is free and includes base features, while Pro and Enterprise ...",
+      "title": "Account Plans on Vercel",
+      "url": "https://vercel.com/docs/plans"
+    },
+    {
+      "date": "Sep 15, 2026",
+      "position": 4,
+      "site_name": "vercel.com",
+      "snippet": "The Pro plan is billed monthly based on the number of deploying team seats, paid add-ons, and any on-demand usage during the billing period.",
+      "title": "Vercel Pro Plan",
+      "url": "https://vercel.com/docs/plans/pro-plan"
+    }
+  ],
+  "total_results": 10,
+  "page": 0
+}
