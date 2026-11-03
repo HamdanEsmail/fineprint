@@ -367,20 +367,53 @@ describe("facts upkeep", () => {
     expect(await version(queued)).toMatchObject({ agent_run_id: "agent-run-1" });
   });
 
-  it.each([
-    ["rate-limited", { status: 429, body: "slow down" }],
-    ["failing", { status: 503, body: "busy" }],
-  ])("a run whose read is %s is left in flight, and nothing new starts", async (_name, reply) => {
+  const UNREADABLE = [
+    ["not found (404)", { status: 404, json: { error: { code: "NOT_FOUND" } } }],
+    ["rate-limited (429)", { status: 429, body: "slow down" }],
+    ["failing (503)", { status: 503, body: "busy" }],
+  ] as const;
+
+  it.each(UNREADABLE)("a run whose read is %s under 60 minutes old is left in flight, and nothing new starts", async (_name, reply) => {
     mockMonitors();
     mockRunAsync();
-    const id = await seedVersion(await seedPage({ kind: "pricing" }), { ...STORED, agent_run_id: "agent-run-X", captured_at: ago(90) });
-    await seedVersion(await seedPage({ kind: "fees" }), { ...STORED, captured_at: ago(80) });
+    const id = await seedVersion(await seedPage({ kind: "pricing" }), { ...STORED, agent_run_id: "agent-run-X", captured_at: ago(59) });
+    await seedVersion(await seedPage({ kind: "fees" }), { ...STORED, captured_at: ago(50) });
     fetchMock.intercept({ method: "GET", url: runUrl("agent-run-X"), reply });
 
     const logged = await quietErrors(() => runCron(env));
 
     expect(await version(id)).toMatchObject({ agent_run_id: "agent-run-X", capture_error: null, capture_attempts: 1 });
     expect(runAsyncCalls()).toEqual([]);
+    expect(logged).toContain("agent-run-X");
+    expect(logged).not.toContain("test-tinyfish-key");
+  });
+
+  it.each(UNREADABLE)("a run whose read is %s over 60 minutes old is recorded as STALE: slot freed, the next queued version starts", async (_name, reply) => {
+    mockMonitors();
+    mockRunAsync();
+    // With no run to read, its age comes from the version's capture time.
+    const stuck = await seedVersion(await seedPage({ kind: "pricing" }), {
+      ...STORED,
+      capture_attempts: CAPTURE_MAX_ATTEMPTS - 1,
+      agent_run_id: "agent-run-X",
+      captured_at: ago(61),
+    });
+    const queuedPage = await seedPage({ kind: "fees" });
+    const queued = await seedVersion(queuedPage, { ...STORED, captured_at: ago(50) });
+    fetchMock.intercept({ method: "GET", url: runUrl("agent-run-X"), reply });
+
+    const logged = await quietErrors(() => runCron(env));
+
+    expect(await version(stuck)).toMatchObject({
+      agent_run_id: null,
+      capture_status: "failed",
+      capture_error: "facts: STALE",
+      capture_attempts: CAPTURE_MAX_ATTEMPTS,
+    });
+    expect(runAsyncCalls()).toHaveLength(1);
+    expect(runAsyncCalls()[0]!.body).toMatchObject({ url: urlOf(queuedPage) });
+    expect(await version(queued)).toMatchObject({ agent_run_id: "agent-run-1", capture_status: "awaiting_facts" });
+    expect(getRunCalls()).toHaveLength(1);
     expect(logged).toContain("agent-run-X");
     expect(logged).not.toContain("test-tinyfish-key");
   });

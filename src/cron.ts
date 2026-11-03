@@ -105,29 +105,33 @@ async function releaseStaleClaims(env: Env): Promise<void> {
 
 /**
  * Looks up every facts run in flight on a version captured over 15 minutes ago. A finished
- * run is recorded as its callback would have been. A run that cannot be read is left for the
- * next tick. A run still not finished an hour after it started is recorded as STALE, a facts
- * failure that frees the slot. Its age comes from the run's own start time: the queue starts a
- * version's run long after the version was captured when it waited behind others. Only when
- * TinyAgent gives no readable start time is the version's capture time used.
+ * run is recorded as its callback would have been. A run that is not finished, or cannot be
+ * read at all (any error, a 404 or a 429 included), is left for the next tick until it is an
+ * hour old; then it is recorded as STALE, a facts failure that frees the slot, so a run that
+ * never finishes or can never be read cannot hold the single slot for good. Its age comes from
+ * the run's own start time: the queue starts a version's run long after the version was
+ * captured when it waited behind others. Only when TinyAgent gives no readable start time (or
+ * the run could not be read) is the version's capture time used.
  */
 async function followUpRuns(env: Env): Promise<void> {
   for (const version of await inFlightFactsRuns(env.DB, isoAgo(FOLLOW_UP_AFTER_MS))) {
     const runId = version.agent_run_id;
     try {
-      let run: Awaited<ReturnType<typeof getRun>>;
+      let run: Awaited<ReturnType<typeof getRun>> | null = null;
       try {
         run = await getRun(env, runId);
       } catch (err) {
-        logError(`cron could not read facts run ${runId.slice(0, 100)}; left in flight`, err);
-        continue;
+        logError(`cron could not read facts run ${runId.slice(0, 100)}`, err);
       }
-      const status = run.status.toUpperCase();
-      if (TERMINAL_AGENT_STATUSES.has(status)) {
-        await recordFactsResult(env, runId, status, run.result, run.num_of_steps);
-        continue;
+      if (run !== null) {
+        const status = run.status.toUpperCase();
+        if (TERMINAL_AGENT_STATUSES.has(status)) {
+          await recordFactsResult(env, runId, status, run.result, run.num_of_steps);
+          continue;
+        }
       }
-      const startedAt = run.created_at === null ? NaN : Date.parse(run.created_at);
+      const createdAt = run === null ? null : run.created_at;
+      const startedAt = createdAt === null ? NaN : Date.parse(createdAt);
       const since = Number.isFinite(startedAt) ? startedAt : Date.parse(version.captured_at);
       if (Date.now() - since > RUN_STALE_AFTER_MS) {
         console.warn(`cron recorded facts run ${runId.slice(0, 100)} as STALE`);
