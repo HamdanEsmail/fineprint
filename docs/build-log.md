@@ -155,7 +155,6 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 | 2026-11-03 13:25 | TinyFetch POST, `rta.ae/.../public-transport/Nol-Fares` | Task 12a: confirm the pick for item 28 (200, 4,085 characters, no per-URL error) | $0.00 |
 | 2026-11-03 13:26 | TinyFetch POST, `axa-schengen.com/en/travel-insurance/benefits` | Task 12a: confirm first insurance pick (200, 12,943 characters, no per-URL error) | $0.00 |
 | 2026-11-03 13:26 | TinyFetch POST, `dni.ae/personal-insurance/medical/dha_ebp/` | Task 12a: confirm second insurance pick (200, 1,946 characters, no per-URL error) | $0.00 |
-
 | 2026-11-03 14:17-15:15 | spike Monitor GET and PATCHes (re-point, resume, pause) | webhook rehearsal | $0.00 |
 | 2026-11-03 14:5x, 16:28 | `GET /v1/monitors` (counts only) | check list paging; count monitors after registration and rotation | $0.00 |
 | 2026-11-03 16:07 | run-now pull through `/api/admin/pull` | Task 13 fallback rehearsal | $0.005 check + $0.002 screenshot |
@@ -163,6 +162,6 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 | 2026-11-03 16:2x onward | TinyAgent facts runs, one at a time | baseline facts for the 13 pricing and fee pages | $0.016 per step, recorded in the spend table |
 | 2026-11-03 16:28 | 20 Monitor PATCHes via rotate-webhook | secret rotation | $0.00 |
 
-A few earlier TinySearch and TinyFetch calls were made to pick the four pages chosen during the build before a machine restart. They are free ($0.00) and are not itemised because no record of them survived the restart. The four rows above are the confirmation calls made afterwards.
+A few earlier TinySearch and TinyFetch calls were made to pick the four pages chosen during the build before a machine restart. They are free ($0.00) and are not itemised because no record of them survived the restart. The four Task 12a rows are the confirmation calls made afterwards.
 
 Total during the build: $0.002. From go-live on, the app's own spend ledger (`/api/stats`) is the record: $0.30 at 16:28 UTC on 3 Nov.
