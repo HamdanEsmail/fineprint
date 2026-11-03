@@ -111,8 +111,8 @@ describe("normalize: tracking parameters", () => {
   });
 
   it("records no tracking entry for a line that is dropped anyway", () => {
-    const { suppressed } = normalize("Posted 3 hours ago https://a.com/p?utm_source=x");
-    expect(suppressed).toEqual(["Posted 3 hours ago https://a.com/p?utm_source=x"]);
+    const { suppressed } = normalize("Skip to content https://a.com/p?utm_source=x");
+    expect(suppressed).toEqual(["Skip to content https://a.com/p?utm_source=x"]);
   });
 });
 
@@ -128,6 +128,11 @@ describe("normalize: metadata lines", () => {
     "| Last updated | 3 Nov 2026 |",
     "*Updated on Nov 3, 2026 at 10:00 AM UTC*",
     "Updated on 03.11.2026",
+    "Updated 3 Nov 2026",
+    "Updated 2026-11-03",
+    "Updated: 2026-11-03",
+    "Last updated: 03/11/2026",
+    "Last updated: 3/11/26",
     "Updated: 2026-11-03T10:00:00+04:00",
     "Updated: Tuesday, 3 November 2026",
     "Updated: today",
@@ -157,7 +162,10 @@ describe("normalize: metadata lines", () => {
     "Last updated: see the changelog",
     "Effective date of the new fee schedule is announced 30 days in advance",
     "Page generated reports are available on Pro",
-    "Updated 3 Nov 2026",
+    "Updated: 1.2.3",
+    "Last updated: 10.5.2",
+    "Updated: 1299.99",
+    "Updated 2026 pricing",
     "Final action date: 01 MAR 2023",
     "Deadline: file by 31 March 2027",
     "## 3 November 2026",
@@ -188,6 +196,8 @@ describe("normalize: copyright and relative time", () => {
     "Copyright (c) 2026 Example",
     "(c) 2026 Example",
     "(C) 1999-2026 Example Inc.",
+    "(C) 1999-2026 Example",
+    "© 2026 Example",
     "**Copyright** © 2026",
     "> © 2026 Example",
   ])("drops copyright line %j", (line) => {
@@ -204,6 +214,10 @@ describe("normalize: copyright and relative time", () => {
     "Copyright and trademark complaints: send notices to legal@x.com",
     "Copyright holders may file a claim within 30 days of the removal",
     "Copyright 12026 Example",
+    "Copyright claims filed after 1 March 2027 incur a $50 processing fee.",
+    "(c) Applications received after 31 March 2027 will not be considered.",
+    "(c) From 1 January 2027 the fee rises to $60.",
+    "© From 2027 the fee rises to $60",
   ])("keeps %j", (line) => {
     expect(normalize(line)).toEqual({ text: line, suppressed: [] });
   });
@@ -216,12 +230,39 @@ describe("normalize: copyright and relative time", () => {
     expect(normalize(footer(201))).toEqual({ text: footer(201), suppressed: [] });
   });
 
-  it.each(["3 hours ago", "Posted 1 day ago by admin", "Edited 45 Minutes AGO", "12 seconds ago", "Checked 2 days ago"])("drops relative time line %j", (line) => {
+  it.each([
+    "3 hours ago",
+    "Posted 3 hours ago by admin",
+    "Posted 1 day ago by admin",
+    "Updated 2 days ago",
+    "Last updated: 3 hours ago",
+    "Last edited 5 minutes ago by Jane Doe",
+    "Edited 45 Minutes AGO",
+    "12 seconds ago",
+    "*3 hours ago*",
+    "> Published 1 day ago.",
+  ])("drops relative time line %j", (line) => {
     expect(normalize(`A\n${line}`)).toEqual({ text: "A", suppressed: [line] });
   });
 
-  it.each(["Refunds within 30 days of purchase", "Posted 3 hours", "ago 3 hours", "3 weeks ago"])("keeps %j", (line) => {
+  it.each([
+    "Refunds within 30 days of purchase",
+    "Posted 3 hours",
+    "ago 3 hours",
+    "3 weeks ago",
+    "Orders placed more than 30 days ago cannot be returned or refunded.",
+    "Refunds are not available for purchases made 14 days ago or earlier.",
+    "Checked 2 days ago",
+    "Posted 3 hours ago and then edited",
+    "3 days ago by courier is too late for a refund of the full amount",
+  ])("keeps %j", (line) => {
     expect(normalize(line)).toEqual({ text: line, suppressed: [] });
+  });
+
+  it("allows a name of up to 40 characters after 'by' and no more", () => {
+    const stamp = (name: string) => `Posted 3 hours ago by ${name}`;
+    expect(normalize(stamp("a".repeat(40)))).toEqual({ text: "", suppressed: [stamp("a".repeat(40))] });
+    expect(normalize(stamp("a".repeat(41)))).toEqual({ text: stamp("a".repeat(41)), suppressed: [] });
   });
 });
 
@@ -237,6 +278,9 @@ describe("normalize: built-in noise list", () => {
     "23 people viewing this page",
     "1,204 others are viewing",
     "5 People Viewing",
+    "12 people viewing",
+    "12 people are viewing this page",
+    "**12** people are currently viewing this right now",
     "12 shares",
     "1 share",
     "1.2k shares",
@@ -254,6 +298,8 @@ describe("normalize: built-in noise list", () => {
     "Shares outstanding: 1,000",
     "Up to 5 people, unlimited viewing",
     "Plan for 3 people",
+    "Pro: up to 5 people viewing a board at once",
+    "5 people viewing a board at once",
     "Skip the queue",
     "Cookies expire after 30 days",
     "Cookie policy",
@@ -357,8 +403,8 @@ describe("normalize: speed", () => {
     const ms = performance.now() - t0;
     expect(text).toContain("Pro plan: $25 per seat per month, billed annually. Includes 1,000 requests.");
     expect(text).not.toContain("utm_");
-    // Generous bound for a shared CI machine; real cost is a few milliseconds.
-    expect(ms).toBeLessThan(250);
+    // Bound for a shared CI machine (tighter flakes there); real cost is a few tens of milliseconds.
+    expect(ms).toBeLessThan(100);
   });
 
   it("does not blow up on long pathological lines", () => {

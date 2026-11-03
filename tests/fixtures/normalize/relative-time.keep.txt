@@ -1,3 +1,5 @@
 ## Status
 Refunds are accepted within 30 days of purchase
+Orders placed more than 30 days ago cannot be returned or refunded.
+Refunds are not available for purchases made 14 days ago or earlier.
 All systems operational

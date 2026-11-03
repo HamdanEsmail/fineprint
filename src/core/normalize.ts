@@ -72,9 +72,10 @@ function stripTrackingParams(url: string, removed: string[]): string {
 // emphasis, table pipes, code ticks.
 const LEADING_MARKUP = /^[\s#*_>\-+|~`]+/;
 
-// "Last updated", "Updated on", "Updated:", "Published", "Effective date",
-// "Page generated" and "As of", case-insensitive, at line start.
-const META_MARKER = /^(?:(?:last updated|updated on|published|effective date|page generated|as of)(?![\p{L}\d])|updated:)/iu;
+// "Last updated", "Updated" (also "Updated on" and "Updated:"), "Published",
+// "Effective date", "Page generated" and "As of", case-insensitive, at line
+// start. The marker alone never drops a line; see isMetadataLine.
+const META_MARKER = /^(?:last updated|updated|published|effective date|page generated|as of)(?![\p{L}\d])/iu;
 
 // A line that merely says when the page was touched. The scope rule (spec 4.3):
 // the marker alone is not enough, what follows it must be a date or time stamp
@@ -89,7 +90,9 @@ const MONTH = /^(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|ju
 const WEEKDAY = /^(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)$/i;
 const YEAR = /^\d{4}$/;
 const DAY = /^\d{1,2}(?:st|nd|rd|th)?$/i;
-const NUMERIC_DATE = /^(?:\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}|\d{4}[/.-]\d{1,2}|\d{1,2}[/.-]\d{4})$/;
+// A real date shape only: 3/11/26, 03.11.2026, 2026-11-03. "1.2.3", "10.5.2" and
+// "1299.99" are versions and prices, not dates.
+const NUMERIC_DATE = /^(?:\d{1,2}[/.-]\d{1,2}[/.-](?:\d{2}|\d{4})|\d{4}-\d{2}-\d{2})$/;
 const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?$/i;
 const CLOCK = /^\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[ap]\.?m\.?)?$/i;
 const HOUR_AMPM = /^\d{1,2}[ap]\.?m\.?$/i;
@@ -145,39 +148,42 @@ function isDateStamp(stamp: string): boolean {
 
 // --- Other whole-line rules -------------------------------------------------
 
-// A copyright footer starts with "©", "(c)" or the whole word "copyright" and
-// carries a year ("Copyright © 2026 Example Inc. All rights reserved."). A policy
-// sentence that merely starts with the word ("Copyright and trademark complaints:
-// send notices to legal@x.com") has no year and stays, and so does "Copyrighted...".
-const COPYRIGHT = /^(?:©|\(c\)|copyright(?![\p{L}\d]))/iu;
-const YEAR_19XX_20XX = /\b(?:19|20)\d{2}\b/;
+// A copyright footer is "©", "(c)" or the word "copyright", then straight away a
+// year: "Copyright © 2026 Vercel Inc. All rights reserved.", "(C) 1999-2026 Example".
+// Anything else that starts this way is policy text with a deadline or a fee in it
+// ("Copyright claims filed after 1 March 2027 incur a $50 fee", "(c) From 1 January
+// 2027 the fee rises to $60") and stays, and so does "Copyrighted material...".
+// Markdown around the marker ("**Copyright** © 2026") is skipped by [\s*_].
+const COPYRIGHT_FOOTER = /^(?:©|\(c\)|copyright)[\s*_]*(?:©|\(c\))?[\s*_]*(?:19|20)\d{2}(?!\d)/i;
 // Footers are one short line; a longer line starting this way is policy text.
 const MAX_COPYRIGHT_LENGTH = 200;
 
-const RELATIVE_TIME = /\b\d+ (?:seconds?|minutes?|hours?|days?) ago\b/i;
+// A relative-time stamp is the WHOLE line: an optional verb, "3 hours ago", an
+// optional "by <name>" (at most 40 characters). A policy sentence that mentions one
+// ("Orders placed more than 30 days ago cannot be returned") is content and stays.
+const RELATIVE_TIME_STAMP =
+  /^(?:(?:last updated|last edited|last modified|posted|updated|edited|published|modified)[\s:*_]*)?\d+ (?:seconds?|minutes?|hours?|days?) ago(?: by [\p{L}\d][\p{L}\d .'’@_-]{0,39})?[\s*_.]*$/iu;
 
 // Cookie banners and buttons are short; a long line that says "we use cookies" is a
 // privacy-policy paragraph, which is content (and a real change if it moves).
 const MAX_COOKIE_BANNER_LENGTH = 300;
 const COOKIE_BANNER_PHRASE = /we use cookies|accept all cookies|cookie settings/i;
 const SKIP_TO_CONTENT = /skip to content/i;
-// "23 people viewing", "1,204 others are viewing". The digit run is bounded so a
-// long run of digits and commas cannot make the scan quadratic.
-const VIEWER_COUNTER = /\b\d[\d,]{0,11} (?:people|others)(?: are)? viewing\b/i;
+// A line that is only "23 people viewing", "1,204 others are viewing" or "12 people
+// are viewing this page". "Pro: up to 5 people viewing a board at once" stays.
+const VIEWER_COUNTER =
+  /^\d[\d,]{0,11} (?:people|others)(?: are)?(?: currently)? viewing(?: (?:this|page|product|item|article|post|listing|right|now|today))*[.!]?$/i;
 // A line that is only "1.2k shares" / "12 Shares". "Revenue share" stays.
 const SHARE_COUNTER = /^\d[\d,]*(?:\.\d+)?[km]? shares?$/i;
 
-function isCopyrightFooter(line: string, body: string): boolean {
-  return line.length <= MAX_COPYRIGHT_LENGTH && COPYRIGHT.test(body) && YEAR_19XX_20XX.test(line);
-}
-
 function isNoiseLine(line: string, body: string, ignore: readonly RegExp[]): boolean {
   if (isMetadataLine(body)) return true;
-  if (isCopyrightFooter(line, body)) return true;
-  if (RELATIVE_TIME.test(line)) return true;
-  if (SKIP_TO_CONTENT.test(line) || VIEWER_COUNTER.test(line)) return true;
+  if (line.length <= MAX_COPYRIGHT_LENGTH && COPYRIGHT_FOOTER.test(body)) return true;
+  if (RELATIVE_TIME_STAMP.test(body)) return true;
+  if (SKIP_TO_CONTENT.test(line)) return true;
   if (line.length <= MAX_COOKIE_BANNER_LENGTH && COOKIE_BANNER_PHRASE.test(line)) return true;
-  if (SHARE_COUNTER.test(body.replace(/[*_`]/g, ""))) return true;
+  const bare = body.replace(/[*_`]/g, "");
+  if (VIEWER_COUNTER.test(bare) || SHARE_COUNTER.test(bare)) return true;
   return ignore.some((re) => re.test(line));
 }
 
@@ -202,6 +208,10 @@ function compileIgnorePatterns(patterns: readonly unknown[]): RegExp[] {
 
 // --- Entry points -----------------------------------------------------------
 
+// A trimmed line needs its whitespace collapsed only if it has a whitespace
+// character other than a plain space (tab, no-break space, ...) or two spaces in a row.
+const NEEDS_COLLAPSE = /[^\S ]| {2}/;
+
 /**
  * Normalize a page's text. Rules, in order (spec 4.3): collapse whitespace and
  * blank-line runs; strip tracking query parameters from links; drop metadata
@@ -223,7 +233,8 @@ export function normalize(text: string, ignorePatterns: string[] = []): Normaliz
     }
 
     const removedParams: string[] = [];
-    let line = original.replace(/\s+/g, " ");
+    // Most lines are already single-spaced; test cheaply before rebuilding the string.
+    let line = NEEDS_COLLAPSE.test(original) ? original.replace(/\s+/g, " ") : original;
     if (line.includes("://")) line = line.replace(URL_RE, (url) => stripTrackingParams(url, removedParams));
 
     if (isNoiseLine(line, line.replace(LEADING_MARKUP, ""), ignore)) {

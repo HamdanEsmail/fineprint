@@ -1,3 +1,4 @@
 ## Pricing
 Team plan: up to 5 people, unlimited viewing
+Pro: up to 5 people viewing a board at once
 Pro $25 /mo

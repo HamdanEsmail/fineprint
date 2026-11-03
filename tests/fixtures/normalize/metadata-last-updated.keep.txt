@@ -1,3 +1,4 @@
 ## Visa Bulletin
 Final action date: 01 MAR 2023
 Last updated rows are highlighted in yellow
+Last updated: 10.5.2
