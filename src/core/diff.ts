@@ -107,9 +107,13 @@ const DICE_MAX_CHARS = 4096;
 // Total bigram work one structuredDiff call may spend: characters scanned to
 // build a block's bigram set plus the size of the smaller set for each
 // comparison. About 3 ms. A full rewrite of a 100 KB page would otherwise cost
-// 10 ms or more in comparisons that find nothing; once the budget is spent
-// blocks are no longer paired (they stay removed and added), except identical
-// ones, which are free.
+// 10 ms or more in comparisons that find nothing. A revised block that is
+// accepted on its first candidate costs about 2.5 times its length (two sets and
+// one comparison), so the budget covers roughly 24,000 characters of revised
+// text per version: every revised block of a page whose revisions total that
+// much, the first ones in document order beyond it. Once a comparison cannot be
+// afforded the budget is spent for good: nothing else is scored, so blocks stay
+// removed and added, except identical ones, which are free.
 const SIMILARITY_BUDGET = 60_000;
 
 /** Set of lowercased character bigrams of the first DICE_MAX_CHARS characters. Empty under two characters. */
@@ -135,7 +139,13 @@ function dice(a: Set<number>, b: Set<number>): number {
 /** Scores pairs of blocks for one diff, building each block's bigram set once and spending from SIMILARITY_BUDGET. */
 class Similarity {
   private left = SIMILARITY_BUDGET;
+  private spent = false;
   private readonly sets = new Map<Block, Set<number>>();
+
+  /** True once a comparison could not be afforded; from then on only identical blocks match. */
+  get exhausted(): boolean {
+    return this.spent;
+  }
 
   private gramsOf(block: Block): Set<number> | null {
     const known = this.sets.get(block);
@@ -148,14 +158,21 @@ class Similarity {
     return set;
   }
 
-  /** 1 for identical text, else the Dice score; 0 once the budget cannot cover the comparison. */
+  /** 1 for identical text, else the Dice score; 0 (for good) once the budget cannot cover the comparison. */
   score(a: Block, b: Block): number {
     if (a.text === b.text) return 1;
+    if (this.spent) return 0;
     const setA = this.gramsOf(a);
     const setB = setA && this.gramsOf(b);
-    if (!setA || !setB) return 0;
+    if (!setA || !setB) {
+      this.spent = true;
+      return 0;
+    }
     const cost = Math.min(setA.size, setB.size);
-    if (cost > this.left) return 0;
+    if (cost > this.left) {
+      this.spent = true;
+      return 0;
+    }
     this.left -= cost;
     return dice(setA, setB);
   }
@@ -163,23 +180,32 @@ class Similarity {
 
 // --- Pairing a run ----------------------------------------------------------------
 
-// Pairing by best similarity compares every removed block with the added blocks
+// Pairing by best similarity compares a removed block with the added blocks
 // after it, so it only runs when both sides of a run have at most this many
 // blocks; longer runs pair position by position (cost linear in the run).
 const MONOTONE_RUN_LIMIT = 50;
 
+// A candidate this similar is taken without looking at the ones after it. A
+// lightly revised block is nearly always its own best match, and stopping there
+// keeps the search linear instead of quadratic in the run.
+const STRONG_PAIR = 0.9;
+
 /**
  * For each removed block, the index of the added block it pairs with, or -1.
- * The i-th removed block takes the highest-scoring same-section added block
- * (score >= PAIR_THRESHOLD, the earliest on a tie) that comes after the one the
- * previous pair took, so pairs never cross and an inserted or deleted block
- * does not push every later pair out of line.
+ * The i-th removed block takes the first same-section added block that scores
+ * STRONG_PAIR, or else the highest-scoring one (score >= PAIR_THRESHOLD, the
+ * earliest on a tie), among the added blocks after the one the previous pair
+ * took, so pairs never cross and an inserted or deleted block does not push
+ * every later pair out of line. If the similarity budget runs out during a
+ * block's scan, the candidates after that point were never scored, so the best
+ * found so far is not trusted and the block stays unpaired.
  */
 function pairMonotonically(removedRun: Block[], addedRun: Block[], similarity: Similarity): Int32Array {
   const partner = new Int32Array(removedRun.length).fill(-1);
   let next = 0;
   for (let i = 0; i < removedRun.length && next < addedRun.length; i++) {
     const before = removedRun[i]!;
+    const spentBefore = similarity.exhausted;
     let best = -1;
     let bestScore = 0;
     for (let j = next; j < addedRun.length; j++) {
@@ -189,9 +215,11 @@ function pairMonotonically(removedRun: Block[], addedRun: Block[], similarity: S
       if (score >= PAIR_THRESHOLD && score > bestScore) {
         best = j;
         bestScore = score;
-        if (score === 1) break;
+        if (score >= STRONG_PAIR) break;
       }
     }
+    // An identical block (score 1) is exact whatever the budget; a weaker best is not.
+    if (!spentBefore && similarity.exhausted && bestScore < 1) best = -1;
     if (best >= 0) {
       partner[i] = best;
       next = best + 1;
@@ -258,9 +286,10 @@ const MAX_EDIT_LENGTH = 80;
  * The blocks both versions start and end with are skipped, and the rest is
  * aligned with `diffArrays` on block text. If that needs more than
  * MAX_EDIT_LENGTH edits it is abandoned and the whole remaining region is one
- * removed run followed by one added run, paired position by position: edits
- * that line up are still found, blocks that shifted are reported as removed and
- * added.
+ * removed run followed by one added run, paired like any other run: by best
+ * match when each side has at most MONOTONE_RUN_LIMIT blocks, otherwise
+ * position by position, where edits that line up are still found and blocks
+ * that shifted are reported as removed and added.
  */
 export function structuredDiff(fromText: string, toText: string): StructuredDiff {
   const from = splitBlocks(fromText);

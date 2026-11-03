@@ -310,7 +310,8 @@ describe("structuredDiff: bounded work", () => {
   // Reversing distinct blocks leaves a longest common subsequence of one block,
   // so an exact diff reports every block but one as removed and added. Past the
   // edit-distance bound the diff is not run: the whole region is one removed
-  // run and one added run, paired position by position, so nothing is kept.
+  // run and one added run, paired like any other run (position by position
+  // above 50 blocks a side), so nothing is kept.
   it("gives up on an exact alignment past the bound and treats the region as one removed and one added run", () => {
     const blocks = randomBlocks(300, 1);
     const d = structuredDiff(blocks.join("\n\n"), [...blocks].reverse().join("\n\n"));
@@ -352,6 +353,82 @@ describe("structuredDiff: bounded work", () => {
     expect(d.added).toHaveLength(400 - d.changed.length);
     // The blocks that did pair are the first ones.
     expect(d.removed[0]!.text).toBe(blocks[d.changed.length]);
+  });
+});
+
+describe("structuredDiff: early accept and the similarity budget", () => {
+  // Replaces three characters in the middle: the Dice score stays above 0.9.
+  const revise = (block: string): string => block.slice(0, 100) + "xyz" + block.slice(103);
+
+  it.each([
+    [30, 300],
+    [50, 150],
+    [20, 400],
+  ])("pairs every one of %i lightly revised paragraphs of %i characters in one section", (count, length) => {
+    // A run of `count` removed and `count` added blocks with unchanged blocks
+    // around it. Taking the first candidate that scores 0.9 keeps the cost
+    // linear; scanning every candidate for the best would spend the budget on
+    // the first dozen blocks. (50 blocks of 150 characters is more than 80
+    // edits, so that case also goes through the give-up path.)
+    const blocks = randomBlocks(count, 17, length);
+    const revised = blocks.map(revise);
+    const from = ["# Terms", "Unchanged opening paragraph.", ...blocks, "Unchanged closing paragraph."].join("\n\n");
+    const to = ["# Terms", "Unchanged opening paragraph.", ...revised, "Unchanged closing paragraph."].join("\n\n");
+    const d = structuredDiff(from, to);
+    expect(d.changed).toHaveLength(count);
+    expect(d.changed.map((c) => c.before)).toEqual(blocks);
+    expect(d.changed.map((c) => c.after)).toEqual(revised);
+    expect(d.changed.every((c) => c.section === "Terms")).toBe(true);
+    expect(d.removed).toEqual([]);
+    expect(d.added).toEqual([]);
+  });
+
+  it("pairs only the first blocks of a long run of large revised paragraphs, once the budget is spent", () => {
+    // 50 paragraphs of 2,000 characters cost about 4,600 each (two sets and a
+    // comparison), so the 60,000 budget covers about 13 of them.
+    const blocks = randomBlocks(50, 33, 2000);
+    const revised = blocks.map((b) => b.slice(0, 1000) + "xyz" + b.slice(1003));
+    const d = structuredDiff(blocks.join("\n\n"), revised.join("\n\n"));
+    const paired = d.changed.length;
+    expect(paired).toBeGreaterThan(5);
+    expect(paired).toBeLessThan(25);
+    expect(d.changed.map((c) => c.before)).toEqual(blocks.slice(0, paired));
+    expect(d.removed.map((b) => b.text)).toEqual(blocks.slice(paired));
+    expect(d.added.map((b) => b.text)).toEqual(revised.slice(paired));
+  });
+
+  it("discards the best candidate found so far when the budget runs out during a scan, and stops pairing", () => {
+    // Seven pairs of 4,000-character blocks spend all but about 4,000 of the
+    // budget (each pair costs about 8,000 whatever the text). Then the last
+    // removed block R meets a weak candidate (a 400-character prefix of R, Dice
+    // about 0.64) that fits in what is left, and after it the true revision of R,
+    // whose 2,000 characters do not. The weak one must not win by default, and
+    // a short pair that follows (cheap, and an obvious match) is not scored
+    // either: the budget is spent for the rest of the call.
+    const fillers = Array.from({ length: 7 }, (_, i) => "ab".repeat(2000 - i));
+    const revisedFillers = Array.from({ length: 7 }, (_, i) => "ba".repeat(2000 - i));
+    const r = randomBlocks(1, 41, 2000)[0]!;
+    const weak = r.slice(0, 400);
+    const strong = r.slice(0, 1000) + "xyz" + r.slice(1003);
+    const d = structuredDiff(
+      [...fillers, r, "Late fee is $5 per day."].join("\n\n"),
+      [...revisedFillers, weak, strong, "Late fee is $6 per day."].join("\n\n"),
+    );
+    expect(d.changed).toHaveLength(7);
+    expect(d.changed.map((c) => c.before)).toEqual(fillers);
+    expect(d.removed.map((b) => b.text)).toEqual([r, "Late fee is $5 per day."]);
+    expect(d.added.map((b) => b.text)).toEqual([weak, strong, "Late fee is $6 per day."]);
+  });
+
+  it("would have paired the last block with its revision had the budget lasted", () => {
+    // Same blocks as above without the fillers: the best candidate wins.
+    const r = randomBlocks(1, 41, 2000)[0]!;
+    const weak = r.slice(0, 400);
+    const strong = r.slice(0, 1000) + "xyz" + r.slice(1003);
+    const d = structuredDiff(r, [weak, strong].join("\n\n"));
+    expect(d.changed).toEqual([{ section: "", before: r, after: strong }]);
+    expect(d.added).toEqual([{ section: "", text: weak }]);
+    expect(d.removed).toEqual([]);
   });
 });
 
