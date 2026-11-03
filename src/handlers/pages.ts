@@ -11,6 +11,7 @@ import { captureVersion } from "../capture";
 import { MAX_MONITORS, PUBLIC_ADDS_PER_IP_PER_DAY, PUBLIC_SLOTS, PUBLIC_TTL_DAYS } from "../core/limits";
 import { hashText, normalize } from "../core/normalize";
 import { cronForIndex, PURPOSE } from "../core/schedule";
+import { deleteCachedDiffsOfPage } from "../db/diffCache";
 import {
   countMonitors,
   getPage,
@@ -513,6 +514,9 @@ pagesRouter.patch("/:id", adminOnly, async (c) => {
     patch.expires_at = null;
   }
   await updatePage(db, page.id, patch);
+  // A stored diff holds the page's label and blocks cut with its ignore patterns (R73): an edit
+  // of either drops the page's cached diffs, and the next request computes them again.
+  if (patch.ignore_patterns !== undefined || patch.label !== undefined) await deleteCachedDiffsOfPage(db, page.id);
 
   const updated = await getPage(db, page.id);
   if (!updated) return c.json({ error: "not_found" }, 404);

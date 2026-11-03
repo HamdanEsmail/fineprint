@@ -3,9 +3,13 @@
 // and the stats. All of it is GET and JSON; CORS is added for /api/* in index.ts.
 //
 // The free plan allows 10 ms of CPU a request, so nothing here loops over pages with a query
-// each, and no list reads a version's `text`. The one expensive answer, a diff, is computed
-// once and stored in `diff_cache` under the two version ids; version rows never change their
-// text, so the stored answer never goes stale and later requests only read it.
+// each, and no list reads a version's `text`. The one expensive answer, a diff, is stored in
+// `diff_cache` under the two version ids so later requests only read it. It is stored only once
+// both versions are final (`complete` or `failed`): a version's text never changes, but its
+// screenshot, source and facts are filled in after it is inserted (a capture takes minutes, the
+// facts queue up to an hour), so the diff of a version still being captured is computed again
+// on every request and a stored one would freeze it without them. What a stored diff also
+// depends on (the page's ignore patterns and label) is dropped from the cache when it is edited.
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { factsDiff, structuredDiff, type Fact, type FactsDiff, type StructuredDiff } from "../core/diff";
@@ -41,10 +45,13 @@ historyRouter.onError((err, c) => {
 
 /**
  * A time parameter as the ISO string the database stores, or null when it is missing or not a
- * date. Stored times come from toISOString() (always ".000Z", four-digit years), so a parameter
- * is converted the same way before it is compared as text: "2026-11-02T09:15:00Z" and
- * "2026-11-02T12:15:00+03:00" then both find a version captured at 09:15:00.000Z. A year
- * outside 0000 to 9999 has no four-digit form and would not sort as text, so it is refused.
+ * date. Stored times come from toISOString() (millisecond precision, a "Z", four-digit years), so
+ * a parameter is converted the same way before it is compared as text. Left as typed,
+ * "2026-11-02T09:15:00Z" would sort after "2026-11-02T09:15:00.123Z" ("Z" is above "."), and a
+ * version captured 123 ms after that moment would be taken as already in force; converted, it is
+ * "2026-11-02T09:15:00.000Z" and the version is correctly later. "2026-11-02T12:15:00+03:00"
+ * becomes the same instant. A year outside 0000 to 9999 has no four-digit form and would not
+ * sort as text, so it is refused.
  */
 function parseTime(raw: string | undefined): string | null {
   if (raw === undefined) return null;
@@ -76,6 +83,14 @@ function parseFacts(stored: string | null): Fact[] | null {
     return null;
   }
 }
+
+/**
+ * True when nothing about a version's captures will change any more: `complete` or `failed` (the
+ * two terminal statuses). A `pending`, `partial` or `awaiting_facts` version is still gaining its
+ * screenshot, source or facts.
+ */
+const isFinal = (v: Pick<VersionSummary, "capture_status">): boolean =>
+  v.capture_status === "complete" || v.capture_status === "failed";
 
 const notFound = (c: AppContext): Response => c.json({ error: "not_found" }, 404);
 
@@ -202,18 +217,25 @@ historyRouter.get("/pages/:id/diff", async (c) => {
   // only when the range is reversed (R19). Two ends in one version are an empty diff.
   if (from.id !== to.id && from.captured_at > to.captured_at) return c.json({ error: "invalid_range" }, 400);
 
-  // A stored answer is served as it was stored: the viewer never recomputes.
-  const cached = await getCachedDiff(db, from.id, to.id);
-  if (cached !== null) return c.body(cached, 200, { "Content-Type": "application/json" });
+  // A diff is kept only once both versions are final, and only a kept one is read: a stored answer
+  // is served as it was stored (the viewer never recomputes), and an answer for a version still
+  // being captured is computed fresh, so it shows the screenshots and facts that have arrived.
+  const final = isFinal(from) && isFinal(to);
+  if (final) {
+    const cached = await getCachedDiff(db, from.id, to.id);
+    if (cached !== null) return c.body(cached, 200, { "Content-Type": "application/json" });
+  }
 
   const diff = await buildDiff(c.env, page, from, to);
   if (diff === null) return notFound(c);
   const json = JSON.stringify(diff);
-  try {
-    await putCachedDiff(db, from.id, to.id, json);
-  } catch (err) {
-    // The answer is right whether or not it could be kept; the next request computes it again.
-    console.error("diff cache write failed", err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 200) : "unknown error");
+  if (final) {
+    try {
+      await putCachedDiff(db, from.id, to.id, json);
+    } catch (err) {
+      // The answer is right whether or not it could be kept; the next request computes it again.
+      console.error("diff cache write failed", err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 200) : "unknown error");
+    }
   }
   return c.body(json, 200, { "Content-Type": "application/json" });
 });

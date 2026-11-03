@@ -5,7 +5,7 @@ import { recordSpend } from "../src/core/spend";
 import { insertPage, updatePage, type NewPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { PageStatus, RunRow } from "../src/db/types";
-import { insertVersion, type NewVersion } from "../src/db/versions";
+import { insertVersion, updateCapture, type NewVersion } from "../src/db/versions";
 import { callWorker } from "./helpers/app";
 
 const db = env.DB;
@@ -149,8 +149,9 @@ async function seed(): Promise<void> {
       text: text3,
       judgment_summary: SUMMARY3,
       facts_json: JSON.stringify(facts3),
-      screenshot_key: null, // the screenshot capture is still missing
-      capture_status: "partial",
+      screenshot_key: null, // the screenshot capture gave up: final, and without a screenshot
+      capture_status: "failed",
+      capture_error: "screenshot: request_failed",
     }),
   );
 
@@ -198,7 +199,7 @@ describe("GET /api/pages/:id/versions/:vid", () => {
     const v3 = (await getJson(`/api/pages/${PAGE}/versions/ver-3`)).body;
     expect(v3.screenshot_url).toBeNull();
     expect(v3.source_url).toBe(`${BASE}/sources/ver-3.html`);
-    expect(v3.capture_status).toBe("partial");
+    expect(v3.capture_status).toBe("failed");
   });
 
   it("gives facts null when none were stored, and null for facts that cannot be read", async () => {
@@ -274,13 +275,33 @@ describe("GET /api/pages/:id/as-of", () => {
   it("reads the time in any ISO form: without milliseconds, with an offset, as a date", async () => {
     await seed();
     const asOf = (at: string) => getJson(`/api/pages/${PAGE}/as-of?at=${encodeURIComponent(at)}`);
-    // Stored times end in ".000Z"; a bare "...:00Z" must still hit a version captured at that second.
+    // A time without milliseconds is read as the whole second: it hits a version captured at it.
     expect((await asOf("2026-11-02T09:15:00Z")).body.id).toBe("ver-2");
     // 12:15 at +03:00 is 09:15 UTC.
     expect((await asOf("2026-11-02T12:15:00+03:00")).body.id).toBe("ver-2");
     expect((await asOf("2026-11-02T12:14:59+03:00")).body.id).toBe("ver-1");
     // A bare date is midnight UTC.
     expect((await asOf("2026-11-03")).body.id).toBe("ver-2");
+  });
+
+  it("compares a time without milliseconds as .000, so a version captured a few milliseconds later is not in force yet", async () => {
+    await seed();
+    // Versions carry real milliseconds. As text "…09:15:00Z" sorts after "…09:15:00.123Z", so an
+    // unconverted parameter would count this version as captured before it.
+    await insertVersion(db, versionInput("ver-ms", { captured_at: "2026-11-02T09:15:00.123Z", text: text2 }));
+    const asOf = (at: string) => getJson(`/api/pages/${PAGE}/as-of?at=${encodeURIComponent(at)}`);
+    expect((await asOf("2026-11-02T09:15:00Z")).body.id).toBe("ver-2");
+    expect((await asOf("2026-11-02T09:15:00.122Z")).body.id).toBe("ver-2");
+    expect((await asOf("2026-11-02T09:15:00.123Z")).body.id).toBe("ver-ms");
+    expect((await asOf("2026-11-02T09:15:01Z")).body.id).toBe("ver-ms");
+    // The same moment written with an offset and no milliseconds.
+    expect((await asOf("2026-11-02T12:15:00+03:00")).body.id).toBe("ver-2");
+
+    // And in a diff: the version captured at .123 is a hop after the one at .000.
+    const diff = await getJson(`/api/pages/${PAGE}/diff?from=${encodeURIComponent("2026-11-02T09:15:00Z")}&to=${encodeURIComponent("2026-11-02T09:15:01Z")}`);
+    expect(diff.body.from.version_id).toBe("ver-2");
+    expect(diff.body.to.version_id).toBe("ver-ms");
+    expect(diff.body.hops).toBe(1);
   });
 
   it("is 404 not_found for an unknown page and 404 no_versions for a page that has none", async () => {
@@ -361,6 +382,128 @@ describe("GET /api/pages/:id/diff", () => {
     const sameVersions = await get(diffPath("2026-11-01T10:00:00Z", "2026-12-01T00:00:00Z"));
     expect(await sameVersions.text()).toBe(sentinel);
     expect(await cacheRows()).toHaveLength(1);
+  });
+
+  // A fourth version, in the state a fresh catch is in while its captures are still running.
+  const T4 = "2026-11-04T10:00:00.000Z";
+  const text4 = text3.replace("$25 per month", "$30 per month").replace("3 November 2026", "4 November 2026");
+  const pro30 = { ...pro25, price: "$30" };
+  const facts4 = [hobby, pro30, ultra, enterprise];
+  const freshCatch = (over: Partial<NewVersion> = {}) =>
+    versionInput("ver-4", {
+      captured_at: T4,
+      text: text4,
+      judgment_summary: "Pro went to $30.",
+      screenshot_key: null,
+      html_key: null,
+      facts_json: null,
+      capture_status: "pending",
+      ...over,
+    });
+
+  it("does not keep a diff while a version is still being captured, and shows its screenshot and facts once they arrive (R73)", async () => {
+    await seed();
+    await insertVersion(db, freshCatch());
+
+    // The feed's "compare" link on a fresh catch: no screenshot, no source, no facts yet.
+    const early = await getJson(diffPath(T3, T4));
+    expect(early.status).toBe(200);
+    expect(early.body.to).toEqual({ version_id: "ver-4", captured_at: T4, screenshot_url: null, source_url: null });
+    expect(early.body.facts).toBeNull();
+    expect(early.body.blocks.changed).toEqual([
+      { section: "Pro", before: "$25 per month per seat. Includes 10 projects.", after: "$30 per month per seat. Includes 10 projects." },
+    ]);
+    expect(await cacheRows()).toHaveLength(0);
+    // Asked again while it is still running, it is computed again and still not kept.
+    expect((await getJson(diffPath(T3, T4))).body).toEqual(early.body);
+    expect(await cacheRows()).toHaveLength(0);
+
+    // The captures finish: the same request now shows the urls and the facts, and this answer is kept.
+    await updateCapture(db, "ver-4", {
+      screenshot_key: "shots/ver-4.jpg",
+      html_key: "html/ver-4.html",
+      facts_json: JSON.stringify(facts4),
+      capture_status: "complete",
+    });
+    const late = await getJson(diffPath(T3, T4));
+    expect(late.body.to).toEqual({
+      version_id: "ver-4",
+      captured_at: T4,
+      screenshot_url: `${BASE}/shots/ver-4.jpg`,
+      source_url: `${BASE}/sources/ver-4.html`,
+    });
+    expect(late.body.facts).toEqual({ added: [], removed: [], changed: [{ name: "Pro", field: "price", before: "$25", after: "$30" }] });
+    const rows = await cacheRows();
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]!.json)).toEqual(late.body);
+  });
+
+  it("keeps a diff only when both versions are complete or failed", async () => {
+    await seed();
+    const T5 = "2026-11-05T10:00:00.000Z";
+    await insertVersion(db, freshCatch({ capture_status: "complete" }));
+    await insertVersion(db, versionInput("ver-5", { captured_at: T5, text: `${text4}\n\nNew line.`, capture_status: "complete" }));
+
+    for (const status of ["pending", "partial", "awaiting_facts", "complete", "failed"] as const) {
+      await db.prepare("DELETE FROM diff_cache").run();
+      await db.prepare("UPDATE versions SET capture_status = ? WHERE id = 'ver-4'").bind(status).run();
+      // ver-4 as the later end, then as the earlier end (ver-5 is complete).
+      for (const [from, to] of [[T3, T4], [T4, T5]] as const) {
+        const res = await get(diffPath(from, to));
+        expect(res.status, `${status} ${from}`).toBe(200);
+        await res.text();
+      }
+      const final = status === "complete" || status === "failed";
+      expect(await cacheRows(), status).toHaveLength(final ? 2 : 0);
+    }
+  });
+
+  it("does not serve a stored diff while one of its versions is still being captured", async () => {
+    await seed();
+    await insertVersion(db, freshCatch());
+    // A row as an earlier build, which stored a diff at once, would have left.
+    await db
+      .prepare("INSERT INTO diff_cache (from_version_id, to_version_id, json, created_at) VALUES ('ver-3', 'ver-4', ?, ?)")
+      .bind(JSON.stringify({ stale: true }), T4)
+      .run();
+    const { body } = await getJson(diffPath(T3, T4));
+    expect(body.stale).toBeUndefined();
+    expect(body.to.version_id).toBe("ver-4");
+    expect((await cacheRows())[0]!.json).toBe('{"stale":true}'); // left as it was
+  });
+
+  it("drops the page's cached diffs when its ignore patterns or its label are edited, and no other page's", async () => {
+    await seed();
+    await insertPage(db, pageInput({ id: "page-2", url: "https://notion.com/pricing", label: "Notion pricing", monitor_id: "mon-2" }));
+    await insertVersion(db, versionInput("n-1", { page_id: "page-2", is_baseline: 1, captured_at: T1 }));
+    await insertVersion(db, versionInput("n-2", { page_id: "page-2", captured_at: T2 }));
+    const patch = (body: Json) =>
+      get(`/api/pages/${PAGE}`, {
+        method: "PATCH",
+        headers: { Authorization: "Bearer test-admin", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const pairs = async () => (await cacheRows()).map((r) => `${r.from_version_id}>${r.to_version_id}`);
+
+    await getJson(diffPath(T1, T3));
+    await getJson(diffPath(T1, T2));
+    await getJson(diffPath(T1, T2, "page-2"));
+    expect(await pairs()).toEqual(["n-1>n-2", "ver-1>ver-2", "ver-1>ver-3"]);
+
+    // An edit that changes neither leaves the cache alone.
+    expect((await patch({ kind: "fees" })).status).toBe(200);
+    expect(await pairs()).toEqual(["n-1>n-2", "ver-1>ver-2", "ver-1>ver-3"]);
+
+    // Ignore patterns: this page's diffs go, the other page's stays, and the next answer uses the new patterns.
+    expect((await patch({ ignore_patterns: ["Includes unlimited projects"] })).status).toBe(200);
+    expect(await pairs()).toEqual(["n-1>n-2"]);
+    expect((await getJson(diffPath(T1, T3))).body.blocks.added).toEqual([{ section: "Ultra", text: "## Ultra" }]);
+    expect(await pairs()).toEqual(["n-1>n-2", "ver-1>ver-3"]);
+
+    // The label is in every stored answer.
+    expect((await patch({ label: "Vercel plans" })).status).toBe(200);
+    expect(await pairs()).toEqual(["n-1>n-2"]);
+    expect((await getJson(diffPath(T1, T3))).body.page.label).toBe("Vercel plans");
   });
 
   it("between two adjacent versions counts one hop and only the noise inside that interval", async () => {
@@ -576,7 +719,7 @@ describe("GET /api/export.json", () => {
         screenshot_url: null,
         source_url: `${BASE}/sources/ver-3.html`,
         facts: facts3,
-        capture_status: "partial",
+        capture_status: "failed",
       },
       {
         id: "ver-2",
@@ -710,6 +853,18 @@ describe("CORS", () => {
       const res = await get(path, { headers: { Origin: "https://judge.example" } });
       expect(res.headers.get("access-control-allow-origin"), path).toBe("*");
     }
+
+    // A 200 diff, computed and stored by the first request and read from the cache by the second.
+    const diffUrl = `/api/pages/${PAGE}/diff?from=${T1}&to=${T3}`;
+    const computed = await get(diffUrl, { headers: { Origin: "https://judge.example" } });
+    expect(computed.status).toBe(200);
+    expect(computed.headers.get("access-control-allow-origin")).toBe("*");
+    const rows = await db.prepare("SELECT COUNT(*) AS n FROM diff_cache").first<{ n: number }>();
+    expect(rows?.n).toBe(1);
+    const cached = await get(diffUrl, { headers: { Origin: "https://judge.example" } });
+    expect(cached.status).toBe(200);
+    expect(cached.headers.get("access-control-allow-origin")).toBe("*");
+    expect(await cached.text()).toBe(await computed.text());
 
     const preflight = await get(`/api/pages/${PAGE}/diff`, {
       method: "OPTIONS",

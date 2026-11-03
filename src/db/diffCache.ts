@@ -1,7 +1,10 @@
-// A computed diff, keyed by the ordered pair of version ids. Version rows are
-// immutable once written, so a cached diff never goes stale; the one exception is
-// the hop and noise counts inside it, which the admin replay can change by adding a
-// version between the two (see deleteCachedDiffsOfPage).
+// A computed diff, keyed by the ordered pair of version ids. A version's text never
+// changes, but a stored diff can still go stale: its screenshot and source urls and its
+// facts are filled in after the version is inserted (so history.ts stores a diff only once
+// both versions are `complete` or `failed`); its blocks depend on the page's ignore
+// patterns and its envelope carries the page's label (so editing either drops the page's
+// cached diffs); and its hop and noise counts change when the admin replay adds a version
+// between the two. See deleteCachedDiffsOfPage.
 
 export async function getCachedDiff(db: D1Database, fromId: string, toId: string): Promise<string | null> {
   const row = await db
