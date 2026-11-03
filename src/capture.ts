@@ -21,7 +21,7 @@
 // starts the next queued version, oldest first. Every write that frees or fills the
 // slot is conditional on the run id or claim token the writer holds it with, and
 // attempts are counted in SQL, so a repeated settlement can never clear a newer run.
-import { CAPTURE_MAX_ATTEMPTS, SPEND_PAUSE_USD } from "./core/limits";
+import { CAPTURE_MAX_ATTEMPTS, FACTS_PAUSE_USD, SPEND_PAUSE_USD } from "./core/limits";
 import { PRICES } from "./core/spend";
 import { getPage } from "./db/pages";
 import { getRunById } from "./db/runs";
@@ -162,10 +162,22 @@ function logError(what: string, err: unknown): void {
 
 // --- Spend --------------------------------------------------------------------------
 
+async function totalSpend(db: D1Database): Promise<number> {
+  const row = await db.prepare("SELECT COALESCE(SUM(amount_usd), 0) AS total FROM spend").first<{ total: number }>();
+  return row?.total ?? 0;
+}
+
 /** True once total spend has reached SPEND_PAUSE_USD: nothing that costs money starts (captures, facts runs, overdue pulls). */
 export async function spendPaused(db: D1Database): Promise<boolean> {
-  const row = await db.prepare("SELECT COALESCE(SUM(amount_usd), 0) AS total FROM spend").first<{ total: number }>();
-  return (row?.total ?? 0) >= SPEND_PAUSE_USD;
+  return (await totalSpend(db)) >= SPEND_PAUSE_USD;
+}
+
+/**
+ * True once total spend has reached FACTS_PAUSE_USD: no facts run starts (the versions stay queued;
+ * nothing is failed or counted). Pulls and screenshot and source captures go on until `spendPaused`.
+ */
+export async function factsPaused(db: D1Database): Promise<boolean> {
+  return (await totalSpend(db)) >= FACTS_PAUSE_USD;
 }
 
 /** The run's steps, once: a duplicate callback finds the row and writes nothing. Best effort. */
@@ -315,7 +327,8 @@ export async function startNextFacts(env: Env, opts: { waitOnRateLimit?: boolean
 
 async function startNext(env: Env, waitOnRateLimit: boolean): Promise<boolean> {
   const db = env.DB;
-  if (await spendPaused(db)) return false;
+  // The facts pause comes first (FACTS_PAUSE_USD is below SPEND_PAUSE_USD, so this covers the spend pause too).
+  if (await factsPaused(db)) return false;
   const next = await nextFactsCandidate(db);
   if (next === null) return false;
   const token = `claim:${new Date().toISOString()}`;

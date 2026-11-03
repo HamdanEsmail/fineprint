@@ -343,7 +343,7 @@ cd "/c/Tinyfish Bounties/fineprint" || exit 1
 CLOUDFLARE_API_TOKEN=$(grep -m1 '^CLOUDFLARE_API_TOKEN=' ../.cloudflare.env | cut -d= -f2- | tr -d '\r') npx wrangler d1 execute fineprint --remote --command "SELECT page_id, capture_status, capture_attempts, capture_error FROM versions WHERE capture_status NOT IN ('complete', 'awaiting_facts')"
 ```
 
-The hourly repair cron is a stub until Task 11, so a failed capture is not retried by the Worker yet; note it in `docs/build-log.md`.
+The hourly cron is live and repairs captures: each tick it retries up to 3 versions that are `pending` or `partial`, are older than 10 minutes and have attempts left (3 attempts in all). A version that is still stuck after a few ticks is out of attempts, and its `capture_error` says which capture failed.
 
 The clock has started when `pages` is 20 and the first hourly and twice-daily Monitor checks begin to arrive. Record: the `/api/stats` output, `docs/registration-log.md`, the rehearsal payload's outcome and top-level keys.
 
@@ -385,4 +385,44 @@ The clock has started when `pages` is 20 and the first hourly and twice-daily Mo
 
   Its Monitor is deleted and its history stays. **Deleting a page does not free its place in the 20, and running registration again does not replace it:** the deleted page keeps its url (the column is unique), so the script gets `409 already_watched` for it and counts it as registered. To put another page in its place, add that page by hand with `POST /api/pages` or run the script with a higher `--limit`.
 - **Rotating the webhook secret or host.** `POST /api/admin/rotate-webhook` arrives with Task 10. Until then, changing `WEBHOOK_SECRET` means re-pointing every Monitor by hand, so do not change it after step 9.
+- **Day-2 check: is any page producing a version on most pulls?** Pulls are what records the pages (the hourly cron asks TinyFish to run an overdue check and compares the text itself), and on a pricing or fees page every change that gets through buys a facts run of up to about $0.10. A page whose text moves on every pull (a rotating banner, reordered cards, a counter) would spend the budget in days. Compare the versions made since registration with the pulls made:
+
+  ```bash
+  cd "/c/Tinyfish Bounties/fineprint" || exit 1
+  BASE=$(grep -o '"PUBLIC_BASE_URL": *"[^"]*"' wrangler.jsonc | cut -d'"' -f4)
+  [[ $BASE =~ ^https://[^/]+$ ]] || { echo "STOP: PUBLIC_BASE_URL in wrangler.jsonc is not the workers.dev URL (step 6)"; exit 1; }
+  curl -s "$BASE/api/stats"; echo
+  ```
+
+  `versions` minus 20 (the baselines) is the number of changes recorded; `runs_by_trigger.pull` is the number of pulls. If `versions − 20` is a large share of the pulls, one or a few pages are making a version on most pulls. Find them:
+
+  ```bash
+  cd "/c/Tinyfish Bounties/fineprint" || exit 1
+  CLOUDFLARE_API_TOKEN=$(grep -m1 '^CLOUDFLARE_API_TOKEN=' ../.cloudflare.env | cut -d= -f2- | tr -d '\r') npx wrangler d1 execute fineprint --remote --command "SELECT p.id, p.label, COUNT(*) AS changes FROM versions v JOIN pages p ON p.id = v.page_id WHERE v.is_baseline = 0 GROUP BY p.id ORDER BY changes DESC LIMIT 5"
+  ```
+
+  Such a page needs `ignore_patterns`: case-insensitive regexes, and a line of the page text that matches one is left out of the comparison. Compare two of its versions (`GET /api/pages/<id>/diff?from=...&to=...`) to see which line moves, then set the patterns with `PATCH /api/pages/:id`. The patch replaces the whole list, so include any patterns the page already has (`GET /api/pages/<id>` shows them):
+
+  ```bash
+  cd "/c/Tinyfish Bounties/fineprint" || exit 1
+  BASE=$(grep -o '"PUBLIC_BASE_URL": *"[^"]*"' wrangler.jsonc | cut -d'"' -f4)
+  [[ $BASE =~ ^https://[^/]+$ ]] || { echo "STOP: PUBLIC_BASE_URL in wrangler.jsonc is not the workers.dev URL (step 6)"; exit 1; }
+  ADMIN_TOKEN=$(grep -m1 '^ADMIN_TOKEN=' ../.fineprint-prod.env | cut -d= -f2- | tr -d '\r\n')
+  [ "${#ADMIN_TOKEN}" = 48 ] || { echo "STOP: ADMIN_TOKEN is missing or not 48 characters in ../.fineprint-prod.env"; exit 1; }
+  PAGE_ID=<paste the page id>
+  [[ $PAGE_ID =~ ^[0-9a-f-]{36}$ ]] || { echo "STOP: PAGE_ID is not a page id"; exit 1; }
+  curl -s -X PATCH -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" -d '{"ignore_patterns":["<regex for the line that moves>"]}' "$BASE/api/pages/$PAGE_ID"; echo
+  ```
+
+  The stats also say when the budget is in play: `facts_paused` turns true at $6 of total spend (no new facts runs start; the versions stay queued, and pulls and screenshot and source captures go on), and `spend_paused` at $8 (nothing that costs money runs, pulls included).
+- **A page shows as `failed` (the `monitors` counts in `/api/stats`).** The hourly check marks a page `failed` when TinyFish reports its Monitor as anything but `active`, or does not know it. That does not stop its recording: a failed page is still pulled each tick, and the hourly check puts it back to `active` on its own once its Monitor reads `active` again. A status TinyFish does not give (missing or `unknown`) is never held against a page. To put a page back by hand (for example after resuming its Monitor in the TinyFish dashboard), with the page id from `docs/registration-log.md`:
+
+  ```bash
+  cd "/c/Tinyfish Bounties/fineprint" || exit 1
+  PAGE_ID=<paste the page id>
+  [[ $PAGE_ID =~ ^[0-9a-f-]{36}$ ]] || { echo "STOP: PAGE_ID is not a page id"; exit 1; }
+  CLOUDFLARE_API_TOKEN=$(grep -m1 '^CLOUDFLARE_API_TOKEN=' ../.cloudflare.env | cut -d= -f2- | tr -d '\r') npx wrangler d1 execute fineprint --remote -y --command "UPDATE pages SET status='active' WHERE id='$PAGE_ID' AND status='failed'"
+  ```
+
+  If the Monitor is still not `active`, the next hourly check flags the page again. A deleted Monitor leaves the page `failed` for good, and each tick's pull of it fails without a charge.
 - **Never** paste a token, key or webhook URL into a commit, an issue, a log or a chat. If one leaks, rotate it: a new Cloudflare token from the dashboard, a new TinyFish key from its console, and for `ADMIN_TOKEN` a new value put with `wrangler secret put`.

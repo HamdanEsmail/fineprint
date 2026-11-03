@@ -13,6 +13,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { factsDiff, structuredDiff, type Fact, type FactsDiff, type StructuredDiff } from "../core/diff";
+import { FACTS_PAUSE_USD, SPEND_PAUSE_USD } from "../core/limits";
 import { normalize } from "../core/normalize";
 import { PRICES, type SpendKind } from "../core/spend";
 import { getCachedDiff, putCachedDiff } from "../db/diffCache";
@@ -367,6 +368,10 @@ historyRouter.get("/stats", async (c) => {
     versions: totals?.versions ?? 0,
     noise_suppressed: totals?.noise_suppressed ?? 0,
     spend_usd: dollars(spend),
+    // The two pauses, read from the same total the Worker's own checks use: no facts run starts from
+    // FACTS_PAUSE_USD on, and no check, capture or pull from SPEND_PAUSE_USD on.
+    spend_paused: spend >= SPEND_PAUSE_USD,
+    facts_paused: spend >= FACTS_PAUSE_USD,
     spend_by_kind: spendByKind,
     monitors,
     // A catch is a real change, not a baseline.

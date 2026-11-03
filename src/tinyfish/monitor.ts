@@ -159,9 +159,20 @@ export async function getMonitor(env: Env, id: string): Promise<{ id: string; st
   }
   return {
     id: m.id,
-    status: typeof m.status === "string" ? m.status : "unknown",
+    status: statusOf(m),
     name: typeof m.name === "string" ? m.name : null,
   };
+}
+
+/**
+ * What a Monitor read says about its status when it does not say one: a status that is missing, not a
+ * string or empty is read as this, and the cron's health check takes it as no evidence (it never flags
+ * a page on it).
+ */
+export const UNKNOWN_STATUS = "unknown";
+
+function statusOf(monitor: Record<string, unknown>): string {
+  return typeof monitor.status === "string" && monitor.status !== "" ? monitor.status : UNKNOWN_STATUS;
 }
 
 export async function listMonitors(env: Env): Promise<{ id: string; status: string; name: string | null }[]> {
@@ -174,7 +185,7 @@ export async function listMonitors(env: Env): Promise<{ id: string; status: stri
     if (m === null || typeof m !== "object" || typeof m.id !== "string") continue;
     out.push({
       id: m.id,
-      status: typeof m.status === "string" ? m.status : "unknown",
+      status: statusOf(m),
       name: typeof m.name === "string" ? m.name : null,
     });
   }

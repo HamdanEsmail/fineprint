@@ -826,6 +826,8 @@ describe("GET /api/stats", () => {
       versions: 3,
       noise_suppressed: NOISE_RUNS,
       spend_usd: 0.051,
+      spend_paused: false,
+      facts_paused: false,
       spend_by_kind: { monitor_check: 0.015, screenshot: 0.004, agent_step: 0.032, fetch: 0, search: 0 },
       monitors: { active: 2, paused: 1, failed: 1, expired: 1 },
       // Two catches: the baseline is not one.
@@ -844,11 +846,30 @@ describe("GET /api/stats", () => {
       versions: 0,
       noise_suppressed: 0,
       spend_usd: 0,
+      spend_paused: false,
+      facts_paused: false,
       spend_by_kind: { monitor_check: 0, screenshot: 0, agent_step: 0, fetch: 0, search: 0 },
       monitors: { active: 0, paused: 0, failed: 0, expired: 0 },
       cost_per_catch_usd: null,
       runs_by_trigger: { create: 0, webhook: 0, pull: 0 },
     });
+  });
+
+  it("says when the facts runs are paused ($6 total spend) and when everything is ($8)", async () => {
+    // One ledger row at a time, so no sum of floats stands between the total and the limit.
+    const flagsAt = async (total: number) => {
+      await db.prepare("DELETE FROM spend").run();
+      await recordSpend(db, "monitor_check", total, "ledger");
+      const { body } = await getJson("/api/stats");
+      return { spend_usd: body.spend_usd, facts_paused: body.facts_paused, spend_paused: body.spend_paused };
+    };
+
+    expect(await flagsAt(0)).toEqual({ spend_usd: 0, facts_paused: false, spend_paused: false });
+    expect(await flagsAt(5.99)).toEqual({ spend_usd: 5.99, facts_paused: false, spend_paused: false });
+    expect(await flagsAt(6)).toEqual({ spend_usd: 6, facts_paused: true, spend_paused: false });
+    expect(await flagsAt(7.99)).toEqual({ spend_usd: 7.99, facts_paused: true, spend_paused: false });
+    expect(await flagsAt(8)).toEqual({ spend_usd: 8, facts_paused: true, spend_paused: true });
+    expect(await flagsAt(9.5)).toEqual({ spend_usd: 9.5, facts_paused: true, spend_paused: true });
   });
 
   it("rounds money to six decimals and has no cost per catch while only a baseline exists", async () => {

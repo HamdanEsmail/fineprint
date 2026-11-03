@@ -36,3 +36,9 @@ export const SCREENSHOT_MAX_HEIGHT = 8000;
 
 /** When total spend reaches this many US dollars, the Worker pauses everything that costs money. */
 export const SPEND_PAUSE_USD = 8;
+/**
+ * From this much total spend on, no facts run is started (versions stay queued for them); overdue
+ * pulls and screenshot and source captures go on until SPEND_PAUSE_USD. Facts runs are the one cost
+ * a page's changes multiply, so they stop first and cannot use up the budget that keeps checks coming.
+ */
+export const FACTS_PAUSE_USD = 6;

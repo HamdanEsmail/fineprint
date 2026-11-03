@@ -141,10 +141,17 @@ export async function expiredPublicPages(db: D1Database, nowIso: string): Promis
   return results;
 }
 
-/** Active pages that hold a Monitor, ordered by creation: the ones the health check compares with TinyFish. */
-export async function activeMonitoredPages(db: D1Database): Promise<(PageRow & { monitor_id: string })[]> {
+/**
+ * Active and failed pages that hold a Monitor: the ones the health check compares with TinyFish (it
+ * flags an active page and puts a failed one back). Active pages come first, then failed ones, each in
+ * creation order, so the few Monitor lookups a tick are spent on active pages before failed ones.
+ */
+export async function monitoredPages(db: D1Database): Promise<(PageRow & { monitor_id: string })[]> {
   const { results } = await db
-    .prepare("SELECT * FROM pages WHERE status = 'active' AND monitor_id IS NOT NULL ORDER BY created_at, rowid")
+    .prepare(
+      `SELECT * FROM pages WHERE status IN ('active', 'failed') AND monitor_id IS NOT NULL
+       ORDER BY (status = 'failed'), created_at, rowid`,
+    )
     .all<PageRow & { monitor_id: string }>();
   return results;
 }

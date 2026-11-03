@@ -2,7 +2,7 @@ import { applyD1Migrations, reset } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { captureDeps, captureStatusFor, captureVersion, recordFactsResult, startNextFacts } from "../src/capture";
-import { AGENT_MAX_DURATION_SECONDS, AGENT_MAX_STEPS, CAPTURE_MAX_ATTEMPTS, SPEND_PAUSE_USD } from "../src/core/limits";
+import { AGENT_MAX_DURATION_SECONDS, AGENT_MAX_STEPS, CAPTURE_MAX_ATTEMPTS, FACTS_PAUSE_USD, SPEND_PAUSE_USD } from "../src/core/limits";
 import { PRICES, recordSpend } from "../src/core/spend";
 import { insertPage } from "../src/db/pages";
 import { getRunById, insertRun } from "../src/db/runs";
@@ -420,6 +420,60 @@ describe("captureVersion", () => {
     expect(fetchMock.calls).toEqual([]);
     expect(await startNextFacts(env)).toBe(false);
     expect(fetchMock.calls).toEqual([]);
+  });
+
+  it("from the facts pause ($6) no facts run starts and the version stays queued; captures go on until the $8 pause", async () => {
+    expect(FACTS_PAUSE_USD).toBe(6);
+    mockFetchHtml();
+    mockRunAsync();
+    await recordSpend(env.DB, "monitor_check", FACTS_PAUSE_USD, "ledger");
+    const queued = await seedVersion(await seedPage("pricing"), STORED);
+    const fresh = await seedVersion(await seedPage("pricing"));
+
+    expect(await startNextFacts(env)).toBe(false);
+    expect(runAsyncCalls()).toEqual([]);
+    expect(await version(queued)).toMatchObject({ agent_run_id: null, capture_status: "awaiting_facts", capture_error: null, capture_attempts: 1 });
+
+    // A capture still takes its screenshot and source (the $8 pause is not reached); only its facts wait.
+    await captureVersion(env, fresh);
+    expect(shot).toHaveBeenCalledTimes(1);
+    expect(fetchCalls()).toHaveLength(1);
+    expect(runAsyncCalls()).toEqual([]);
+    expect(await version(fresh)).toMatchObject({
+      screenshot_key: `shots/${fresh}.jpg`,
+      html_key: `html/${fresh}.html`,
+      capture_status: "awaiting_facts",
+      capture_error: null,
+      capture_attempts: 1,
+      agent_run_id: null,
+    });
+    // Nothing was marked failed, and both versions are still queued, oldest first.
+    expect((await nextFactsCandidate(env.DB))?.id).toBe(queued);
+  });
+
+  it("just under the facts pause ($5.99) the oldest queued version's facts run starts", async () => {
+    mockRunAsync();
+    await recordSpend(env.DB, "monitor_check", FACTS_PAUSE_USD - 0.01, "ledger");
+    const id = await seedVersion(await seedPage("pricing"), STORED);
+
+    expect(await startNextFacts(env)).toBe(true);
+
+    expect(runAsyncCalls()).toHaveLength(1);
+    expect(await version(id)).toMatchObject({ agent_run_id: "agent-run-1" });
+  });
+
+  it("a run in flight when the facts pause is reached is still recorded, and the next queued version does not start", async () => {
+    mockRunAsync();
+    await recordSpend(env.DB, "monitor_check", FACTS_PAUSE_USD, "ledger");
+    const running = await seedVersion(await seedPage("pricing"), { ...STORED, agent_run_id: "agent-run-X" });
+    const waiting = await seedVersion(await seedPage("pricing"), STORED);
+
+    await recordFactsResult(env, "agent-run-X", "COMPLETED", { items: ITEMS }, 3);
+
+    expect(await version(running)).toMatchObject({ capture_status: "complete", facts_json: JSON.stringify(FACTS) });
+    expect(await agentSteps()).toMatchObject([{ ref: "agent-run-X" }]);
+    expect(runAsyncCalls()).toEqual([]);
+    expect(await version(waiting)).toMatchObject({ agent_run_id: null, capture_status: "awaiting_facts", capture_error: null, capture_attempts: 1 });
   });
 
   it("an unknown version id does nothing and does not throw", async () => {

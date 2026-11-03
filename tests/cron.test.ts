@@ -600,7 +600,7 @@ describe("expiry", () => {
 // --- Health ----------------------------------------------------------------------------------
 
 describe("health", () => {
-  it("health marks a page failed when TinyFish reports its monitor paused", async () => {
+  it("health marks a page failed when TinyFish reports its monitor paused, and puts it back to active when the Monitor reads active again", async () => {
     const paused = await seedPage();
     const fine = await seedPage();
     const pause = (list: MonitorEntry[]) => list.map((m) => (m.id === monitorOf(paused) ? { ...m, status: "paused" } : m));
@@ -610,10 +610,118 @@ describe("health", () => {
     expect((await page(paused)).status).toBe("failed");
     expect((await page(fine)).status).toBe("active");
 
-    // Health only flags: the Monitor running again does not un-fail the page.
-    mockMonitors(undefined, 1);
+    // Still paused on the next tick: the page stays failed and is not flagged again.
+    mockMonitors(pause, 1);
     expect(await runCron(env)).toEqual({ repaired: 0, expired: 0, unhealthy: [], pulled: 0 });
     expect((await page(paused)).status).toBe("failed");
+
+    // The Monitor runs again (resumed, or the flap ended): the page is active again. That is not a new flag.
+    mockMonitors(undefined, 1);
+    expect(await runCron(env)).toEqual({ repaired: 0, expired: 0, unhealthy: [], pulled: 0 });
+    expect((await page(paused)).status).toBe("active");
+    expect((await page(fine)).status).toBe("active");
+  });
+
+  it("a failed page goes back to active only when its Monitor reads active: in the list or, when it is missing from it, on its own lookup", async () => {
+    const back = await seedPage({ status: "failed" });
+    const stillPaused = await seedPage({ status: "failed" });
+    const pagedOut = await seedPage({ status: "failed" }); // beyond a page size the list did not say it had
+    const gone = await seedPage({ status: "failed" });
+    const fine = await seedPage();
+    const pausedPage = await seedPage({ status: "paused" }); // not a health page at all: its Monitor is left alone
+    mockMonitors((list) =>
+      list
+        .filter((m) => m.id !== monitorOf(pagedOut) && m.id !== monitorOf(gone))
+        .map((m) => (m.id === monitorOf(stillPaused) || m.id === monitorOf(pausedPage) ? { ...m, status: "paused" } : m)),
+    );
+    fetchMock.intercept({
+      method: "GET",
+      url: monitorUrl(monitorOf(pagedOut)),
+      reply: { json: { id: monitorOf(pagedOut), name: pagedOut, status: "active" } },
+    });
+    fetchMock.intercept({ method: "GET", url: monitorUrl(monitorOf(gone)), reply: { status: 404, json: { error: { code: "NOT_FOUND" } } } });
+
+    expect(await runCron(env)).toEqual({ repaired: 0, expired: 0, unhealthy: [], pulled: 0 });
+
+    expect((await page(back)).status).toBe("active");
+    expect((await page(pagedOut)).status).toBe("active");
+    expect((await page(stillPaused)).status).toBe("failed");
+    expect((await page(gone)).status).toBe("failed");
+    expect((await page(fine)).status).toBe("active");
+    expect((await page(pausedPage)).status).toBe("paused");
+    // Read only: the list and the two lookups; nothing sent to any Monitor.
+    expect(callList()).toEqual([`GET ${MONITORS_API}`, `GET ${monitorUrl(monitorOf(pagedOut))}`, `GET ${monitorUrl(monitorOf(gone))}`]);
+  });
+
+  it("a monitor whose status is missing or unknown is no evidence: no page is failed on it, and no failed page is put back on it", async () => {
+    const noStatus = await seedPage();
+    const unknownWord = await seedPage();
+    const empty = await seedPage();
+    const paused = await seedPage();
+    const failedNoStatus = await seedPage({ status: "failed" });
+    const lookedUpNoStatus = await seedPage(); // missing from the list; its own lookup has no status either
+    const failedLookedUp = await seedPage({ status: "failed" });
+    // The list as TinyFish may one day send it: entries without a `status` key reach listMonitors as "unknown".
+    fetchMock.intercept({
+      method: "GET",
+      url: MONITORS_API,
+      reply: {
+        json: {
+          monitors: [
+            { id: monitorOf(noStatus), name: "a" },
+            { id: monitorOf(unknownWord), name: "b", status: "unknown" },
+            { id: monitorOf(empty), name: "c", status: "" },
+            { id: monitorOf(paused), name: "d", status: "paused" },
+            { id: monitorOf(failedNoStatus), name: "e" },
+          ],
+        },
+      },
+    });
+    for (const id of [lookedUpNoStatus, failedLookedUp]) {
+      // getMonitor reads a Monitor with no status as "unknown", wrapped or not.
+      fetchMock.intercept({ method: "GET", url: monitorUrl(monitorOf(id)), reply: { json: { monitor: { id: monitorOf(id), name: id } } } });
+    }
+
+    expect((await runCron(env)).unhealthy).toEqual([paused]); // the one real "paused" is still flagged
+
+    expect(await Promise.all([noStatus, unknownWord, empty, lookedUpNoStatus].map(async (id) => (await page(id)).status))).toEqual([
+      "active",
+      "active",
+      "active",
+      "active",
+    ]);
+    expect((await page(paused)).status).toBe("failed");
+    expect((await page(failedNoStatus)).status).toBe("failed");
+    expect((await page(failedLookedUp)).status).toBe("failed");
+  });
+
+  it("a list whose entries all lack a status fails no page: the account-wide outage a missing field would otherwise cause", async () => {
+    const pages = [await seedPage(), await seedPage(), await seedPage()];
+    fetchMock.intercept({
+      method: "GET",
+      url: MONITORS_API,
+      reply: { json: { monitors: pages.map((id) => ({ id: monitorOf(id), name: id })) } },
+    });
+
+    expect(await runCron(env)).toEqual({ repaired: 0, expired: 0, unhealthy: [], pulled: 0 });
+
+    expect(await Promise.all(pages.map(async (id) => (await page(id)).status))).toEqual(["active", "active", "active"]);
+    expect(callList()).toEqual([`GET ${MONITORS_API}`]);
+  });
+
+  it("the 3 lookups a tick go to active pages first: failed pages missing from the list cannot use them up", async () => {
+    const failed = [await seedPage({ status: "failed" }), await seedPage({ status: "failed" }), await seedPage({ status: "failed" })];
+    const active = await seedPage(); // created after the failed ones, but looked up before them
+    const fine = await seedPage();
+    mockMonitors((list) => list.filter((m) => m.id === monitorOf(fine)));
+    fetchMock.intercept({ method: "GET", url: /\/v1\/monitors\/mon-page-\d+$/, times: Infinity, reply: { status: 404, json: { error: { code: "NOT_FOUND" } } } });
+
+    expect((await runCron(env)).unhealthy).toEqual([active]);
+
+    expect((await page(active)).status).toBe("failed");
+    expect(callList().filter((c) => c.startsWith(`GET ${MONITORS_API}/`))).toEqual(
+      [active, failed[0]!, failed[1]!].map((id) => `GET ${monitorUrl(monitorOf(id))}`),
+    );
   });
 
   it("a page whose monitor is missing from the list and not found on its own (404) is marked failed; a monitor that belongs to no page is never touched", async () => {

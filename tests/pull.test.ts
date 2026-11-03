@@ -6,7 +6,7 @@ import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { captureDeps } from "../src/capture";
 import { lastTickAtOrBefore } from "../src/core/cronTick";
-import { PULLS_PER_TICK, SPEND_PAUSE_USD } from "../src/core/limits";
+import { FACTS_PAUSE_USD, PULLS_PER_TICK, SPEND_PAUSE_USD } from "../src/core/limits";
 import { hashText, normalize } from "../src/core/normalize";
 import { PRICES, recordSpend } from "../src/core/spend";
 import { cronDeps, runCron } from "../src/cron";
@@ -329,21 +329,24 @@ describe("overdue pulls in the hourly cron", () => {
     expect(errorLog).not.toHaveBeenCalled();
   });
 
-  it("paused, failed and expired pages, and a page without a Monitor, are never pulled", async () => {
+  it("paused and expired pages, and a page without a Monitor, are never pulled; a page health marked failed still is", async () => {
     mockMonitorList();
     await seedOverdue({ status: "paused" });
     await seedOverdue({ status: "expired" });
-    await seedOverdue({ status: "failed" });
+    const failed = await seedOverdue({ status: "failed" });
     await seedOverdue({ monitor_id: null });
     const active = await seedOverdue();
+    mockRunNow(monitorOf(failed), runNowBody("tf-run-failed", BASE_TEXT));
     mockRunNow(monitorOf(active), runNowBody("tf-run-active", BASE_TEXT));
     const seam = vi.fn((_env: Env, pageId: string) => pull(pageId));
     cronDeps.pull = seam;
 
-    expect((await runCron(env)).pulled).toBe(1);
-    // The cron asks for the active page only (the route would refuse the others with a 409 anyway).
-    expect(seam.mock.calls.map(([, pageId]) => pageId)).toEqual([active]);
-    expect(runNowCalls().map((c) => c.url)).toEqual([runNowUrl(monitorOf(active))]);
+    expect((await runCron(env)).pulled).toBe(2);
+    // The cron asks for the failed and the active page, due at the same tick so in creation order (the
+    // route would refuse the paused, expired and Monitor-less ones with a 409 anyway).
+    expect(seam.mock.calls.map(([, pageId]) => pageId)).toEqual([failed, active]);
+    expect(runNowCalls().map((c) => c.url)).toEqual([runNowUrl(monitorOf(failed)), runNowUrl(monitorOf(active))]);
+    expect(await pullRunsOf(failed)).toHaveLength(1);
     expect(errorLog).not.toHaveBeenCalled();
   });
 
@@ -358,6 +361,35 @@ describe("overdue pulls in the hourly cron", () => {
     expect(seam).not.toHaveBeenCalled();
     expect(runNowCalls()).toEqual([]);
     expect(await pullRunsOf(pageId)).toEqual([]);
+  });
+
+  it("at the facts pause ($6) pulls and their screenshot and source captures still run, and the facts wait in the queue", async () => {
+    expect(FACTS_PAUSE_USD).toBeLessThan(SPEND_PAUSE_USD);
+    mockMonitorList();
+    captureSucceeds();
+    fetchMock.intercept({ method: "POST", url: "https://agent.tinyfish.ai/v1/automation/run-async", times: Infinity, reply: { json: { run_id: "agent-run-1" } } });
+    const pageId = await seedOverdue({ kind: "pricing" });
+    await recordSpend(env.DB, "monitor_check", FACTS_PAUSE_USD, "earlier");
+    mockRunNow(monitorOf(pageId), runNowBody("tf-run-6", REAL_TEXT));
+
+    expect((await runCron(env)).pulled).toBe(1);
+
+    const [baseline, pulled] = await versionsOf(pageId);
+    expect(pulled).toMatchObject({
+      text: REAL_TEXT,
+      screenshot_key: `shots/${pulled!.id}.jpg`,
+      html_key: `html/${pulled!.id}.html`,
+      // Queued for its facts: nothing started, nothing failed, no attempt used up.
+      capture_status: "awaiting_facts",
+      capture_error: null,
+      capture_attempts: 1,
+      agent_run_id: null,
+    });
+    expect(baseline!.agent_run_id).toBeNull();
+    expect(fetchMock.calls.filter((c) => c.url.includes("/v1/automation"))).toEqual([]);
+    expect((await spendRows()).filter((r) => r.kind === "agent_step")).toEqual([]);
+    expect((await spendRows()).filter((r) => r.kind === "monitor_check").map((r) => r.ref)).toEqual(["earlier", "tf-run-6"]);
+    expect(errorLog).not.toHaveBeenCalled();
   });
 
   it(`pulls at most ${PULLS_PER_TICK} pages a tick, the oldest overdue tick first`, async () => {
@@ -508,6 +540,24 @@ describe("POST /api/admin/pull/:pageId", () => {
     expect(await rawKeys()).toEqual([]);
   });
 
+  it("a page health marked failed is pulled like an active one (run-now works without a running schedule); a deleted Monitor just fails the pull, unbilled", async () => {
+    const pageId = await seedOverdue({ status: "failed" });
+    mockRunNow(monitorOf(pageId), runNowBody("tf-failed-1", BASE_TEXT));
+    fetchMock.intercept({ method: "POST", url: runNowUrl(monitorOf(pageId)), reply: { status: 404, json: { error: { code: "NOT_FOUND" } } } });
+
+    const res = await pull(pageId);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, pulled: true, outcome: "unchanged" });
+    expect(await pullRunsOf(pageId)).toMatchObject([{ monitor_run_id: "tf-failed-1", trigger_kind: "pull" }]);
+
+    const gone = await pull(pageId);
+    expect(gone.status).toBe(502);
+    expect(await gone.json()).toEqual({ error: "run_now_failed", reason: "NOT_FOUND" });
+    expect(await pullRunsOf(pageId)).toHaveLength(1);
+    expect((await spendRows()).map((r) => r.ref)).toEqual(["tf-failed-1"]);
+    expect((await pageRow(pageId)).status).toBe("failed"); // the route never changes a page's status
+  });
+
   it("at the spend pause it calls nothing and records nothing", async () => {
     const pageId = await seedOverdue();
     await recordSpend(env.DB, "monitor_check", SPEND_PAUSE_USD, "earlier");
@@ -518,6 +568,17 @@ describe("POST /api/admin/pull/:pageId", () => {
     expect(await res.json()).toEqual({ ok: true, pulled: false, reason: "spend_paused" });
     expect(fetchMock.calls).toEqual([]);
     expect(await pullRunsOf(pageId)).toEqual([]);
+  });
+
+  it("at the facts pause ($6) the pull route still runs: only the spend pause stops it", async () => {
+    const pageId = await seedOverdue();
+    await recordSpend(env.DB, "monitor_check", FACTS_PAUSE_USD, "earlier");
+    mockRunNow(monitorOf(pageId), runNowBody("tf-at-facts-pause", BASE_TEXT));
+
+    const res = await pull(pageId);
+
+    expect(await res.json()).toMatchObject({ ok: true, pulled: true });
+    expect(await pullRunsOf(pageId)).toHaveLength(1);
   });
 
   it("no text, or errors: 200 pulled false with the reason, and no run, spend or raw object", async () => {

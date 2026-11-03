@@ -184,8 +184,10 @@ adminRouter.post("/admin/rotate-webhook", adminOnly, async (c) => {
  * It asks TinyFish to run the page's Monitor now and records that run under TinyFish's run id,
  * marked `pull`, through the same recording path a webhook run takes.
  *
- * - An expired or paused page, or one without a Monitor, is not pulled (409 `not_pullable`); at the
- *   spend pause nothing is called (200, `pulled: false`).
+ * - An expired or paused page, or one without a Monitor, is not pulled (409 `not_pullable`); a page
+ *   health marked failed is (run-now works whatever the Monitor's schedule is doing, and a deleted
+ *   Monitor just fails the pull); at the spend pause nothing is called (200, `pulled: false`). Only
+ *   the spend pause stops a pull: the lower facts pause (FACTS_PAUSE_USD) does not.
  * - A run with no text or with errors records nothing: TinyFish does not bill a failed check, and the
  *   page stays overdue for the next tick (200, `pulled: false` with the reason).
  * - Otherwise the raw 201 body is stored at `raw/<run id>.json` and the outcome is Fineprint's own

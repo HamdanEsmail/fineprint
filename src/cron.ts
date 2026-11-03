@@ -13,13 +13,13 @@
 import { captureVersion, recordFactsResult, spendPaused, startNextFacts } from "./capture";
 import { lastTickAtOrBefore } from "./core/cronTick";
 import { CAPTURE_MAX_ATTEMPTS, MONITOR_LOOKUPS_PER_TICK, PULLS_PER_TICK, REPAIR_PER_TICK } from "./core/limits";
-import { activeMonitoredPages, expiredPublicPages, setPageStatusIf } from "./db/pages";
+import { expiredPublicPages, monitoredPages, setPageStatusIf } from "./db/pages";
 import { pullCandidates } from "./db/runs";
 import { inFlightFactsRuns, listFactsClaims, pendingCaptures, updateIfFactsHolder } from "./db/versions";
 import type { Env } from "./env";
 import { getRun } from "./tinyfish/agent";
 import { TinyFishError } from "./tinyfish/client";
-import { deleteMonitor, getMonitor, listMonitors } from "./tinyfish/monitor";
+import { deleteMonitor, getMonitor, listMonitors, UNKNOWN_STATUS } from "./tinyfish/monitor";
 
 /**
  * The seams tests use instead of vi.mock (which does not work in the Workers pool). `pull` runs one
@@ -186,8 +186,9 @@ function codeIn(body: unknown): string {
 }
 
 /**
- * Webhooks are the primary trigger; this is the fallback when one never came. For each active page
- * with a Monitor, T is its schedule's last tick at or before now − 15 minutes; the page is overdue
+ * Webhooks are the primary trigger; this is the fallback when one never came. For each active or failed
+ * page with a Monitor (health's `failed` never stops the recording: run-now works on a Monitor whose
+ * schedule TinyFish no longer runs), T is its schedule's last tick at or before now − 15 minutes; the page is overdue
  * when T exists and none of its runs (any trigger) was received at or after T. A page created after
  * T has its create run after T, so it is not overdue. Nothing is pulled at the spend pause. At most
  * PULLS_PER_TICK pages are pulled, oldest T first, one at a time, each through `cronDeps.pull` (its
@@ -247,17 +248,22 @@ async function expire(env: Env, result: CronResult): Promise<void> {
 // --- 4. Health ------------------------------------------------------------------------
 
 /**
- * One list of the account's Monitors. An active page whose Monitor is in it with a status other
- * than `active` is marked failed. A Monitor missing from the list is looked up on its own (the
- * list may stop at a page size it does not announce), at most MONITOR_LOOKUPS_PER_TICK a tick:
- * its page is marked failed when that lookup answers 404, or answers with a status other than
- * `active`; a Monitor that reads back `active`, or a lookup error, leaves the page as it is. Health only flags: it never un-fails a page, and it never changes a
- * Monitor (the account is shared with other projects, whose Monitors are in the list). A list
- * that holds none of our Monitors is not trusted (a changed response shape reads as an empty
- * list), and health is skipped that tick, as it is when the list cannot be read.
+ * One list of the account's Monitors. An active page whose Monitor is in it with a status other than
+ * `active` is marked failed, and a failed page whose Monitor reads `active` goes back to `active`.
+ * A Monitor missing from the list is looked up on its own (the list may stop at a page size it does
+ * not announce), at most MONITOR_LOOKUPS_PER_TICK a tick, active pages before failed ones: the page
+ * is marked failed when that lookup answers 404, or answers with a status other than `active` (a
+ * failed page stays failed); a Monitor that reads back `active` counts as the list's `active`, and a
+ * lookup error leaves the page as it is. A Monitor whose status is missing or "unknown" (in either
+ * answer, see src/tinyfish/monitor.ts) is no evidence: the page is left as it is, so a changed
+ * response shape cannot fail every page. A failed page keeps being pulled (see pullOverdue), so
+ * `failed` is a signal and never stops the recording. Health never changes a Monitor (the account is
+ * shared with other projects, whose Monitors are in the list). A list that holds none of our
+ * Monitors is not trusted (a changed response shape reads as an empty list), and health is skipped
+ * that tick, as it is when the list cannot be read.
  */
 async function health(env: Env, result: CronResult): Promise<void> {
-  const pages = await activeMonitoredPages(env.DB);
+  const pages = await monitoredPages(env.DB);
   if (pages.length === 0) return;
 
   let monitors: Awaited<ReturnType<typeof listMonitors>>;
@@ -275,20 +281,27 @@ async function health(env: Env, result: CronResult): Promise<void> {
 
   let lookups = 0;
   for (const page of pages) {
-    const listed = statusById.get(page.monitor_id);
-    if (listed === "active") continue;
-    if (listed === undefined) {
+    // The Monitor's status: undefined when the list does not hold it, null when TinyFish has no such Monitor.
+    let status: string | null | undefined = statusById.get(page.monitor_id);
+    if (status === undefined) {
       if (lookups >= MONITOR_LOOKUPS_PER_TICK) continue; // looked up on a later tick
       lookups += 1;
       try {
         const found = await getMonitor(env, page.monitor_id);
-        if (found !== null && found.status.toLowerCase() === "active") continue; // only left off the list
+        status = found === null ? null : found.status.toLowerCase();
       } catch (err) {
         logError(`cron health could not look up the Monitor of page ${page.id}`, err);
         continue;
       }
     }
-    if (await setPageStatusIf(env.DB, page.id, "failed", ["active"])) result.unhealthy.push(page.id);
+    if (status === UNKNOWN_STATUS) continue; // no evidence either way
+    if (status === "active") {
+      if (page.status === "failed" && (await setPageStatusIf(env.DB, page.id, "active", ["failed"]))) {
+        console.warn(`cron health: the Monitor of page ${page.id} reads active again, so the page is active`);
+      }
+    } else if (await setPageStatusIf(env.DB, page.id, "failed", ["active"])) {
+      result.unhealthy.push(page.id);
+    }
   }
 }
 

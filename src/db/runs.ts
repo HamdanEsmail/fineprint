@@ -34,7 +34,7 @@ export async function insertRun(db: D1Database, r: RunRow): Promise<"inserted" |
   return result.meta.changes === 0 ? "duplicate" : "inserted";
 }
 
-/** An active page that holds a Monitor, with the receipt time of its newest run (any trigger). */
+/** An active or failed page that holds a Monitor, with the receipt time of its newest run (any trigger). */
 export type PullCandidate = {
   id: string;
   schedule_cron: string | null;
@@ -42,8 +42,11 @@ export type PullCandidate = {
 };
 
 /**
- * Every active page that holds a Monitor, with the newest `received_at` among its runs, in creation
- * order: the pages the cron's overdue check looks at. One query, however many pages there are.
+ * Every active or failed page that holds a Monitor, with the newest `received_at` among its runs, in
+ * creation order: the pages the cron's overdue check looks at. A page health marked failed is still
+ * pulled: run-now works whatever state the Monitor's schedule is in, and when the Monitor is gone the
+ * pull just fails (unbilled). Paused and expired pages are left alone. One query, however many pages
+ * there are.
  */
 export async function pullCandidates(db: D1Database): Promise<PullCandidate[]> {
   const { results } = await db
@@ -51,7 +54,7 @@ export async function pullCandidates(db: D1Database): Promise<PullCandidate[]> {
       `SELECT p.id, p.schedule_cron,
          (SELECT MAX(r.received_at) FROM runs r WHERE r.page_id = p.id) AS last_received_at
        FROM pages p
-       WHERE p.status = 'active' AND p.monitor_id IS NOT NULL
+       WHERE p.status IN ('active', 'failed') AND p.monitor_id IS NOT NULL
        ORDER BY p.created_at, p.rowid`,
     )
     .all<PullCandidate>();
