@@ -1,5 +1,5 @@
 import { CAPTURE_MAX_ATTEMPTS } from "../core/limits";
-import type { VersionRow } from "./types";
+import type { CaptureStatus, VersionRow } from "./types";
 
 /** What a caller supplies to insertVersion; the capture columns default to a fresh, uncaptured version. */
 export type NewVersion = Pick<
@@ -237,6 +237,70 @@ export function getVersionByAgentRunId(db: D1Database, runId: string): Promise<V
   return db.prepare("SELECT * FROM versions WHERE agent_run_id = ?").bind(runId).first<VersionRow>();
 }
 
+/**
+ * Adds one capture attempt in SQL (never a read-modify-write, so parallel attempts are all
+ * counted) and returns the row as written, or null for an unknown id.
+ */
+export function addCaptureAttempt(db: D1Database, id: string): Promise<VersionRow | null> {
+  return db
+    .prepare("UPDATE versions SET capture_attempts = capture_attempts + 1 WHERE id = ? RETURNING *")
+    .bind(id)
+    .first<VersionRow>();
+}
+
+/**
+ * Writes `patch` to a version, and adds `addAttempts` to `capture_attempts` in SQL, only
+ * while the version's `agent_run_id` is still `holder` (the claim token or run id the caller
+ * holds the facts slot with). Returns the row as written, or null when the version no longer
+ * holds `holder` and nothing was written: a second settlement of the same run, or a claim
+ * that was released and taken again, can then never clear or count someone else's run.
+ */
+export async function updateIfFactsHolder(
+  db: D1Database,
+  id: string,
+  holder: string,
+  patch: Omit<CapturePatch, "capture_attempts">,
+  addAttempts = 0,
+): Promise<VersionRow | null> {
+  const sets: string[] = [];
+  const values: (string | number | null)[] = [];
+  for (const column of CAPTURE_PATCH_COLUMNS) {
+    if (column === "capture_attempts") continue;
+    const value = patch[column];
+    if (value === undefined) continue;
+    sets.push(`${column} = ?`);
+    values.push(value);
+  }
+  sets.push("capture_attempts = capture_attempts + ?");
+  values.push(addAttempts);
+  return db
+    .prepare(`UPDATE versions SET ${sets.join(", ")} WHERE id = ? AND agent_run_id = ? RETURNING *`)
+    .bind(...values, id, holder)
+    .first<VersionRow>();
+}
+
+/**
+ * Sets a version's status and error only if the columns the status rule reads (both keys,
+ * the facts and the attempt count) are still what `seen` holds: a compare-and-set, so a
+ * status worked out from an older read never overwrites a newer state. False when another
+ * write changed them in between (that writer settles the status itself).
+ */
+export async function setCaptureStatusIfUnchanged(
+  db: D1Database,
+  seen: Pick<VersionRow, "id" | "screenshot_key" | "html_key" | "facts_json" | "capture_attempts">,
+  status: CaptureStatus,
+  error: string | null,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE versions SET capture_status = ?, capture_error = ?
+       WHERE id = ? AND screenshot_key IS ? AND html_key IS ? AND facts_json IS ? AND capture_attempts = ?`,
+    )
+    .bind(status, error, seen.id, seen.screenshot_key, seen.html_key, seen.facts_json, seen.capture_attempts)
+    .run();
+  return result.meta.changes === 1;
+}
+
 // --- The facts queue -------------------------------------------------------------
 //
 // Fineprint keeps at most one TinyAgent run in flight. A version holds the slot while
@@ -266,9 +330,9 @@ export type FactsCandidate = VersionSummary & { url: string };
 
 /**
  * The oldest version (by `captured_at`) that is waiting for a facts run: its page is
- * `pricing` or `fees`, it has no facts and no run, it is not `failed`, it has attempts
- * left, and it is a baseline or its run was not judged irrelevant (a judgment of NULL,
- * or no run at all, counts as relevant). Null when the queue is empty.
+ * `pricing` or `fees` and not expired, it has no facts and no run, it is not `failed`, it
+ * has attempts left, and it is a baseline or its run was not judged irrelevant (a judgment
+ * of NULL, or no run at all, counts as relevant). Null when the queue is empty.
  */
 export function nextFactsCandidate(
   db: D1Database,
@@ -281,6 +345,7 @@ export function nextFactsCandidate(
        JOIN pages p ON p.id = v.page_id
        LEFT JOIN runs r ON r.id = v.run_id
        WHERE p.kind IN ('pricing', 'fees')
+         AND p.status != 'expired'
          AND v.facts_json IS NULL
          AND v.agent_run_id IS NULL
          AND v.capture_status != 'failed'

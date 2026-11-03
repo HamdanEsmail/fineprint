@@ -18,13 +18,24 @@
 // Facts are a serial queue: three projects share the account's 2 concurrent Agent
 // runs, so Fineprint never has more than one of its own in flight. A version takes
 // the single slot with one atomic D1 claim (claimFactsSlot), and every facts result
-// starts the next queued version, oldest first.
+// starts the next queued version, oldest first. Every write that frees or fills the
+// slot is conditional on the run id or claim token the writer holds it with, and
+// attempts are counted in SQL, so a repeated settlement can never clear a newer run.
 import { CAPTURE_MAX_ATTEMPTS, SPEND_PAUSE_USD } from "./core/limits";
 import { PRICES } from "./core/spend";
 import { getPage } from "./db/pages";
 import { getRunById } from "./db/runs";
 import type { CaptureStatus, PageRow, RunRow, VersionRow } from "./db/types";
-import { claimFactsSlot, getVersion, getVersionByAgentRunId, nextFactsCandidate, updateCapture } from "./db/versions";
+import {
+  addCaptureAttempt,
+  claimFactsSlot,
+  getVersion,
+  getVersionByAgentRunId,
+  nextFactsCandidate,
+  setCaptureStatusIfUnchanged,
+  updateCapture,
+  updateIfFactsHolder,
+} from "./db/versions";
 import type { Env } from "./env";
 import { parseFacts, startFactsRun } from "./tinyfish/agent";
 import { screenshotFullPage } from "./tinyfish/browser";
@@ -33,8 +44,9 @@ import { fetchPage } from "./tinyfish/fetch";
 
 /**
  * The seam tests use instead of vi.mock (which does not work in the Workers pool):
- * captureVersion calls `captureDeps.screenshotFullPage`, and startNextFacts hands
- * `captureDeps.sleep` to startFactsRun when it is set.
+ * captureVersion calls `captureDeps.screenshotFullPage`, and a facts start that waits out
+ * rate limits (`startNextFacts(env, {waitOnRateLimit: true})`) hands `captureDeps.sleep`
+ * to startFactsRun in place of the real 60 s wait when it is set.
  */
 export const captureDeps = {
   screenshotFullPage,
@@ -67,6 +79,22 @@ export function needsFacts(
 async function loadNeedsFacts(db: D1Database, page: Pick<PageRow, "kind">, version: VersionRow): Promise<boolean> {
   const run = version.run_id === null ? null : await getRunById(db, version.run_id);
   return needsFacts(page, version, run);
+}
+
+/**
+ * Brings a version's status (and the note on facts that can no longer start) in line with
+ * the rule, from a fresh read or the row a write returned. The write is a compare-and-set on
+ * the columns the rule reads, so it never overwrites a newer state; whoever changed them
+ * settles in turn. Every writer of the status settles after its own write, so a status worked
+ * out from an older read (a capture racing a facts result) does not stay.
+ */
+async function settleStatus(db: D1Database, v: VersionRow | null, factsNeeded: boolean): Promise<void> {
+  if (v === null) return;
+  const status = captureStatusFor(v, factsNeeded);
+  const error = withExhaustedFacts(v.capture_error, status, v, factsNeeded);
+  if (status !== v.capture_status || error !== v.capture_error) {
+    await setCaptureStatusIfUnchanged(db, v, status, error);
+  }
 }
 
 // --- capture_error ----------------------------------------------------------------
@@ -196,16 +224,13 @@ async function capture(env: Env, versionId: string): Promise<void> {
 
   // Only facts are outstanding: they are the queue's business, and no attempt is used.
   if (!wantShot && !wantSource) {
-    const status = captureStatusFor(version, factsNeeded);
-    const error = withExhaustedFacts(version.capture_error, status, version, factsNeeded);
-    if (status !== version.capture_status || error !== version.capture_error) {
-      await updateCapture(db, versionId, { capture_status: status, capture_error: error });
-    }
+    await settleStatus(db, version, factsNeeded);
     if (version.agent_run_id === null) await startNextFacts(env);
     return;
   }
 
-  await updateCapture(db, versionId, { capture_attempts: version.capture_attempts + 1 });
+  // Counted in SQL, so two captures of one version at once both count.
+  if ((await addCaptureAttempt(db, versionId)) === null) return;
 
   // At the same time: waitUntil work is cut about 30 s after the response and a
   // screenshot alone takes about 15 s. Each writes its own column when it is done.
@@ -223,9 +248,12 @@ async function capture(env: Env, versionId: string): Promise<void> {
   const status = captureStatusFor(now, factsNeeded);
   const error = withExhaustedFacts(withErrors(now.capture_error, ["screenshot", "source"], failures), status, now, factsNeeded);
   await updateCapture(db, versionId, { capture_status: status, capture_error: error });
+  // A facts result can land between that read and that write; read once more and settle.
+  const after = await getVersion(db, versionId);
+  await settleStatus(db, after, factsNeeded);
 
   // The queue starts the oldest waiting version, which may be this one or an older one.
-  if (factsNeeded && now.facts_json === null && now.agent_run_id === null) await startNextFacts(env);
+  if (factsNeeded && after !== null && after.facts_json === null && after.agent_run_id === null) await startNextFacts(env);
 }
 
 async function captureScreenshot(env: Env, versionId: string, url: string): Promise<void> {
@@ -261,56 +289,88 @@ function factsCallbackUrl(env: Env): string {
 }
 
 /**
- * Starts the facts run of the oldest queued version, if the single slot is free. True
- * when a run was started. Never throws.
+ * The wait startFactsRun is given when it must not wait. Work in waitUntil (a capture, an
+ * Agent callback) is cut about 30 s after the response, so a 60 s wait would die holding the
+ * claim and freeze the queue: instead the first rate limit ends the start, and the claim is
+ * given back at once.
  */
-export async function startNextFacts(env: Env): Promise<boolean> {
+const noWait = (): Promise<void> =>
+  Promise.reject(new TinyFishError(429, "RATE_LIMIT_EXCEEDED", "TinyFish HTTP 429 RATE_LIMIT_EXCEEDED"));
+
+/**
+ * Starts the facts run of the oldest queued version, if the single slot is free. True
+ * when a run was started. Never throws. A rate-limited start gives the slot back at once
+ * unless `waitOnRateLimit` is set (only the cron, which can wait, sets it): then it waits
+ * 60 s and retries, up to three times.
+ */
+export async function startNextFacts(env: Env, opts: { waitOnRateLimit?: boolean } = {}): Promise<boolean> {
   try {
-    return await startNext(env);
+    return await startNext(env, opts.waitOnRateLimit === true);
   } catch (err) {
     logError("facts start failed", err);
     return false;
   }
 }
 
-async function startNext(env: Env): Promise<boolean> {
+async function startNext(env: Env, waitOnRateLimit: boolean): Promise<boolean> {
   const db = env.DB;
   if (await spendPaused(db)) return false;
   const next = await nextFactsCandidate(db);
   if (next === null) return false;
-  if (!(await claimFactsSlot(db, next.id, `claim:${new Date().toISOString()}`))) return false;
+  const token = `claim:${new Date().toISOString()}`;
+  if (!(await claimFactsSlot(db, next.id, token))) return false;
 
   let runId: string;
   try {
-    ({ runId } = await startFactsRun(env, next.url, factsCallbackUrl(env), { sleep: captureDeps.sleep }));
+    const sleep = waitOnRateLimit ? captureDeps.sleep : noWait;
+    ({ runId } = await startFactsRun(env, next.url, factsCallbackUrl(env), { sleep }));
   } catch (err) {
-    await releaseFactsSlot(db, next.id, err);
+    await settleFailedStart(db, next.id, token, err);
     return false;
   }
-  const stored = next.screenshot_key !== null && next.html_key !== null;
-  await updateCapture(db, next.id, { agent_run_id: runId, capture_status: stored ? "awaiting_facts" : undefined });
+  // Recorded only while this start's claim still holds the slot: a claim released in the
+  // meantime (the cron's sweep) may already have let another start through.
+  const row = await updateIfFactsHolder(db, next.id, token, { agent_run_id: runId });
+  if (row === null) {
+    console.error(`facts run ${runId.slice(0, 100)} started after the claim on version ${next.id} was released`);
+    return false;
+  }
+  // It was a facts candidate, so it needs facts.
+  await settleStatus(db, row, true);
   return true;
 }
 
 /**
- * Gives the slot back after a start that failed. A start still rate-limited after its
- * retries is the shared account being busy, not this version failing: no attempt is
- * used and the version stays queued. Any other failure uses an attempt.
+ * Settles a facts start that failed. Every write is conditional on this start's claim token,
+ * so a claim that was released and taken again in the meantime is left alone.
+ * - Still rate-limited: the shared account is busy, not this version failing. The claim is
+ *   given back with no attempt used, and the version stays queued.
+ * - Refused by TinyAgent (an HTTP error): no run exists. The claim is given back and an
+ *   attempt is used.
+ * - No answer, or a 2xx without a run id: a run may exist, and two must never be in flight.
+ *   The claim is kept for the cron's sweep to release, and an attempt is used.
  */
-async function releaseFactsSlot(db: D1Database, versionId: string, err: unknown): Promise<void> {
-  // Not logged: the failure is recorded in capture_error.
+async function settleFailedStart(db: D1Database, versionId: string, token: string, err: unknown): Promise<void> {
   const rateLimited = err instanceof TinyFishError && err.code === "RATE_LIMIT_EXCEEDED";
+  const refused = err instanceof TinyFishError && err.code !== "no_run_id";
+  if (!refused) logError(`facts start for version ${versionId} may have created a run; claim kept`, err);
+  const code = rateLimited ? "rate_limited" : codeOf(err, "request_failed");
+  const added = rateLimited ? 0 : 1;
   const v = await getVersion(db, versionId);
   if (v === null) return;
-  const attempts = rateLimited ? v.capture_attempts : v.capture_attempts + 1;
-  const code = rateLimited ? "rate_limited" : codeOf(err, "request_failed");
-  await updateCapture(db, versionId, {
-    agent_run_id: null,
-    capture_attempts: attempts,
-    // It was a facts candidate, so it needs facts.
-    capture_status: captureStatusFor({ ...v, capture_attempts: attempts }, true),
-    capture_error: withErrors(v.capture_error, ["facts"], [`facts: ${code}`]),
-  });
+  const row = await updateIfFactsHolder(
+    db,
+    versionId,
+    token,
+    {
+      agent_run_id: refused ? null : undefined,
+      // It was a facts candidate, so it needs facts.
+      capture_status: captureStatusFor({ ...v, capture_attempts: v.capture_attempts + added }, true),
+      capture_error: withErrors(v.capture_error, ["facts"], [`facts: ${code}`]),
+    },
+    added,
+  );
+  await settleStatus(db, row, true);
 }
 
 const STATUS_SHAPE = /^[A-Za-z_]{1,32}$/;
@@ -344,22 +404,32 @@ export async function recordFactsResult(
     const label = STATUS_SHAPE.test(status) ? status.toUpperCase() : "unknown";
     const facts = label === "COMPLETED" ? parseFacts(result) : null;
 
+    // Both writes hold only while the version still holds this run: a second settlement of the
+    // same run (a late callback and the cron's follow-up) can never clear or count a newer one.
     if (facts !== null && facts.length > 0) {
       const factsJson = JSON.stringify(facts);
-      await updateCapture(db, version.id, {
+      const row = await updateIfFactsHolder(db, version.id, runId, {
         facts_json: factsJson,
         capture_status: captureStatusFor({ ...version, facts_json: factsJson }, factsNeeded),
         capture_error: withErrors(version.capture_error, ["facts"], []),
       });
+      await settleStatus(db, row, factsNeeded);
     } else {
       const reason = label !== "COMPLETED" ? label : facts === null ? "unparseable" : "empty";
-      const attempts = version.capture_attempts + 1;
-      await updateCapture(db, version.id, {
-        agent_run_id: null,
-        capture_attempts: attempts,
-        capture_status: captureStatusFor({ ...version, capture_attempts: attempts }, factsNeeded),
-        capture_error: withErrors(version.capture_error, ["facts"], [`facts: ${reason}`]),
-      });
+      const row = await updateIfFactsHolder(
+        db,
+        version.id,
+        runId,
+        {
+          agent_run_id: null,
+          capture_status: captureStatusFor({ ...version, capture_attempts: version.capture_attempts + 1 }, factsNeeded),
+          capture_error: withErrors(version.capture_error, ["facts"], [`facts: ${reason}`]),
+        },
+        1,
+      );
+      // Another settlement of this run got there first: its attempt and its chain stand.
+      if (row === null) return;
+      await settleStatus(db, row, factsNeeded);
     }
   }
 

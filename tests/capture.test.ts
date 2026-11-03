@@ -6,7 +6,7 @@ import { AGENT_MAX_DURATION_SECONDS, AGENT_MAX_STEPS, CAPTURE_MAX_ATTEMPTS, SPEN
 import { PRICES, recordSpend } from "../src/core/spend";
 import { insertPage } from "../src/db/pages";
 import { getRunById, insertRun } from "../src/db/runs";
-import type { PageKind, SpendRow, VersionRow } from "../src/db/types";
+import type { PageKind, PageStatus, SpendRow, VersionRow } from "../src/db/types";
 import { claimFactsSlot, getVersion, insertVersion, nextFactsCandidate, type NewVersion } from "../src/db/versions";
 import worker from "../src/index";
 import { FACTS_GOAL, FACTS_SCHEMA } from "../src/tinyfish/agent";
@@ -38,7 +38,7 @@ const FACTS = [
 let seq = 0;
 const urlOf = (pageId: string) => `https://example.com/${pageId}`;
 
-async function seedPage(kind: PageKind): Promise<string> {
+async function seedPage(kind: PageKind, status: PageStatus = "active"): Promise<string> {
   const id = `page-${++seq}`;
   await insertPage(env.DB, {
     id,
@@ -48,7 +48,7 @@ async function seedPage(kind: PageKind): Promise<string> {
     monitor_id: `mon-${id}`,
     schedule_cron: "0 0,12 * * *",
     purpose: "watch",
-    status: "active",
+    status,
     added_by: "curated",
     ignore_patterns: "[]",
     expires_at: null,
@@ -94,6 +94,14 @@ async function seedVersion(pageId: string, over: SeedOptions = {}): Promise<stri
   });
   return id;
 }
+
+/** A version whose screenshot and source are stored after one attempt, queued for its facts. */
+const STORED = {
+  screenshot_key: "shots/s.jpg",
+  html_key: "html/h.html",
+  capture_status: "awaiting_facts",
+  capture_attempts: 1,
+} as const satisfies SeedOptions;
 
 const version = async (id: string): Promise<VersionRow> => (await getVersion(env.DB, id))!;
 const agentSteps = async () =>
@@ -505,15 +513,17 @@ describe("the facts queue", () => {
     expect(runAsyncCalls()).toEqual([]);
   });
 
-  it("a 429-exhausted start leaves agent_run_id NULL and capture_attempts unchanged", async () => {
+  it("a rate-limited start gives the slot back at once: one try, no wait, no attempt used, still queued", async () => {
     mockFetchHtml();
-    fetchMock.intercept({ method: "POST", url: RUN_ASYNC_API, times: 4, reply: { status: 429, body: "slow down" } });
+    fetchMock.intercept({ method: "POST", url: RUN_ASYNC_API, reply: { status: 429, body: "slow down" } });
     const id = await seedVersion(await seedPage("pricing"));
 
+    // A capture runs in waitUntil, which is cut about 30 s after the response: it never waits
+    // out a rate limit (60 s a try), so it cannot die holding a claim.
     await captureVersion(env, id);
 
-    expect(runAsyncCalls()).toHaveLength(4);
-    expect(sleep).toHaveBeenCalledTimes(3);
+    expect(runAsyncCalls()).toHaveLength(1);
+    expect(sleep).not.toHaveBeenCalled();
     expect(await version(id)).toMatchObject({
       screenshot_key: `shots/${id}.jpg`,
       html_key: `html/${id}.html`,
@@ -527,6 +537,56 @@ describe("the facts queue", () => {
     mockRunAsync();
     expect(await startNextFacts(env)).toBe(true);
     expect(await version(id)).toMatchObject({ agent_run_id: "agent-run-1", capture_status: "awaiting_facts" });
+  });
+
+  it("with waitOnRateLimit (the cron) a start waits 60 s between tries and, still limited after three retries, gives the slot back with no attempt used", async () => {
+    fetchMock.intercept({ method: "POST", url: RUN_ASYNC_API, times: 4, reply: { status: 429, body: "slow down" } });
+    const id = await seedVersion(await seedPage("pricing"), STORED);
+
+    expect(await startNextFacts(env, { waitOnRateLimit: true })).toBe(false);
+
+    expect(runAsyncCalls()).toHaveLength(4);
+    expect(sleep.mock.calls).toEqual([[60_000], [60_000], [60_000]]);
+    expect(await version(id)).toMatchObject({
+      agent_run_id: null,
+      capture_status: "awaiting_facts",
+      capture_error: "facts: rate_limited",
+      capture_attempts: 1,
+    });
+  });
+
+  it("with waitOnRateLimit a start that gets through after a wait takes the slot", async () => {
+    fetchMock.intercept({ method: "POST", url: RUN_ASYNC_API, reply: { status: 429, body: "slow down" } });
+    mockRunAsync();
+    const id = await seedVersion(await seedPage("pricing"), STORED);
+
+    expect(await startNextFacts(env, { waitOnRateLimit: true })).toBe(true);
+
+    expect(runAsyncCalls()).toHaveLength(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(await version(id)).toMatchObject({ agent_run_id: "agent-run-1", capture_status: "awaiting_facts", capture_attempts: 1 });
+  });
+
+  it.each([
+    ["the request fails with no answer", () => Promise.reject(new TypeError("Network connection lost.")), "request_failed"],
+    ["TinyAgent answers 200 without a run id", () => Response.json({ status: "PENDING" }), "no_run_id"],
+  ])("when %s a run may exist: the claim is kept for the sweep, an attempt is used, and nothing else starts", async (_name, reply, code) => {
+    fetchMock.intercept({ method: "POST", url: RUN_ASYNC_API, times: Infinity, reply });
+    const id = await seedVersion(await seedPage("pricing"), STORED);
+    const behind = await seedVersion(await seedPage("fees"), STORED);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await startNextFacts(env)).toBe(false);
+      expect(await startNextFacts(env)).toBe(false); // the kept claim still holds the slot
+    } finally {
+      error.mockRestore();
+    }
+
+    const v = await version(id);
+    expect(v.agent_run_id).toMatch(/^claim:/);
+    expect(v).toMatchObject({ capture_status: "awaiting_facts", capture_error: `facts: ${code}`, capture_attempts: 2 });
+    expect(await version(behind)).toMatchObject({ agent_run_id: null, capture_attempts: 1 });
+    expect(runAsyncCalls()).toHaveLength(1);
   });
 
   it("a start that fails for another reason uses an attempt: at the cap the version is failed and never started again", async () => {
@@ -647,6 +707,104 @@ describe("the facts queue", () => {
     expect(await nextFactsCandidate(env.DB)).toMatchObject({ id: orphan });
   });
 
+  it("nextFactsCandidate skips versions of expired pages", async () => {
+    const expired = await seedPage("pricing", "expired");
+    const paused = await seedPage("fees", "paused");
+    await seedVersion(expired, { captured_at: "2026-10-01T00:00:00.000Z" });
+    const wanted = await seedVersion(paused, { captured_at: "2026-10-02T00:00:00.000Z" });
+
+    expect(await nextFactsCandidate(env.DB)).toMatchObject({ id: wanted });
+    await env.DB.prepare("DELETE FROM versions WHERE id = ?").bind(wanted).run();
+    expect(await nextFactsCandidate(env.DB)).toBeNull();
+  });
+
+  it("a second settlement of a failed run never clears or counts the run that started after it", async () => {
+    mockRunAsync();
+    const id = await seedVersion(await seedPage("pricing"), { ...STORED, agent_run_id: "agent-run-X" });
+    // Another settlement of agent-run-X lands between this one's read and its write: it failed the
+    // run (attempt 2) and the chain started agent-run-Y. The step-spend insert is the one write in
+    // between, so a trigger on it plays that other settlement.
+    await env.DB.prepare(
+      `CREATE TRIGGER other_settlement AFTER INSERT ON spend WHEN NEW.ref = 'agent-run-X'
+       BEGIN UPDATE versions SET agent_run_id = 'agent-run-Y', capture_attempts = 2, capture_error = 'facts: FAILED'
+       WHERE id = '${id}'; END`,
+    ).run();
+
+    await recordFactsResult(env, "agent-run-X", "FAILED", null, 2);
+
+    expect(await version(id)).toMatchObject({
+      agent_run_id: "agent-run-Y",
+      capture_status: "awaiting_facts",
+      capture_error: "facts: FAILED",
+      capture_attempts: 2,
+    });
+    expect(runAsyncCalls()).toEqual([]); // never a second run in flight
+  });
+
+  it("a failed start gives back only its own claim", async () => {
+    const id = await seedVersion(await seedPage("pricing"), STORED);
+    // While TinyAgent answers, the claim is released (the cron's sweep) and another start takes the slot.
+    fetchMock.intercept({
+      method: "POST",
+      url: RUN_ASYNC_API,
+      reply: async () => {
+        await env.DB.prepare("UPDATE versions SET agent_run_id = 'claim:other' WHERE id = ?").bind(id).run();
+        return Response.json({ error: { code: "INVALID_INPUT" } }, { status: 400 });
+      },
+    });
+
+    expect(await startNextFacts(env)).toBe(false);
+    expect(await version(id)).toMatchObject({ agent_run_id: "claim:other", capture_error: null, capture_attempts: 1 });
+  });
+
+  it("a started run is recorded only while its claim still holds the slot", async () => {
+    const id = await seedVersion(await seedPage("pricing"), STORED);
+    fetchMock.intercept({
+      method: "POST",
+      url: RUN_ASYNC_API,
+      reply: async () => {
+        await env.DB.prepare("UPDATE versions SET agent_run_id = 'claim:other' WHERE id = ?").bind(id).run();
+        return Response.json({ run_id: "agent-run-late" });
+      },
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await startNextFacts(env)).toBe(false);
+      expect(error.mock.calls.flat().join(" ")).toContain("agent-run-late");
+    } finally {
+      error.mockRestore();
+    }
+    expect(await version(id)).toMatchObject({ agent_run_id: "claim:other", capture_attempts: 1 });
+  });
+
+  it("a facts result that lands while the capture writes its status still leaves the version complete", async () => {
+    mockFetchHtml();
+    mockRunAsync();
+    const id = await seedVersion(await seedPage("pricing"));
+    // The capture works out awaiting_facts from a read taken before the facts landed; the trigger
+    // stores the facts at the moment that status is written, as a facts result racing it would.
+    await env.DB.prepare(
+      `CREATE TRIGGER facts_land AFTER UPDATE OF capture_status ON versions
+       WHEN NEW.capture_status = 'awaiting_facts' AND NEW.facts_json IS NULL
+       BEGIN UPDATE versions SET facts_json = '${JSON.stringify(FACTS)}' WHERE id = NEW.id; END`,
+    ).run();
+
+    await captureVersion(env, id);
+
+    expect(await version(id)).toMatchObject({ facts_json: JSON.stringify(FACTS), capture_status: "complete" });
+    expect(runAsyncCalls()).toEqual([]);
+  });
+
+  it("parallel capture attempts are all counted", async () => {
+    mockFetchHtml();
+    shot.mockRejectedValue(new Error("CDP timeout: Page.navigate"));
+    const id = await seedVersion(await seedPage("policy"));
+
+    await Promise.all([captureVersion(env, id), captureVersion(env, id)]);
+
+    expect(await version(id)).toMatchObject({ capture_attempts: 2, capture_status: "partial" });
+  });
+
   it("claimFactsSlot is one atomic claim: only one of several parallel claims wins", async () => {
     const pricing = await seedPage("pricing");
     const ids = [await seedVersion(pricing), await seedVersion(pricing), await seedVersion(pricing)];
@@ -721,25 +879,21 @@ describe("POST /hooks/agent/:secret", () => {
     expect((await agentSteps())[0]!.amount_usd).toBeCloseTo(PRICES.agent_step * 3, 10);
   });
 
-  it("answers 200 at once and settles the run in waitUntil, where the next start may wait out a rate limit", async () => {
+  it("answers 200 at once and settles the run in waitUntil, then starts the next queued version", async () => {
     // agent-run-1 is in flight; a fees version is queued behind it.
-    const stored = {
-      screenshot_key: "shots/s.jpg",
-      html_key: "html/h.html",
-      capture_status: "awaiting_facts" as const,
-      capture_attempts: 1,
-    };
-    const first = await seedVersion(await seedPage("pricing"), { ...stored, agent_run_id: "agent-run-1" });
-    const queued = await seedVersion(await seedPage("fees"), stored);
-    // Starting the queued version is rate-limited, and its 60 s wait lasts until the test lets it go.
-    fetchMock.intercept({ method: "POST", url: RUN_ASYNC_API, times: Infinity, reply: { status: 429, body: "busy" } });
+    const first = await seedVersion(await seedPage("pricing"), { ...STORED, agent_run_id: "agent-run-1" });
+    const queued = await seedVersion(await seedPage("fees"), STORED);
+    // Starting the queued version takes until the test lets TinyAgent answer.
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    const waits: number[] = [];
-    captureDeps.sleep = async (ms) => {
-      waits.push(ms);
-      await gate;
-    };
+    fetchMock.intercept({
+      method: "POST",
+      url: RUN_ASYNC_API,
+      reply: async () => {
+        await gate;
+        return Response.json({ run_id: "agent-run-2" });
+      },
+    });
     // vi.mock does not work in this pool: hand the Worker an execution context that keeps its waitUntil work.
     const scheduled: Promise<unknown>[] = [];
     const ctx = {
@@ -762,8 +916,8 @@ describe("POST /hooks/agent/:secret", () => {
     let settled = false;
     void scheduled[0]!.then(() => (settled = true));
 
-    // After the response: the facts are stored, and the next start holds the slot while it waits.
-    await vi.waitFor(() => expect(waits).toHaveLength(1));
+    // After the response: the facts are stored, and the next start holds the slot while TinyAgent answers.
+    await vi.waitFor(() => expect(runAsyncCalls()).toHaveLength(1));
     expect(settled).toBe(false);
     expect(await version(first)).toMatchObject({ facts_json: JSON.stringify(FACTS), capture_status: "complete" });
     expect((await version(queued)).agent_run_id).toMatch(/^claim:/);
@@ -771,7 +925,20 @@ describe("POST /hooks/agent/:secret", () => {
     release();
     await Promise.allSettled(scheduled);
     expect(settled).toBe(true);
-    expect(waits).toEqual([60_000, 60_000, 60_000]);
+    expect(await version(queued)).toMatchObject({ agent_run_id: "agent-run-2", capture_status: "awaiting_facts", capture_attempts: 1 });
+  });
+
+  it("a rate-limited start chained from the callback gives the slot back at once instead of waiting in waitUntil", async () => {
+    const first = await seedVersion(await seedPage("pricing"), { ...STORED, agent_run_id: "agent-run-1" });
+    const queued = await seedVersion(await seedPage("fees"), STORED);
+    fetchMock.intercept({ method: "POST", url: RUN_ASYNC_API, times: Infinity, reply: { status: 429, body: "busy" } });
+
+    const res = await agentCallback({ run_id: "agent-run-1", status: "COMPLETED", num_of_steps: 4, result: { items: ITEMS } });
+
+    expect(res.status).toBe(200);
+    expect(await version(first)).toMatchObject({ facts_json: JSON.stringify(FACTS), capture_status: "complete" });
+    expect(runAsyncCalls()).toHaveLength(1);
+    expect(sleep).not.toHaveBeenCalled();
     expect(await version(queued)).toMatchObject({
       agent_run_id: null,
       capture_status: "awaiting_facts",
@@ -853,6 +1020,19 @@ describe("stored objects", () => {
     expect(missing.status).toBe(404);
     expect(await missing.json()).toEqual({ error: "not_found" });
     expect((await callWorker("/sources/missing.html")).status).toBe(404);
+  });
+
+  it("serves stored objects as inert content: sandboxed, never sniffed into another type", async () => {
+    // A captured page is someone else's HTML: on our origin it must not run scripts or be read as a page of ours.
+    await env.STORE.put("shots/abc-123.jpg", JPEG, { httpMetadata: { contentType: "image/jpeg" } });
+    await env.STORE.put("html/abc-123.html", "<script>alert(1)</script>", { httpMetadata: { contentType: "text/html; charset=utf-8" } });
+
+    for (const path of ["/sources/abc-123.html", "/shots/abc-123.jpg"]) {
+      const res = await callWorker(path);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-security-policy")).toBe("sandbox");
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    }
   });
 
   it.each([

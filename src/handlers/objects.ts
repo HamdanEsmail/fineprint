@@ -1,6 +1,8 @@
 // The stored copies of a version: `/shots/<version id>.jpg` serves R2 `shots/<id>.jpg`
 // and `/sources/<version id>.html` serves R2 `html/<id>.html`. A version's objects are
-// written once and never change, so they are cached for a year.
+// written once and never change, so they are cached for a year. A source is a third
+// party's HTML: it is served sandboxed (no scripts, no same-origin access) and never
+// sniffed into another type, so it can be read but never runs on our origin.
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../env";
@@ -22,6 +24,8 @@ async function serve(c: Context<{ Bindings: Env }>, prefix: string, extension: "
   object.writeHttpMetadata(headers);
   if (!headers.has("content-type")) headers.set("content-type", FALLBACK_TYPE[extension]);
   headers.set("cache-control", CACHE_FOREVER);
+  headers.set("content-security-policy", "sandbox");
+  headers.set("x-content-type-options", "nosniff");
   headers.set("etag", object.httpEtag);
   return new Response(object.body, { headers });
 }

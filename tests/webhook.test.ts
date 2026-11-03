@@ -739,7 +739,9 @@ describe("POST /hooks/monitor/:secret", () => {
         const res = await post(changedReal);
         expect(res.status).toBe(200);
         expect(((await res.json()) as Json).version_id).toBeTypeOf("string");
-        expect(error).toHaveBeenCalledTimes(1);
+        // The ledger failure is logged once. (The new version's capture, which meets no
+        // TinyFish interceptor here, logs its own failed facts start as well.)
+        expect(error.mock.calls.filter(([what]) => what === "spend")).toHaveLength(1);
       } finally {
         error.mockRestore();
       }
