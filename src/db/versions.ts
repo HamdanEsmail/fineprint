@@ -113,6 +113,26 @@ export function latestVersion(db: D1Database, pageId: string): Promise<VersionRo
     .first<VersionRow>();
 }
 
+/**
+ * The id and normalized hash of a page's newest version (same order as `latestVersion`),
+ * or null when it has none. The change gate asks this first so a page's text is read
+ * only when the hash alone does not settle it.
+ */
+export function latestVersionHash(
+  db: D1Database,
+  pageId: string,
+): Promise<{ id: string; normalized_hash: string } | null> {
+  return db
+    .prepare("SELECT id, normalized_hash FROM versions WHERE page_id = ? ORDER BY captured_at DESC, rowid DESC LIMIT 1")
+    .bind(pageId)
+    .first<{ id: string; normalized_hash: string }>();
+}
+
+/** Rewrites a version's normalized hash (the change gate does it when the page's ignore patterns changed under it). */
+export async function setVersionHash(db: D1Database, id: string, hash: string): Promise<void> {
+  await db.prepare("UPDATE versions SET normalized_hash = ? WHERE id = ?").bind(hash, id).run();
+}
+
 /** Every version of a page, newest first (the baseline is last), without `text`. */
 export async function listVersions(db: D1Database, pageId: string): Promise<VersionSummary[]> {
   const { results } = await db

@@ -23,6 +23,8 @@ function pickString(...values: unknown[]): string | null {
   return null;
 }
 
+const ERROR_CODE_SHAPE = /^[A-Za-z0-9_.-]{1,64}$/;
+
 // Reads an error response tolerantly: JSON with `error.code` / `code`, else `http_<status>`.
 // The message carries the status and the code and nothing else from the response: an
 // upstream body can echo what we sent (a rejected webhook_url holds the webhook secret),
@@ -37,7 +39,9 @@ async function errorFrom(res: Response): Promise<TinyFishError> {
   }
   const obj = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : {};
   const inner = obj.error !== null && typeof obj.error === "object" ? (obj.error as Record<string, unknown>) : {};
-  const code = pickString(inner.code, obj.code) ?? `http_${res.status}`;
+  // A code is a short token. Anything else (a sentence that echoes our request) is not trusted.
+  const upstream = pickString(inner.code, obj.code);
+  const code = upstream !== null && ERROR_CODE_SHAPE.test(upstream) ? upstream : `http_${res.status}`;
   return new TinyFishError(res.status, code, `TinyFish HTTP ${res.status} ${code}`);
 }
 

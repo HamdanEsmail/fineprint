@@ -134,6 +134,28 @@ describe("tinyfishFetch", () => {
     expect(messages.join("\n")).not.toContain(env.WEBHOOK_SECRET);
   });
 
+  it("uses an upstream error code only when it looks like a code; anything else becomes http_<status>", async () => {
+    const webhook = `https://fineprint.test/hooks/monitor/${env.WEBHOOK_SECRET}`;
+    const shapes: [unknown, string][] = [
+      [{ error: { code: "RATE_LIMIT_EXCEEDED" } }, "RATE_LIMIT_EXCEEDED"],
+      [{ error: { code: "a.b-c_9" } }, "a.b-c_9"],
+      [{ error: { code: "x".repeat(64) } }, "x".repeat(64)],
+      [{ error: { code: "x".repeat(65) } }, "http_400"],
+      [{ error: { code: `rejected ${webhook}` } }, "http_400"], // spaces and slashes: a sentence, not a code
+      [{ error: { code: webhook } }, "http_400"],
+      [{ error: { code: "bad\ncode" } }, "http_400"],
+      [{ code: "has space" }, "http_400"],
+    ];
+    for (const [json, expected] of shapes) {
+      fetchMock.intercept({ method: "POST", url: BROWSER_API, reply: { status: 400, json } });
+      const err = await tinyfishFetch(env, BROWSER_API, { method: "POST" }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(TinyFishError);
+      expect(err).toMatchObject({ status: 400, code: expected });
+      expect((err as Error).message).toBe(`TinyFish HTTP 400 ${expected}`);
+      expect((err as Error).message).not.toContain(env.WEBHOOK_SECRET);
+    }
+  });
+
   it("falls back to body.code, then to http_<status> for a body that is not JSON", async () => {
     fetchMock.intercept({ url: BROWSER_API, reply: { status: 400, json: { code: "BAD_INPUT", message: "no" } } });
     fetchMock.intercept({ url: BROWSER_API, reply: { status: 502, body: "<html>Bad gateway</html>" } });

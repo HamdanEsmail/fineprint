@@ -7,13 +7,14 @@
 // changed. It runs on the free plan (10 ms CPU), so it does no line diffs: it
 // normalizes and hashes, and that is all.
 import { Hono } from "hono";
+import { safeEqual } from "../auth";
 import { captureVersion } from "../capture";
 import { hashText, normalize } from "../core/normalize";
 import { PRICES, recordSpend } from "../core/spend";
 import { getPageByMonitorId, updatePage } from "../db/pages";
 import { deleteRun, insertRun, markNoise, setRunNote } from "../db/runs";
 import type { PageRow } from "../db/types";
-import { insertVersion, latestVersion } from "../db/versions";
+import { getVersion, insertVersion, latestVersionHash, setVersionHash } from "../db/versions";
 import type { Env } from "../env";
 
 export const webhooksRouter = new Hono<{ Bindings: Env }>();
@@ -31,19 +32,9 @@ function logError(what: string, err: unknown): void {
 
 // --- Secret -------------------------------------------------------------------
 
-const encoder = new TextEncoder();
-
-// Same comparison as isAdmin in auth.ts: time depends on the lengths only, not on
-// where the strings first differ. A Worker with no WEBHOOK_SECRET accepts nothing.
+// A Worker with no WEBHOOK_SECRET accepts nothing.
 function secretMatches(given: string, expected: unknown): boolean {
-  if (typeof expected !== "string" || expected === "") return false;
-  const x = encoder.encode(given);
-  const y = encoder.encode(expected);
-  if (x.byteLength !== y.byteLength) {
-    crypto.subtle.timingSafeEqual(x, x);
-    return false;
-  }
-  return crypto.subtle.timingSafeEqual(x, y);
+  return typeof expected === "string" && expected !== "" && safeEqual(given, expected);
 }
 
 // --- Payload ------------------------------------------------------------------
@@ -68,6 +59,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// The run id becomes an R2 key (`raw/<id>.json`). TinyFish's ids are UUIDs; a longer one is
+// refused up front so a valid-but-odd payload cannot fail the R2 put and be retried forever.
+const MAX_RUN_ID_LENGTH = 200;
+
 /** Null when the body is not a JSON object with a run id and a monitor id. Every other field is read tolerantly. */
 function parsePayload(raw: string): MonitorPayload | null {
   let data: unknown;
@@ -78,7 +73,8 @@ function parsePayload(raw: string): MonitorPayload | null {
   }
   if (!isRecord(data)) return null;
   const { id, fetch_monitor_id: monitorId } = data;
-  if (typeof id !== "string" || id === "" || typeof monitorId !== "string" || monitorId === "") return null;
+  if (typeof id !== "string" || id === "" || id.length > MAX_RUN_ID_LENGTH) return null;
+  if (typeof monitorId !== "string" || monitorId === "") return null;
 
   const judgment = isRecord(data.judgment) ? data.judgment : null;
   const first = Array.isArray(data.results) && isRecord(data.results[0]) ? data.results[0] : null;
@@ -107,28 +103,39 @@ function readPatterns(column: string): string[] {
 
 // --- The change gate ------------------------------------------------------------
 
-type Verdict = { kind: "fetch_error" } | { kind: "suppressed" } | { kind: "new_version"; hash: string };
+type Verdict =
+  | { kind: "fetch_error" }
+  /** `heal` is set when the newest version's stored hash was stale and should be rewritten. */
+  | { kind: "suppressed"; heal: { versionId: string; hash: string } | null }
+  | { kind: "new_version"; hash: string };
 
 /**
- * Stage two of the gate (spec 4.3) for a run TinyFish called `changed`. Normalizing
- * a 100 KB page costs several ms of the 10 ms budget, so it happens once if it can:
- * the new text's hash is compared with the latest version's stored hash first. Only
- * when they differ is the stored text normalized again with the page's current
- * patterns, because the stored hash dates from the rules in force when it was
- * written and an admin edit of the ignore patterns makes it stale.
+ * Stage two of the gate (spec 4.3) for a run TinyFish called `changed`. It only reads;
+ * the route computes it before the run is claimed (see there).
+ *
+ * Normalizing a 100 KB page costs several ms of the 10 ms budget, so it happens once
+ * if it can: the new text's hash is compared with the newest version's stored hash,
+ * and only that hash is read. When they differ, the stored text is read and
+ * normalized again with the page's current patterns, because the stored hash dates
+ * from the rules in force when it was written and an admin edit of the ignore
+ * patterns makes it stale. If the two texts then agree, the verdict says to rewrite
+ * the stored hash so later runs take the cheap path again.
  */
 async function judgeChange(db: D1Database, page: PageRow, payload: MonitorPayload): Promise<Verdict> {
   // An empty page or an error entry is a failed fetch, not a change in the page.
   if (payload.text.trim() === "" || payload.hasErrors) return { kind: "fetch_error" };
 
   const patterns = readPatterns(page.ignore_patterns);
-  const latest = await latestVersion(db, page.id);
   const hash = await hashText(normalize(payload.text, patterns).text);
+  const latest = await latestVersionHash(db, page.id);
   if (latest === null) return { kind: "new_version", hash };
-  if (hash === latest.normalized_hash) return { kind: "suppressed" };
+  if (hash === latest.normalized_hash) return { kind: "suppressed", heal: null };
 
-  const previous = await hashText(normalize(latest.text, patterns).text);
-  return previous === hash ? { kind: "suppressed" } : { kind: "new_version", hash };
+  const previous = await getVersion(db, latest.id);
+  if (previous !== null && (await hashText(normalize(previous.text, patterns).text)) === hash) {
+    return { kind: "suppressed", heal: { versionId: latest.id, hash } };
+  }
+  return { kind: "new_version", hash };
 }
 
 /** Bookkeeping that must not fail a webhook whose run and version are already stored. */
@@ -162,7 +169,15 @@ webhooksRouter.post("/monitor/:secret", async (c) => {
   const rawKey = `raw/${payload.id}.json`;
   await c.env.STORE.put(rawKey, raw, { httpMetadata: { contentType: "application/json" } });
 
-  // Claim the run. A retry of the same payload id stops here.
+  // Judge a `changed` run BEFORE claiming it. This is the CPU-heavy part (normalizing
+  // the page text), and if the Worker is killed in it nothing has been claimed, so
+  // TinyFish's retry is processed instead of being answered "duplicate" for a run that
+  // never got its version. A duplicate delivery wastes this work; that is accepted.
+  // A "baseline" run is TinyFish re-baselining its own comparison: the run is stored
+  // and no version is made. So is any outcome we do not know.
+  const verdict = payload.outcome === "changed" ? await judgeChange(db, page, payload) : null;
+
+  // Claim the run. A retry of the same payload id stops here, before any write below.
   const runId = crypto.randomUUID();
   const claim = await insertRun(db, {
     id: runId,
@@ -183,31 +198,30 @@ webhooksRouter.post("/monitor/:secret", async (c) => {
   let response: Record<string, unknown> = { ok: true, run_id: runId };
   let versionId: string | null = null;
   try {
-    // A "baseline" run is TinyFish re-baselining its own comparison: the run is
-    // stored and no version is made. So is any outcome we do not know.
-    if (payload.outcome === "changed") {
-      const verdict = await judgeChange(db, page, payload);
-      if (verdict.kind === "fetch_error") {
-        await setRunNote(db, runId, "fetch_error");
-      } else if (verdict.kind === "suppressed") {
-        await markNoise(db, runId, "normalized_identical");
-        response = { ok: true, suppressed: true };
-      } else {
-        const newId = crypto.randomUUID();
-        await insertVersion(db, {
-          id: newId,
-          page_id: page.id,
-          run_id: runId,
-          is_baseline: 0,
-          captured_at: now,
-          text: payload.text,
-          normalized_hash: verdict.hash,
-          judgment_summary: payload.judgmentSummary,
-          capture_status: "pending",
-        });
-        versionId = newId;
-        response = { ok: true, version_id: newId };
+    if (verdict?.kind === "fetch_error") {
+      await setRunNote(db, runId, "fetch_error");
+    } else if (verdict?.kind === "suppressed") {
+      await markNoise(db, runId, "normalized_identical");
+      response = { ok: true, suppressed: true };
+      const { heal } = verdict;
+      if (heal !== null) {
+        await bestEffort("stale hash heal", () => setVersionHash(db, heal.versionId, heal.hash));
       }
+    } else if (verdict?.kind === "new_version") {
+      const newId = crypto.randomUUID();
+      await insertVersion(db, {
+        id: newId,
+        page_id: page.id,
+        run_id: runId,
+        is_baseline: 0,
+        captured_at: now,
+        text: payload.text,
+        normalized_hash: verdict.hash,
+        judgment_summary: payload.judgmentSummary,
+        capture_status: "pending",
+      });
+      versionId = newId;
+      response = { ok: true, version_id: newId };
     }
   } catch (err) {
     // The retry TinyFish sends after our 500 must be processed, not answered as a
@@ -219,7 +233,10 @@ webhooksRouter.post("/monitor/:secret", async (c) => {
   await bestEffort("page timestamps", () =>
     updatePage(db, page.id, { last_run_at: now, last_change_at: versionId === null ? undefined : now }),
   );
-  await bestEffort("spend", () => recordSpend(db, "monitor_check", PRICES.monitor_check, payload.id));
+  // TinyFish does not bill a failed check, so a fetch error is not put on the ledger.
+  if (verdict?.kind !== "fetch_error") {
+    await bestEffort("spend", () => recordSpend(db, "monitor_check", PRICES.monitor_check, payload.id));
+  }
 
   if (versionId !== null) {
     const newId = versionId;
