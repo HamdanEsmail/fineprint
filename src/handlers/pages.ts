@@ -67,7 +67,8 @@ type Rejected = { error: string };
 
 const absent = (value: unknown): boolean => value === undefined || value === null;
 
-async function readBody(c: AppContext): Promise<Record<string, unknown> | null> {
+/** The request's JSON object, or null when the body is not JSON or not an object. Shared with the sibling handlers. */
+export async function readBody(c: AppContext): Promise<Record<string, unknown> | null> {
   let body: unknown;
   try {
     body = await c.req.json();
@@ -145,7 +146,8 @@ function isPrivateIPv6(address: string): boolean {
   return false;
 }
 
-function isPrivateHost(hostname: string): boolean {
+/** True for a host that is not a public one (loopback, private ranges, local names); discover applies the same rule. */
+export function isPrivateHost(hostname: string): boolean {
   if (hostname.startsWith("[") && hostname.endsWith("]")) return isPrivateIPv6(hostname.slice(1, -1));
   const host = hostname.replace(/\.$/, "");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
@@ -177,11 +179,12 @@ function parseWatchUrl(raw: unknown): string | null {
 
 // --- Helpers for the add flow -----------------------------------------------
 
-const codeOf = (err: unknown): string => (err instanceof TinyFishError ? err.code : "request_failed");
+/** The code a failed TinyFish call is reported with: TinyFish's own, else `request_failed`. */
+export const codeOf = (err: unknown): string => (err instanceof TinyFishError ? err.code : "request_failed");
 
 // Logs what failed without anything an upstream could have echoed back: for a TinyFish
 // failure only its name, status and code; for any other error its name and message.
-function logError(what: string, err: unknown): void {
+export function logError(what: string, err: unknown): void {
   if (err instanceof TinyFishError) {
     console.error(what, `${err.name} status=${err.status} code=${err.code}`);
   } else {

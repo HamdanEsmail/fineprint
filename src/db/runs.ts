@@ -45,6 +45,32 @@ export async function markNoise(db: D1Database, runId: string, reason: string): 
     .run();
 }
 
+/** Takes a run's noise flag and reason back off (the replay does it for a run it turned into a version). */
+export async function clearNoise(db: D1Database, runId: string): Promise<void> {
+  await db.prepare("UPDATE runs SET noise_suppressed = 0, noise_reason = NULL WHERE id = ?").bind(runId).run();
+}
+
+/** A run with the id of the version it made, or null when it made none. */
+export type ReplayRun = RunRow & { version_id: string | null };
+
+/**
+ * A page's runs the admin replay walks: outcome `changed` with a stored raw payload, in the
+ * order they were received (ties by insertion), each with the id of the version it made, if any.
+ */
+export async function changedRunsForReplay(db: D1Database, pageId: string): Promise<ReplayRun[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT r.*, v.id AS version_id
+       FROM runs r
+       LEFT JOIN versions v ON v.page_id = r.page_id AND v.run_id = r.id
+       WHERE r.page_id = ? AND r.outcome = 'changed' AND r.raw_key IS NOT NULL
+       ORDER BY r.received_at, r.rowid`,
+    )
+    .bind(pageId)
+    .all<ReplayRun>();
+  return results;
+}
+
 /**
  * Records why a run was set aside without counting it as suppressed noise
  * (`noise_suppressed` stays as it is). The webhook handler uses it for a

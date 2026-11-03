@@ -12,7 +12,7 @@
 import { Hono } from "hono";
 import { safeEqual } from "../auth";
 import { captureVersion, recordFactsResult } from "../capture";
-import { hashText, normalize } from "../core/normalize";
+import { isFetchFailure, normalizedHash, readIgnorePatterns } from "../core/gate";
 import { PRICES, recordSpend } from "../core/spend";
 import { getPageByMonitorId, updatePage } from "../db/pages";
 import { deleteRun, insertRun, markNoise, setRunNote } from "../db/runs";
@@ -44,7 +44,7 @@ function secretMatches(given: string, expected: unknown): boolean {
 // --- Payload ------------------------------------------------------------------
 
 /** What the handler needs from a Monitor webhook. Everything but the two ids is optional in the wire format. */
-interface MonitorPayload {
+export interface MonitorPayload {
   /** TinyFish's run id; the idempotency key. */
   id: string;
   monitorId: string;
@@ -67,8 +67,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // refused up front so a valid-but-odd payload cannot fail the R2 put and be retried forever.
 const MAX_RUN_ID_LENGTH = 200;
 
-/** Null when the body is not a JSON object with a run id and a monitor id. Every other field is read tolerantly. */
-function parsePayload(raw: string): MonitorPayload | null {
+/**
+ * Null when the body is not a JSON object with a run id and a monitor id. Every other field is
+ * read tolerantly. The admin replay reads the stored raw payloads with it too.
+ */
+export function parsePayload(raw: string): MonitorPayload | null {
   let data: unknown;
   try {
     data = JSON.parse(raw);
@@ -95,16 +98,6 @@ function parsePayload(raw: string): MonitorPayload | null {
   };
 }
 
-/** The page's ignore patterns; a column that is not a JSON array of strings counts as none. */
-function readPatterns(column: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(column);
-    return Array.isArray(parsed) ? parsed.filter((p): p is string => typeof p === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
 // --- The change gate ------------------------------------------------------------
 
 type Verdict =
@@ -126,17 +119,16 @@ type Verdict =
  * the stored hash so later runs take the cheap path again.
  */
 async function judgeChange(db: D1Database, page: PageRow, payload: MonitorPayload): Promise<Verdict> {
-  // An empty page or an error entry is a failed fetch, not a change in the page.
-  if (payload.text.trim() === "" || payload.hasErrors) return { kind: "fetch_error" };
+  if (isFetchFailure(payload)) return { kind: "fetch_error" };
 
-  const patterns = readPatterns(page.ignore_patterns);
-  const hash = await hashText(normalize(payload.text, patterns).text);
+  const patterns = readIgnorePatterns(page.ignore_patterns);
+  const hash = await normalizedHash(payload.text, patterns);
   const latest = await latestVersionHash(db, page.id);
   if (latest === null) return { kind: "new_version", hash };
   if (hash === latest.normalized_hash) return { kind: "suppressed", heal: null };
 
   const previous = await getVersion(db, latest.id);
-  if (previous !== null && (await hashText(normalize(previous.text, patterns).text)) === hash) {
+  if (previous !== null && (await normalizedHash(previous.text, patterns)) === hash) {
     return { kind: "suppressed", heal: { versionId: latest.id, hash } };
   }
   return { kind: "new_version", hash };

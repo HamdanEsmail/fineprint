@@ -7,6 +7,8 @@ export const PUBLIC_SLOTS = 4;
 /** Public pages are recorded for this long, then removed. */
 export const PUBLIC_TTL_DAYS = 7;
 export const PUBLIC_ADDS_PER_IP_PER_DAY = 1;
+/** Discover-by-domain lookups a public caller gets per day (the admin has no limit). */
+export const DISCOVER_PER_IP_PER_DAY = 10;
 
 /** The facts run on a pricing page may take at most this many Agent steps... */
 export const AGENT_MAX_STEPS = 6;

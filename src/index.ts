@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { runCron } from "./cron";
 import type { Env } from "./env";
+import { adminRouter } from "./handlers/admin";
+import { discoverRouter } from "./handlers/discover";
 import { historyRouter } from "./handlers/history";
 import { objectsRouter } from "./handlers/objects";
 import { pagesRouter } from "./handlers/pages";
@@ -14,6 +16,8 @@ const app = new Hono<{ Bindings: Env }>();
 app.use("/api/*", cors());
 
 app.route("/api/pages", pagesRouter);
+app.route("/api/discover", discoverRouter);
+app.route("/api", adminRouter);
 app.route("/api", historyRouter);
 app.route("/hooks", webhooksRouter);
 app.route("/", objectsRouter);

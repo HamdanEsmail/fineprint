@@ -1,5 +1,7 @@
 // A computed diff, keyed by the ordered pair of version ids. Version rows are
-// immutable once written, so a cached diff never goes stale.
+// immutable once written, so a cached diff never goes stale; the one exception is
+// the hop and noise counts inside it, which the admin replay can change by adding a
+// version between the two (see deleteCachedDiffsOfPage).
 
 export async function getCachedDiff(db: D1Database, fromId: string, toId: string): Promise<string | null> {
   const row = await db
@@ -7,6 +9,18 @@ export async function getCachedDiff(db: D1Database, fromId: string, toId: string
     .bind(fromId, toId)
     .first<{ json: string }>();
   return row?.json ?? null;
+}
+
+/** Drops every cached diff that starts or ends at a version of the page. */
+export async function deleteCachedDiffsOfPage(db: D1Database, pageId: string): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM diff_cache
+       WHERE from_version_id IN (SELECT id FROM versions WHERE page_id = ?1)
+          OR to_version_id IN (SELECT id FROM versions WHERE page_id = ?1)`,
+    )
+    .bind(pageId)
+    .run();
 }
 
 /** Stores a diff. Two requests racing to cache the same pair both succeed; the later write wins. */
