@@ -145,6 +145,22 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 - **Webhook secret rotated, 16:28 UTC.** The previous secret appeared in a dashboard screenshot, so a new `WEBHOOK_SECRET` was put on the Worker and `POST /api/admin/rotate-webhook` re-pointed all 20 Monitors (`{updated: 20, failed: []}`); the new secret is accepted and the old one rejected. Facts runs started just before the rotation carry the old callback URL; the cron's follow-up records them instead.
 - **Spend at 16:28 UTC (from `/api/stats`):** $0.30 in total: 20 Monitor checks $0.10 (19 baselines at creation, 1 pull), 20 screenshots $0.04, Agent steps $0.16 so far. The remaining facts runs add roughly $1 over the next hours.
 
+## Where things stand (3 Nov 2026, 17:06 UTC)
+
+- **Live and recording:** 20 pages on 20 TinyFish Monitors, deploy version `831e8888`. Webhooks arrive for monitors created with a webhook (UK visa page at 16:28 UTC, Spotify at 16:52 UTC, the second one after the secret rotation), and the hourly cron pulls any check that is overdue. `/api/stats` at 17:06 UTC: 20 pages, 22 runs (19 `create`, 2 `webhook`, 1 `pull`), 20 versions, spend $0.79 (baseline facts runs cost about $0.10 per pricing page).
+- **Unattended safeguards (R78):** a page health marks failed is still pulled and is un-failed when its Monitor reads active again; facts runs stop at $6 total spend while checks and captures continue to $8; `/api/stats` shows `spend_paused` and `facts_paused`.
+- **Day-2 check:** compare `versions - 20` with `runs_by_trigger.pull` plus `runs_by_trigger.webhook` in `/api/stats`. A page that produces a version on most checks needs `ignore_patterns` (see the runbook).
+
+## Open before submission (17 Nov)
+
+1. README, runbook and `package.json` description: describe what is live (recording started; all endpoints built; CORS; `trigger`; webhook plus pull; pulled versions have no TinyFish summary); remove the stale rotate-webhook warning in the runbook.
+2. Spec section 2 and 3 text: paste the day-1 amendment (every version comes from a Monitor run, delivered by webhook or pulled with run-now when overdue).
+3. Replay: read run-now raw bodies (`{run: {id, results, errors}}`) as well as webhook payloads; purge cached diffs at the first write and set `last_change_at` per created version; keep a durable "replayed" marker and expose it; correct the resumability claims.
+4. `GET /api/pages/:id`: return versions in the same shape as the other endpoints (booleans, parsed facts, screenshot and source URLs, `trigger`), not raw rows. Export: add `trigger`.
+5. Diff cache: treat a version as final only when no facts run is in flight.
+6. Ledger: record a pulled check's spend right after run-now returns usable text (idempotent on the run id); consider a backoff for pages whose pulls keep failing.
+7. Small items: a 5xx from run-async kept as an uncertain start; the pull response also returns `monitor_run_id`; CORS on `/shots` and `/sources`; a URL length cap on public adds; `added_by` "curated" for the 20 pages (one PATCH each, ask first: it touches nothing on TinyFish); a stale comment in `src/handlers/webhooks.ts` about 429 waits.
+
 ## Live TinyFish calls during the build
 
 | When (UTC) | Call | Why | Cost |
