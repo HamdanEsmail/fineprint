@@ -647,6 +647,22 @@ describe("health", () => {
     expect(logged).toContain("http_503");
   });
 
+  it("a monitor missing from the list that reads back on its own as not active (200 paused) is marked failed", async () => {
+    const fine = await seedPage();
+    const paused = await seedPage();
+    mockMonitors((list) => list.filter((m) => m.id === monitorOf(fine)));
+    fetchMock.intercept({
+      method: "GET",
+      url: monitorUrl(monitorOf(paused)),
+      reply: { json: { id: monitorOf(paused), name: paused, status: "paused" } },
+    });
+
+    expect((await runCron(env)).unhealthy).toEqual([paused]);
+
+    expect((await page(paused)).status).toBe("failed");
+    expect((await page(fine)).status).toBe("active");
+  });
+
   it("at most 3 missing monitors are looked up in one tick: a 4th is not looked up and its page is left", async () => {
     const fine = await seedPage();
     const missing = [await seedPage(), await seedPage(), await seedPage(), await seedPage()];

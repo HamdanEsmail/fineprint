@@ -164,9 +164,9 @@ async function expire(env: Env, result: CronResult): Promise<void> {
 /**
  * One list of the account's Monitors. An active page whose Monitor is in it with a status other
  * than `active` is marked failed. A Monitor missing from the list is looked up on its own (the
- * list may stop at a page size it does not announce), at most MONITOR_LOOKUPS_PER_TICK a tick,
- * and its page is marked failed only when that lookup answers 404; any other answer or error
- * leaves the page as it is. Health only flags: it never un-fails a page, and it never changes a
+ * list may stop at a page size it does not announce), at most MONITOR_LOOKUPS_PER_TICK a tick:
+ * its page is marked failed when that lookup answers 404, or answers with a status other than
+ * `active`; a Monitor that reads back `active`, or a lookup error, leaves the page as it is. Health only flags: it never un-fails a page, and it never changes a
  * Monitor (the account is shared with other projects, whose Monitors are in the list). A list
  * that holds none of our Monitors is not trusted (a changed response shape reads as an empty
  * list), and health is skipped that tick, as it is when the list cannot be read.
@@ -196,7 +196,8 @@ async function health(env: Env, result: CronResult): Promise<void> {
       if (lookups >= MONITOR_LOOKUPS_PER_TICK) continue; // looked up on a later tick
       lookups += 1;
       try {
-        if ((await getMonitor(env, page.monitor_id)) !== null) continue; // it exists: not missing
+        const found = await getMonitor(env, page.monitor_id);
+        if (found !== null && found.status.toLowerCase() === "active") continue; // only left off the list
       } catch (err) {
         logError(`cron health could not look up the Monitor of page ${page.id}`, err);
         continue;
