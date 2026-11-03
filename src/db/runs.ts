@@ -40,6 +40,24 @@ export async function markNoise(db: D1Database, runId: string, reason: string): 
     .run();
 }
 
+/**
+ * Records why a run was set aside without counting it as suppressed noise
+ * (`noise_suppressed` stays as it is). The webhook handler uses it for a
+ * `changed` run whose fetch failed: that is a gap in the record, not noise.
+ */
+export async function setRunNote(db: D1Database, runId: string, reason: string): Promise<void> {
+  await db.prepare("UPDATE runs SET noise_reason = ? WHERE id = ?").bind(reason, runId).run();
+}
+
+/**
+ * Takes a run back out. The webhook handler claims a run before it does the
+ * rest of its work; if that work fails it gives the claim back, so TinyFish's
+ * retry of the same payload is processed instead of being answered as a duplicate.
+ */
+export async function deleteRun(db: D1Database, runId: string): Promise<void> {
+  await db.prepare("DELETE FROM runs WHERE id = ?").bind(runId).run();
+}
+
 export async function countRuns(db: D1Database): Promise<number> {
   const row = await db.prepare("SELECT COUNT(*) AS n FROM runs").first<{ n: number }>();
   return row?.n ?? 0;
