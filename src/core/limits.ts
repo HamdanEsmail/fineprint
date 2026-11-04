@@ -42,3 +42,17 @@ export const SPEND_PAUSE_USD = 8;
  * a page's changes multiply, so they stop first and cannot use up the budget that keeps checks coming.
  */
 export const FACTS_PAUSE_USD = 6;
+
+/**
+ * The partial-render guard (src/core/gate.ts). A changed read is suspect, and held for a confirm read
+ * instead of becoming a version, when its normalized text is under PARTIAL_RENDER_RATIO of the latest
+ * version's and adds no block, or when it is under PARTIAL_RENDER_SMALL_CHARS while the latest is over
+ * PARTIAL_RENDER_LARGE_CHARS.
+ */
+export const PARTIAL_RENDER_RATIO = 0.7;
+export const PARTIAL_RENDER_SMALL_CHARS = 500;
+export const PARTIAL_RENDER_LARGE_CHARS = 2000;
+/** A suspect read is confirmed (pulled for) for this long, then forgotten. */
+export const CONFIRM_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** A read whose text equals any version captured this recently is a flap, not a new version. */
+export const FLAP_WINDOW_MS = 72 * 60 * 60 * 1000;

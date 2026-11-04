@@ -118,7 +118,10 @@ webhooksRouter.post("/monitor/:secret", async (c) => {
   // never got its version. A duplicate delivery wastes this work; that is accepted.
   // A "baseline" run is TinyFish re-baselining its own comparison: the run is stored
   // and no version is made. So is any outcome we do not know.
-  const verdict = payload.outcome === "changed" ? await judgeChange(db, page, payload) : null;
+  // A page with a confirm read pending (src/core/gate.ts) judges whatever run arrives next, a scheduled
+  // "unchanged" one included: it may be the second read of the text that was held.
+  const judged = payload.outcome === "changed" || (page.pending_at !== null && payload.outcome === "unchanged");
+  const verdict = judged ? await judgeChange(db, page, payload) : null;
 
   // Claimed, then written, exactly once per payload id; a retry of the same id writes nothing.
   // A failure after the claim gives it back and answers 500, so TinyFish's retry is processed.

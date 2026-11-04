@@ -22,7 +22,7 @@ import {
   type PagePatch,
 } from "../db/pages";
 import { claimPublicAdd, publicAddsToday, releasePublicAdd } from "../db/publicAdds";
-import { insertRun } from "../db/runs";
+import { insertRun, listRunsOfPage } from "../db/runs";
 import type { PageKind, PageRow } from "../db/types";
 import { insertVersion, listVersions } from "../db/versions";
 import type { Env } from "../env";
@@ -62,6 +62,8 @@ const MAX_PURPOSE_LENGTH = 2000;
 const MAX_IGNORE_PATTERNS = 50;
 const MAX_IGNORE_PATTERN_LENGTH = 500;
 const DAY_MS = 86_400_000;
+/** The page detail answer carries at most this many of the page's runs. */
+const MAX_RUNS_SHOWN = 100;
 
 type Fields = { label?: string; kind?: PageKind; ignorePatterns?: string[] };
 type Rejected = { error: string };
@@ -285,7 +287,22 @@ pagesRouter.get("/", async (c) => {
 pagesRouter.get("/:id", async (c) => {
   const page = await getPage(c.env.DB, c.req.param("id"));
   if (!page) return c.json({ error: "not_found" }, 404);
-  return c.json({ page: pageToJson(page), versions: await listVersions(c.env.DB, page.id) });
+  const [versions, runs] = await Promise.all([listVersions(c.env.DB, page.id), listRunsOfPage(c.env.DB, page.id, MAX_RUNS_SHOWN)]);
+  return c.json({
+    page: pageToJson(page),
+    versions,
+    // Newest first. `noise_reason` says why a suppressed run made no version (normalized_identical,
+    // partial_render, flap), or why a fetch failed (fetch_error, not counted as suppressed).
+    runs: runs.map((r) => ({
+      id: r.id,
+      monitor_run_id: r.monitor_run_id,
+      trigger: r.trigger_kind,
+      outcome: r.outcome,
+      received_at: r.received_at,
+      noise_suppressed: r.noise_suppressed === 1,
+      noise_reason: r.noise_reason,
+    })),
+  });
 });
 
 pagesRouter.post("/", async (c) => {

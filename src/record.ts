@@ -44,6 +44,9 @@ export type Recorded =
   | { kind: "duplicate" }
   | { kind: "recorded"; runId: string; versionId: string | null; suppressed: boolean };
 
+/** A page patch that ends a pending confirm read. */
+const NO_PENDING = { pending_hash: null, pending_run_id: null, pending_at: null } as const;
+
 function logError(what: string, err: unknown): void {
   console.error(what, err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 200) : "unknown error");
 }
@@ -96,15 +99,23 @@ export async function recordMonitorRun(
   try {
     if (verdict?.kind === "fetch_error") {
       await setRunNote(db, runId, "fetch_error");
-    } else if (verdict?.kind === "suppressed") {
-      await markNoise(db, runId, "normalized_identical");
+    } else if (verdict?.kind === "partial_suspect") {
+      // No version: the page is held for a confirm read (the cron pulls it within the hour).
+      await markNoise(db, runId, "partial_render");
       suppressed = true;
+      await updatePage(db, page.id, { pending_hash: verdict.hash, pending_run_id: runId, pending_at: receivedAt });
+    } else if (verdict?.kind === "suppressed") {
+      await markNoise(db, runId, verdict.reason);
+      suppressed = true;
+      if (verdict.clearPending) await updatePage(db, page.id, NO_PENDING);
       const { heal } = verdict;
       if (heal !== null) {
         await bestEffort("stale hash heal", () => setVersionHash(db, heal.versionId, heal.hash));
       }
     } else if (verdict?.kind === "new_version") {
       const newId = crypto.randomUUID();
+      // First, so a failure here releases the claim with nothing half written.
+      if (verdict.clearPending) await updatePage(db, page.id, NO_PENDING);
       await insertVersion(db, {
         id: newId,
         page_id: page.id,
@@ -115,6 +126,7 @@ export async function recordMonitorRun(
         normalized_hash: verdict.hash,
         judgment_summary: run.judgmentSummary,
         capture_status: "pending",
+        notes: verdict.notes ?? null,
       });
       versionId = newId;
     }

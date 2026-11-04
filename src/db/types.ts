@@ -33,6 +33,12 @@ export interface PageRow {
   created_at: string;
   last_run_at: string | null;
   last_change_at: string | null;
+  /** Normalized hash of a read held as a suspected partial render, awaiting a confirm read (migrations/0003_guard.sql). */
+  pending_hash: string | null;
+  /** Fineprint's runs.id of the suspect run. */
+  pending_run_id: string | null;
+  /** When the suspect run was received (ISO); the confirm read is pulled for 24 hours after it. */
+  pending_at: string | null;
 }
 
 /**
@@ -80,6 +86,8 @@ export interface VersionRow {
   capture_error: string | null;
   capture_attempts: number;
   agent_run_id: string | null;
+  /** Why the version exists when it is not the plain result of one read (a confirmed suspect read), or null. */
+  notes: string | null;
 }
 
 export interface SpendRow {

@@ -12,8 +12,14 @@
 // secret or page text.
 import { captureVersion, recordFactsResult, spendPaused, startNextFacts } from "./capture";
 import { lastTickAtOrBefore } from "./core/cronTick";
-import { CAPTURE_MAX_ATTEMPTS, MONITOR_LOOKUPS_PER_TICK, PULLS_PER_TICK, REPAIR_PER_TICK } from "./core/limits";
-import { expiredPublicPages, monitoredPages, setPageStatusIf } from "./db/pages";
+import {
+  CAPTURE_MAX_ATTEMPTS,
+  CONFIRM_WINDOW_MS,
+  MONITOR_LOOKUPS_PER_TICK,
+  PULLS_PER_TICK,
+  REPAIR_PER_TICK,
+} from "./core/limits";
+import { clearStalePending, expiredPublicPages, monitoredPages, pendingConfirmPages, setPageStatusIf } from "./db/pages";
 import { pullCandidates } from "./db/runs";
 import { inFlightFactsRuns, listFactsClaims, pendingCaptures, updateIfFactsHolder } from "./db/versions";
 import type { Env } from "./env";
@@ -194,23 +200,32 @@ function codeIn(body: unknown): string {
  * PULLS_PER_TICK pages are pulled, oldest T first, one at a time, each through `cronDeps.pull` (its
  * own Worker invocation); a pull that fails is logged by status and code and the next one goes on.
  * A page whose pull recorded nothing (no text, a fetch error) stays overdue for the next tick.
+ *
+ * First come the confirm reads: a page whose last read was held as a suspected partial render
+ * (pending_at within 24 hours, see src/core/gate.ts) is pulled whatever its tick, before the overdue
+ * pages and under the same cap. A pending read older than 24 hours is cleared, with no pull.
  */
 async function pullOverdue(env: Env, result: CronResult): Promise<void> {
+  const now = cronDeps.now();
+  const confirmSince = new Date(now.getTime() - CONFIRM_WINDOW_MS).toISOString();
+  await clearStalePending(env.DB, confirmSince);
   if (await spendPaused(env.DB)) {
     console.warn("cron overdue pulls skipped: the spend pause is reached");
     return;
   }
-  const cutoff = new Date(cronDeps.now().getTime() - OVERDUE_AFTER_MS);
+  const confirms = await pendingConfirmPages(env.DB, confirmSince);
+  const cutoff = new Date(now.getTime() - OVERDUE_AFTER_MS);
   const due: { id: string; tick: number }[] = [];
   for (const page of await pullCandidates(env.DB)) {
     const tick = page.schedule_cron === null ? null : lastTickAtOrBefore(page.schedule_cron, cutoff);
     if (tick === null) continue;
     if (page.last_received_at !== null && page.last_received_at >= tick.toISOString()) continue;
+    if (confirms.includes(page.id)) continue; // already first in line
     due.push({ id: page.id, tick: tick.getTime() });
   }
   due.sort((a, b) => a.tick - b.tick); // stable: pages due at the same tick keep their creation order
 
-  for (const { id } of due.slice(0, PULLS_PER_TICK)) {
+  for (const id of [...confirms, ...due.map((d) => d.id)].slice(0, PULLS_PER_TICK)) {
     try {
       const res = await cronDeps.pull(env, id);
       const body: unknown = await res.json().catch(() => null);

@@ -1146,6 +1146,9 @@ describe("pageToJson", () => {
     created_at: "2026-11-03T10:00:00.000Z",
     last_run_at: null,
     last_change_at: null,
+    pending_hash: null,
+    pending_run_id: null,
+    pending_at: null,
   };
 
   it("parses ignore_patterns and keeps every other column, including extra list columns", () => {

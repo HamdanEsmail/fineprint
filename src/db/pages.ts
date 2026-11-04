@@ -1,6 +1,9 @@
 import type { AddedBy, PageRow, PageStatus } from "./types";
 
-export type NewPage = Omit<PageRow, "created_at" | "last_run_at" | "last_change_at">;
+export type NewPage = Omit<
+  PageRow,
+  "created_at" | "last_run_at" | "last_change_at" | "pending_hash" | "pending_run_id" | "pending_at"
+>;
 
 export type PagePatch = Partial<
   Pick<
@@ -15,6 +18,9 @@ export type PagePatch = Partial<
     | "added_by"
     | "last_run_at"
     | "last_change_at"
+    | "pending_hash"
+    | "pending_run_id"
+    | "pending_at"
   >
 >;
 
@@ -39,6 +45,9 @@ const PAGE_PATCH_COLUMNS = [
   "added_by",
   "last_run_at",
   "last_change_at",
+  "pending_hash",
+  "pending_run_id",
+  "pending_at",
 ] as const satisfies readonly (keyof PagePatch)[];
 
 /** Inserts a page. `created_at` is now; `last_run_at` and `last_change_at` start NULL. Throws if the url already exists. */
@@ -154,6 +163,31 @@ export async function monitoredPages(db: D1Database): Promise<(PageRow & { monit
     )
     .all<PageRow & { monitor_id: string }>();
   return results;
+}
+
+/** Pages with a confirm read pending that was marked at or after `sinceIso` and can be pulled, oldest first. */
+export async function pendingConfirmPages(db: D1Database, sinceIso: string): Promise<string[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT id FROM pages
+       WHERE pending_at IS NOT NULL AND pending_at >= ? AND status IN ('active', 'failed') AND monitor_id IS NOT NULL
+       ORDER BY pending_at, rowid`,
+    )
+    .bind(sinceIso)
+    .all<{ id: string }>();
+  return results.map((r) => r.id);
+}
+
+/** Clears the pending confirm read of every page marked before `beforeIso`; the number of pages cleared. */
+export async function clearStalePending(db: D1Database, beforeIso: string): Promise<number> {
+  const result = await db
+    .prepare(
+      `UPDATE pages SET pending_hash = NULL, pending_run_id = NULL, pending_at = NULL
+       WHERE pending_at IS NOT NULL AND pending_at < ?`,
+    )
+    .bind(beforeIso)
+    .run();
+  return result.meta.changes;
 }
 
 /**

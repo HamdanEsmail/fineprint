@@ -81,6 +81,11 @@ adminRouter.post("/pages/:id/replay", adminOnly, async (c) => {
       continue;
     }
 
+    // A run the partial-render guard or flap suppression set aside stays set aside: the replay
+    // re-judges with new ignore patterns, and would otherwise make a version of the very read the
+    // guard held back.
+    if (run.noise_reason === "partial_render" || run.noise_reason === "flap") continue;
+
     const payload = await readRaw(c.env.STORE, run.raw_key!);
     if (payload === null || isFetchFailure(payload)) continue;
 
@@ -237,6 +242,10 @@ adminRouter.post("/admin/pull/:pageId", adminOnly, async (c) => {
     verdict = { kind: "new_version", hash: await normalizedHash(run.text, readIgnorePatterns(page.ignore_patterns)), baseline: true };
   } else if (run.text !== latest.text) {
     run.outcome = "changed";
+    verdict = await judgeChange(db, page, run);
+  } else if (page.pending_at !== null) {
+    // The text is the latest version's byte for byte, and a confirm read is pending: the judge
+    // ends it and records the run as identical.
     verdict = await judgeChange(db, page, run);
   }
 

@@ -192,6 +192,7 @@ describe("GET /api/pages/:id/versions/:vid", () => {
       judgment_summary: SUMMARY2,
       capture_status: "complete",
       trigger: "webhook",
+      notes: null,
     });
   });
 
@@ -825,6 +826,8 @@ describe("GET /api/stats", () => {
       runs: 10, // seed(): three version runs, run-quiet and the six noise runs
       versions: 3,
       noise_suppressed: NOISE_RUNS,
+      // The seeded noise runs carry the reason "last updated": a reason the code does not know has its own key.
+      noise_by_reason: { normalized_identical: 0, partial_render: 0, flap: 0, "last updated": NOISE_RUNS },
       spend_usd: 0.051,
       spend_paused: false,
       facts_paused: false,
@@ -845,6 +848,7 @@ describe("GET /api/stats", () => {
       runs: 0,
       versions: 0,
       noise_suppressed: 0,
+      noise_by_reason: { normalized_identical: 0, partial_render: 0, flap: 0 },
       spend_usd: 0,
       spend_paused: false,
       facts_paused: false,

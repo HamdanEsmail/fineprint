@@ -18,7 +18,7 @@ import { normalize } from "../core/normalize";
 import { PRICES, type SpendKind } from "../core/spend";
 import { getCachedDiff, putCachedDiff } from "../db/diffCache";
 import { getPage, listPages } from "../db/pages";
-import { countNoiseBetween, countRunsByTrigger } from "../db/runs";
+import { countNoiseBetween, countNoiseByReason, countRunsByTrigger } from "../db/runs";
 import type { PageRow, PageStatus, TriggerKind, VersionRow } from "../db/types";
 import {
   baselineVersion,
@@ -124,6 +124,7 @@ function versionJson(env: Env, page: PageRow, v: WithTrigger<VersionRow>) {
     judgment_summary: v.judgment_summary,
     capture_status: v.capture_status,
     trigger: v.trigger_kind,
+    notes: v.notes,
   };
 }
 
@@ -334,7 +335,7 @@ const dollars = (amount: number): number => Math.round(amount * 1e6) / 1e6;
 
 historyRouter.get("/stats", async (c) => {
   const db = c.env.DB;
-  const [totals, spendRows, statusRows, runsByTrigger] = await Promise.all([
+  const [totals, spendRows, statusRows, runsByTrigger, noiseReasons] = await Promise.all([
     db
       .prepare(
         `SELECT
@@ -349,6 +350,7 @@ historyRouter.get("/stats", async (c) => {
     db.prepare("SELECT kind, SUM(amount_usd) AS usd FROM spend GROUP BY kind").all<{ kind: string; usd: number | null }>(),
     db.prepare("SELECT status, COUNT(*) AS n FROM pages GROUP BY status").all<{ status: string | null; n: number }>(),
     countRunsByTrigger(db),
+    countNoiseByReason(db),
   ]);
 
   const spendByKind = Object.fromEntries(SPEND_KINDS.map((kind) => [kind, 0])) as Record<SpendKind, number>;
@@ -360,6 +362,9 @@ historyRouter.get("/stats", async (c) => {
     if ((PAGE_STATUSES as readonly (string | null)[]).includes(row.status)) monitors[row.status as PageStatus] = row.n;
   }
 
+  // The three reasons are always present; a reason this code does not know is counted under its own key.
+  const noiseByReason: Record<string, number> = { normalized_identical: 0, partial_render: 0, flap: 0, ...noiseReasons };
+
   const spend = totals?.spend_usd ?? 0;
   const catches = totals?.catches ?? 0;
   return c.json({
@@ -367,6 +372,7 @@ historyRouter.get("/stats", async (c) => {
     runs: totals?.runs ?? 0,
     versions: totals?.versions ?? 0,
     noise_suppressed: totals?.noise_suppressed ?? 0,
+    noise_by_reason: noiseByReason,
     spend_usd: dollars(spend),
     // The two pauses, read from the same total the Worker's own checks use: no facts run starts from
     // FACTS_PAUSE_USD on, and no check, capture or pull from SPEND_PAUSE_USD on.

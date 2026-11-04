@@ -34,7 +34,7 @@ const T3 = "2026-11-04T09:30:00.000Z";
 const MINUTE = 60_000;
 const plusMinutes = (iso: string, minutes: number) => new Date(Date.parse(iso) + minutes * MINUTE).toISOString();
 
-type NewPage = Omit<PageRow, "created_at" | "last_run_at" | "last_change_at">;
+type NewPage = Omit<PageRow, "created_at" | "last_run_at" | "last_change_at" | "pending_hash" | "pending_run_id" | "pending_at">;
 
 function pageInput(over: Partial<NewPage> = {}): NewPage {
   return {
@@ -89,6 +89,7 @@ function versionInput(over: Partial<VersionRow> = {}): VersionRow {
     capture_error: null,
     capture_attempts: 0,
     agent_run_id: null,
+    notes: null,
     ...over,
   };
 }
@@ -115,6 +116,9 @@ describe("pages", () => {
       created_at: T1,
       last_run_at: null,
       last_change_at: null,
+      pending_hash: null,
+      pending_run_id: null,
+      pending_at: null,
     });
     expect(await getPageByMonitorId(db, "mon-1")).toEqual(byId);
     expect(await getPageByUrl(db, "https://example.com/pricing")).toEqual(byId);
@@ -350,6 +354,7 @@ describe("versions", () => {
       capture_error: null,
       capture_attempts: 0,
       agent_run_id: null,
+      notes: null,
     });
     expect(await getVersion(db, "missing")).toBeNull();
   });

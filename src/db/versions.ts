@@ -16,6 +16,7 @@ export type NewVersion = Pick<
       | "capture_error"
       | "capture_attempts"
       | "agent_run_id"
+      | "notes"
     >
   >;
 
@@ -68,6 +69,7 @@ const SUMMARY_COLUMNS = [
   "capture_error",
   "capture_attempts",
   "agent_run_id",
+  "notes",
 ] as const satisfies readonly (keyof VersionSummary)[];
 
 function summaryColumns(prefix = ""): string {
@@ -91,8 +93,8 @@ export async function insertVersion(db: D1Database, v: NewVersion): Promise<void
     .prepare(
       `INSERT INTO versions
          (id, page_id, run_id, is_baseline, captured_at, text, normalized_hash, judgment_summary,
-          screenshot_key, html_key, facts_json, capture_status, capture_error, capture_attempts, agent_run_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          screenshot_key, html_key, facts_json, capture_status, capture_error, capture_attempts, agent_run_id, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       v.id,
@@ -110,8 +112,23 @@ export async function insertVersion(db: D1Database, v: NewVersion): Promise<void
       v.capture_error ?? null,
       v.capture_attempts ?? 0,
       v.agent_run_id ?? null,
+      v.notes ?? null,
     )
     .run();
+}
+
+/** Whether the page has a version with this normalized hash captured at or after `sinceIso`. */
+export async function hasVersionWithHashSince(
+  db: D1Database,
+  pageId: string,
+  hash: string,
+  sinceIso: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT 1 AS found FROM versions WHERE page_id = ? AND normalized_hash = ? AND captured_at >= ? LIMIT 1")
+    .bind(pageId, hash, sinceIso)
+    .first();
+  return row !== null;
 }
 
 /** One version with its text, or null. */
