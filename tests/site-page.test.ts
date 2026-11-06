@@ -2,6 +2,7 @@ import { applyD1Migrations, createExecutionContext, reset, SELF, waitOnExecution
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Delta } from "../src/core/diff";
+import { CAPTURE_MAX_ATTEMPTS } from "../src/core/limits";
 import { insertPage, updatePage, type NewPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { RunRow, TriggerKind } from "../src/db/types";
@@ -194,6 +195,27 @@ describe("the page view's formatters", () => {
     for (const raw of ["yesterday", "", "Nov 5 2026", "2026-02-30T00:00", "2026-11-05T25:00", "05/11/2026", "+012026-11-05T00:00"]) {
       expect(parseAsOfInput(raw), raw).toBeNull();
     }
+  });
+
+  it("refuses an ISO time that does not exist instead of rolling it into another date", () => {
+    for (const raw of [
+      "2026-02-30",
+      "2026-02-30T00:00Z",
+      "2026-11-05T24:00Z",
+      "2026-11-05T24:00:00.000Z",
+      "2026-11-31T09:12:00+03:00",
+      "2026-11-05T09:60Z",
+      "2026-11-05T09:12:61Z",
+      "2026-11-05T09:12+24:00",
+      "2026-11-05T09:12+03:60",
+      "9999-12-31T23:59-01:00",
+    ]) {
+      expect(parseAsOfInput(raw), raw).toBeNull();
+    }
+    // Leap day, the last minute of a day and an offset that crosses midnight are real times.
+    expect(parseAsOfInput("2028-02-29")).toBe("2028-02-29T00:00:00.000Z");
+    expect(parseAsOfInput("2026-11-05T23:59:59.999Z")).toBe("2026-11-05T23:59:59.999Z");
+    expect(parseAsOfInput("2026-11-05T01:00+03:00")).toBe("2026-11-04T22:00:00.000Z");
   });
 
   it("writes a time in the picker's form, in UTC, rounded to the minute either way", () => {
@@ -498,6 +520,50 @@ describe("GET /pages/:id", () => {
     }
   });
 
+  it("counts every noise event in the header, past the 100 runs the check log shows", async () => {
+    await insertPage(db, page("busy", { label: "Busy page" }));
+    await version("busy-0", "busy", ago(60 * DAY), "create");
+    for (let i = 0; i < 103; i++) {
+      await insertRun(db, run(`busy-noise-${i}`, "busy", ago((59 - i * 0.5) * DAY), { outcome: "changed", noise_suppressed: 1, noise_reason: "flap" }));
+    }
+    const html = await get("/pages/busy");
+    expect(html).toContain("1 version · 103 noise events suppressed");
+    expect(html).toContain("The latest 100 checks: 0 changes, 100 noise, 0 unchanged.");
+
+    // The same count as the watchlist's JSON, and the page detail JSON stays as it was.
+    const listed: Json = await (await fetchPath("/api/pages")).json();
+    expect(listed.pages.find((p: Json) => p.id === "busy").noise_count).toBe(103);
+    const detail = (await getPageDetail(env, "busy"))!;
+    expect(detail.noiseCount).toBe(103);
+    expect(detail.runs).toHaveLength(100);
+    const body: Json = await (await fetchPath("/api/pages/busy")).json();
+    expect(body.page).not.toHaveProperty("noise_count");
+    expect(body.runs).toHaveLength(100);
+  });
+
+  it("answers an unknown page with one query and no stats, on the site and in the JSON", async () => {
+    await seedHistory();
+    const prepare = vi.spyOn(env.DB, "prepare");
+    const batch = vi.spyOn(env.DB, "batch");
+    try {
+      for (const path of ["/pages/nope", "/pages/nope?v=v1", "/pages/nope?at=2026-11-05T09:12&text=1", "/api/pages/nope"]) {
+        prepare.mockClear();
+        const ctx = createExecutionContext();
+        const res = await worker.fetch(new Request(`https://x${path}`), env, ctx);
+        await waitOnExecutionContext(ctx);
+        expect(res.status, path).toBe(404);
+        await res.text();
+        expect(prepare.mock.calls.length, path).toBeLessThanOrEqual(1);
+        // The one query reads the page row (its noise count is a subselect on it), never the stats.
+        for (const [sql] of prepare.mock.calls) expect(String(sql), path).toMatch(/FROM pages p WHERE p\.id = \?/);
+      }
+      expect(batch).not.toHaveBeenCalled();
+    } finally {
+      prepare.mockRestore();
+      batch.mockRestore();
+    }
+  });
+
   it("says when there is one version and nothing to compare, and copes with a page that has none", async () => {
     await insertPage(db, page("solo", { label: "Solo page" }));
     await version("solo-0", "solo", T0(), "create");
@@ -550,15 +616,25 @@ describe("the version card's honest states", () => {
     const young = await get("/pages/young");
     expect(young).toContain('<meta http-equiv="refresh" content="5"');
     expect(young).toContain("Taking the screenshot…");
+    expect(young).toContain("This page reloads itself every few seconds for the first two minutes.");
     expect(young).not.toMatch(/<img[^>]+src="[^"]*\/shots\//);
 
     await seedState("old", { at: ago(10 * MIN), screenshot_key: null, html_key: null, capture_status: "partial" });
     const old = await get("/pages/old");
     expect(old).not.toContain('http-equiv="refresh"');
     expect(old).toContain("Taking the screenshot…");
+    expect(old).toContain(`If it does not arrive, the hourly repair tries again, up to ${CAPTURE_MAX_ATTEMPTS} attempts in all.`);
+    expect(old).not.toContain("until it is stored");
 
     // A selected older version does not refresh because the newest is pending.
     expect(await get("/pages/young?v=young-0")).not.toContain('http-equiv="refresh"');
+
+    // The hourly repair skips the captures of a page no longer watched, so a pending one there will not come.
+    await seedState("left", { at: ago(30_000), screenshot_key: null, html_key: null, capture_status: "pending" }, { status: "retired", monitor_id: null });
+    const left = await get("/pages/left");
+    expect(left).toContain("Screenshot unavailable.");
+    expect(left).not.toContain("Taking the screenshot");
+    expect(left).not.toContain('http-equiv="refresh"');
   });
 
   it("says where the price table stands", async () => {
@@ -589,11 +665,20 @@ describe("the version card's honest states", () => {
 
   it("shows a retired or expired page's whole history without implying it is still watched", async () => {
     await seedState("gone", {}, { status: "retired", monitor_id: null });
+    const lastRun = ago(40 * MIN);
+    await insertRun(db, run("gone-last", "gone", lastRun));
+    await updatePage(db, "gone", { last_run_at: lastRun });
     const gone = await get("/pages/gone");
     expect(gone).toContain('class="chip muted">Retired</span>');
     expect(gone).toContain("No longer watched. Its history is kept.");
     expect(gone).not.toContain("Checked twice a day");
     expect(count(gone, 'class="dot')).toBe(2);
+    // Past tense, and a timeline that ends at its last check, labelled with that date, not at "Now".
+    expect(gone).toContain("While this page was watched, Monitor read it on its schedule.");
+    expect(gone).not.toContain("Monitor reads the page on its schedule.");
+    const ends = (html: string): string => html.slice(html.indexOf('<p class="tl-ends">'), html.indexOf("</p>", html.indexOf('<p class="tl-ends">')));
+    expect(ends(gone)).not.toContain("Now");
+    expect(ends(gone)).toContain(formatUtc(lastRun));
 
     await seedState("visitor", {}, { status: "expired", added_by: "public", monitor_id: null });
     const visitor = await get("/pages/visitor");
@@ -601,6 +686,13 @@ describe("the version card's honest states", () => {
     expect(visitor).toContain("Watched for 7 days as a public page. Its history is kept.");
     expect(visitor).not.toContain("Checked twice a day");
     expect(visitor).not.toContain("A suspect read");
+    expect(visitor).toContain("While this page was watched, Monitor read it on its schedule.");
+
+    // A watched page keeps the present tense and its timeline runs to now.
+    await seedState("watched");
+    const watched = await get("/pages/watched");
+    expect(watched).toContain("Monitor reads the page on its schedule.");
+    expect(watched).toMatch(/<p class="tl-ends">[\s\S]*?<span>Now<\/span><\/p>/);
   });
 
   it("labels a layout-only change and takes the accent off its time", async () => {

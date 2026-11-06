@@ -94,6 +94,20 @@ export function getPageByUrl(db: D1Database, url: string): Promise<PageRow | nul
   return db.prepare("SELECT * FROM pages WHERE url = ?").bind(url).first<PageRow>();
 }
 
+/**
+ * One page with the number of its runs suppressed as noise, counted as listPages counts them (every run,
+ * no cap), in one query; null for an unknown page. The page view's header and its 404 read only this.
+ */
+export function getPageWithNoiseCount(db: D1Database, id: string): Promise<(PageRow & { noise_count: number }) | null> {
+  return db
+    .prepare(
+      `SELECT p.*, (SELECT COUNT(*) FROM runs r WHERE r.page_id = p.id AND r.noise_suppressed = 1) AS noise_count
+       FROM pages p WHERE p.id = ?`,
+    )
+    .bind(id)
+    .first<PageRow & { noise_count: number }>();
+}
+
 /** Every page with its version count, noise count and newest version time, ordered by creation. */
 export async function listPages(db: D1Database): Promise<PageListRow[]> {
   const { results } = await db

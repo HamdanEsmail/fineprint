@@ -8,7 +8,7 @@
 import type { Delta } from "./core/diff";
 import { FACTS_PAUSE_USD, PUBLIC_SLOTS, SPEND_PAUSE_USD } from "./core/limits";
 import { PRICES, type SpendKind } from "./core/spend";
-import { getPage, publicSlotUsage } from "./db/pages";
+import { getPage, getPageWithNoiseCount, publicSlotUsage } from "./db/pages";
 import { countNoiseByReason, countRunsByTrigger, listRunsOfPage } from "./db/runs";
 import type { FactsStatus, PageKind, PageRow, PageStatus, SummarySource, TriggerKind } from "./db/types";
 import {
@@ -20,7 +20,6 @@ import {
   listVersions,
   NOT_RETIRED_SQL,
   versionAsOf,
-  versionSummaryAsOf,
 } from "./db/versions";
 import type { Env } from "./env";
 import { objectUrls, parseDelta, thumbUrl, versionJson, versionSummaryJson } from "./handlers/versionJson";
@@ -282,13 +281,20 @@ export type RunItem = {
   noise_reason: string | null;
 };
 
-/**
- * A page with its whole record, as `GET /api/pages/:id` returns it (`page`, `versions`, `runs`), plus
- * `versionByRun`, which the JSON leaves out (a version's JSON never shows its run id): for each run that
- * made a version, that version's id. The page view's check log tells a recorded change from the rest by it.
- */
-export type PageDetail = {
+/** A page as the page detail reads it first: its row as the API gives it, and how many of its runs were noise. */
+export type PageHead = {
   page: PageJson;
+  /** Every run of the page suppressed as noise, not only the newest MAX_RUNS_SHOWN (listPages's `noise_count`). */
+  noiseCount: number;
+};
+
+/**
+ * A page with its whole record, as `GET /api/pages/:id` returns it (`page`, `versions`, `runs`), plus two
+ * things the JSON leaves out: `noiseCount` (the page's noise events, uncapped) and `versionByRun` (a
+ * version's JSON never shows its run id): for each run that made a version, that version's id. The page
+ * view's check log tells a recorded change from the rest by it.
+ */
+export type PageDetail = PageHead & {
   /** Every version, newest first (the baseline last), without text. */
   versions: VersionItem[];
   /** The newest MAX_RUNS_SHOWN runs, newest first. */
@@ -302,19 +308,26 @@ export type VersionDetail = ReturnType<typeof versionJson>;
 /** Why an as-of time has no version: every version is later (with the baseline's time), or the page has none. */
 export type AsOfMiss = { error: "before_baseline"; baseline_at: string } | { error: "no_versions" };
 
-/** The page, its versions and its newest runs, read together; null for an unknown page. Three queries, none reads a text. */
-export async function getPageDetail(env: Env, pageId: string): Promise<PageDetail | null> {
+/**
+ * The first read of a page detail: the page row with its noise count, one query; null for an unknown page.
+ * A caller that has more to read (the page view's stats) starts it only once this says the page exists, so
+ * a request for a page that is not there reads one row and nothing else.
+ */
+export async function findPage(env: Env, pageId: string): Promise<PageHead | null> {
+  const row = await getPageWithNoiseCount(env.DB, pageId);
+  if (!row) return null;
+  const { noise_count: noiseCount, ...page } = row;
+  return { page: pageToJson(page), noiseCount };
+}
+
+/** The rest of a page detail for a page findPage found: its versions and its newest runs, two queries, neither reads a text. */
+export async function getPageRecord(env: Env, head: PageHead): Promise<PageDetail> {
   const db = env.DB;
-  const [page, versions, runs] = await Promise.all([
-    getPage(db, pageId),
-    listVersions(db, pageId),
-    listRunsOfPage(db, pageId, MAX_RUNS_SHOWN),
-  ]);
-  if (!page) return null;
+  const [versions, runs] = await Promise.all([listVersions(db, head.page.id), listRunsOfPage(db, head.page.id, MAX_RUNS_SHOWN)]);
   const versionByRun: Record<string, string> = {};
   for (const v of versions) if (v.run_id !== null) versionByRun[v.run_id] = v.id;
   return {
-    page: pageToJson(page),
+    ...head,
     versions: versions.map((v) => versionSummaryJson(env, v)),
     runs: runs.map((r) => ({
       id: r.id,
@@ -327,6 +340,12 @@ export async function getPageDetail(env: Env, pageId: string): Promise<PageDetai
     })),
     versionByRun,
   };
+}
+
+/** The page, its noise count, its versions and its newest runs; null for an unknown page (one query, then two). */
+export async function getPageDetail(env: Env, pageId: string): Promise<PageDetail | null> {
+  const head = await findPage(env, pageId);
+  return head === null ? null : getPageRecord(env, head);
 }
 
 /**
@@ -346,27 +365,19 @@ export async function getVersion(
 
 /**
  * What a page said at `atIso` (ISO, as parseTime returns it), as `GET /api/pages/:id/as-of` returns it:
- * the latest version captured at or before it, the baseline included, with its text unless `withText`
- * is false. An AsOfMiss when there is none; null for an unknown page.
+ * the latest version captured at or before it, the baseline included, with its text. An AsOfMiss when
+ * there is none; null for an unknown page. (The page view resolves `at=` with versionInForce instead.)
  */
-export async function getVersionAsOf(
-  env: Env,
-  pageId: string,
-  atIso: string,
-  opts: { withText: boolean } = { withText: true },
-): Promise<VersionDetail | AsOfMiss | null> {
+export async function getVersionAsOf(env: Env, pageId: string, atIso: string): Promise<VersionDetail | AsOfMiss | null> {
   const db = env.DB;
-  const [page, hit] = await Promise.all([
-    getPage(db, pageId),
-    opts.withText ? versionAsOf(db, pageId, atIso) : versionSummaryAsOf(db, pageId, atIso),
-  ]);
+  const [page, hit] = await Promise.all([getPage(db, pageId), versionAsOf(db, pageId, atIso)]);
   if (!page) return null;
   if (hit === "no_versions") return { error: "no_versions" };
   if (hit === "before_baseline") {
     const baseline = await baselineVersion(db, pageId);
     return baseline ? { error: "before_baseline", baseline_at: baseline.captured_at } : { error: "no_versions" };
   }
-  return versionJson(env, page.url, hit, "text" in hit && typeof hit.text === "string" ? hit.text : null);
+  return versionJson(env, page.url, hit, hit.text);
 }
 
 /**

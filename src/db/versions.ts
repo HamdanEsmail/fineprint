@@ -182,14 +182,6 @@ export function getVersion(db: D1Database, id: string): Promise<VersionRow | nul
   return db.prepare("SELECT * FROM versions WHERE id = ?").bind(id).first<VersionRow>();
 }
 
-/** One version with its text and its run's trigger, or null. */
-export function getVersionWithTrigger(db: D1Database, id: string): Promise<WithTrigger<VersionRow> | null> {
-  return db
-    .prepare(`SELECT *, ${triggerColumn("versions")} FROM versions WHERE id = ?`)
-    .bind(id)
-    .first<WithTrigger<VersionRow>>();
-}
-
 /**
  * One version of one page with its run's trigger and the page's live url, in one query: null when the
  * page or the version is unknown, or the version belongs to another page. The text is read only when

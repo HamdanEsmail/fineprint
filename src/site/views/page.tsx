@@ -4,6 +4,7 @@
 // the same versions as rows, the primary control on a phone; the version card shows the selected version
 // with its screenshot, its price table and its evidence line; then the compare form and the check log.
 // Everything is a link or a GET form, so the screen works with JavaScript off.
+import { CAPTURE_MAX_ATTEMPTS } from "../../core/limits";
 import type { PageDetail, RunItem, Stats, VersionItem } from "../../readModel";
 import { MAX_RUNS_SHOWN } from "../../readModel";
 import { DeltaBadge, EvidenceLine, FactsTable, hasDeltaBadge, LAYOUT_ONLY_LINE, StatusChip } from "../components";
@@ -53,17 +54,23 @@ export type PageViewProps = {
 
 // --- What a version and a run amount to ---------------------------------------------------------
 
+/** A page that is no longer watched: retired for unreliable reads, or a public page past its 7 days. */
+const isGone = (status: string | null): boolean => status === "retired" || status === "expired";
+
 type ShotState = "ok" | "pending" | "failed";
 
-/** A screenshot is there, still being taken, or will not come (the capture finished or gave up without one). */
-function shotState(v: VersionItem): ShotState {
+/**
+ * A screenshot is there, still being taken, or will not come: the capture finished or gave up without one,
+ * or it is still pending on a page no longer watched, whose captures the hourly repair skips.
+ */
+function shotState(v: VersionItem, gone: boolean): ShotState {
   if (v.screenshot_url !== null) return "ok";
-  return v.capture_status === "complete" || v.capture_status === "failed" ? "failed" : "pending";
+  return v.capture_status === "complete" || v.capture_status === "failed" || gone ? "failed" : "pending";
 }
 
 /** Whether the page should reload itself: the selected version's screenshot is pending and the version is under two minutes old. */
-export function refreshes(v: VersionItem | null, nowMs: number): boolean {
-  return v !== null && shotState(v) === "pending" && nowMs - Date.parse(v.captured_at) < REFRESH_WINDOW_MS;
+export function refreshes(v: VersionItem | null, gone: boolean, nowMs: number): boolean {
+  return v !== null && shotState(v, gone) === "pending" && nowMs - Date.parse(v.captured_at) < REFRESH_WINDOW_MS;
 }
 
 type Outcome = "baseline" | "change" | "noise" | "failed" | "unchanged";
@@ -142,10 +149,10 @@ type Ctx = { detail: PageDetail; pageHref: string; label: string };
 
 const versionHref = (ctx: Ctx, id: string, extra = ""): string => `${ctx.pageHref}?v=${encodeURIComponent(id)}${extra}`;
 
-function PageHead(props: { ctx: Ctx; noise: number }) {
-  const { page, versions } = props.ctx.detail;
+function PageHead(props: { ctx: Ctx }) {
+  const { page, versions, noiseCount } = props.ctx.detail;
   const href = webHref(page.url);
-  const gone = page.status === "retired" || page.status === "expired";
+  const gone = isGone(page.status);
   const cron = page.schedule_cron;
   const words = cron === null ? null : cronToWords(cron);
   return (
@@ -176,7 +183,7 @@ function PageHead(props: { ctx: Ctx; noise: number }) {
           )}
         </li>
       </ul>
-      <p class="page-tally">{`${plural(versions.length, "version")} · ${plural(props.noise, "noise event")} suppressed`}</p>
+      <p class="page-tally">{`${plural(versions.length, "version")} · ${plural(noiseCount, "noise event")} suppressed`}</p>
       {page.status === "retired" ? <p class="state-line">No longer watched. Its history is kept.</p> : null}
       {page.status === "expired" ? <p class="state-line">Watched for 7 days as a public page. Its history is kept.</p> : null}
       {!gone && page.pending_hash !== null ? (
@@ -201,10 +208,17 @@ function Timeline(props: { ctx: Ctx; selected: VersionItem; asOf: AsOf | null; n
   const oldestFirst = [...ctx.detail.versions].reverse();
   const first = oldestFirst[0]!;
   const startMs = Date.parse(first.captured_at);
+  const newestMs = Date.parse(oldestFirst[oldestFirst.length - 1]!.captured_at);
+  // A watched page's track runs to now. One no longer watched ends at its last check (or its newest version),
+  // and that end is labelled with its date: nothing has been read since.
+  const gone = isGone(ctx.detail.page.status);
+  const lastCheckMs = Math.max(Date.parse(ctx.detail.page.last_run_at ?? "") || 0, Date.parse(ctx.detail.runs[0]?.received_at ?? "") || 0);
+  const endMs = gone ? Math.max(newestMs, lastCheckMs) : Math.max(nowMs, newestMs);
+  const endIso = new Date(endMs).toISOString();
   const positions = dotPositions(
     oldestFirst.map((v) => Date.parse(v.captured_at)),
     startMs,
-    Math.max(nowMs, Date.parse(oldestFirst[oldestFirst.length - 1]!.captured_at)),
+    endMs,
   );
   const nowIso = new Date(nowMs).toISOString();
   const note = asOfNote(asOf);
@@ -234,7 +248,13 @@ function Timeline(props: { ctx: Ctx; selected: VersionItem; asOf: AsOf | null; n
           <span>
             <time datetime={first.captured_at}>{formatUtc(first.captured_at)}</time>
           </span>
-          <span>Now</span>
+          {gone ? (
+            <span>
+              <time datetime={endIso}>{formatUtc(endIso)}</time>
+            </span>
+          ) : (
+            <span>Now</span>
+          )}
         </p>
       </div>
       <form class="asof" method="get" action={ctx.pageHref}>
@@ -269,12 +289,12 @@ function Timeline(props: { ctx: Ctx; selected: VersionItem; asOf: AsOf | null; n
 }
 
 /** A small screenshot inside a link that already names its version: decorative, so its alt is empty. */
-function MiniShot(props: { v: VersionItem }) {
+function MiniShot(props: { v: VersionItem; gone: boolean }) {
   const src = ownPath(props.v.thumb_url ?? props.v.screenshot_url);
   return (
     <span class="vrow-shot">
       {src === null ? (
-        <span class="thumb-none">{shotState(props.v) === "pending" ? "Not yet" : "No image"}</span>
+        <span class="thumb-none">{shotState(props.v, props.gone) === "pending" ? "Not yet" : "No image"}</span>
       ) : (
         <img src={src} width={56} height={56} loading="lazy" decoding="async" alt="" />
       )}
@@ -302,7 +322,7 @@ function VersionList(props: { ctx: Ctx; selected: VersionItem }) {
           return (
             <li>
               <a class={on ? "vrow is-on" : "vrow"} href={versionHref(ctx, v.id, "#version")} aria-current={on ? "true" : undefined}>
-                <MiniShot v={v} />
+                <MiniShot v={v} gone={isGone(ctx.detail.page.status)} />
                 <span class="vrow-head">
                   <time class={quietTime(v) ? "vrow-time is-quiet" : "vrow-time"} datetime={v.captured_at}>
                     {formatUtc(v.captured_at)}
@@ -322,7 +342,7 @@ function VersionList(props: { ctx: Ctx; selected: VersionItem }) {
 function Shot(props: { ctx: Ctx; v: VersionItem; refreshing: boolean }) {
   const { ctx, v } = props;
   const time = formatUtc(v.captured_at);
-  const state = shotState(v);
+  const state = shotState(v, isGone(ctx.detail.page.status));
   const live = webHref(ctx.detail.page.url);
   if (state === "ok") {
     const full = ownPath(v.screenshot_url)!;
@@ -339,7 +359,11 @@ function Shot(props: { ctx: Ctx; v: VersionItem; refreshing: boolean }) {
     return (
       <div class="vshot-none" role="status">
         <p class="vshot-state">Taking the screenshot…</p>
-        <p>{props.refreshing ? "This page reloads itself every few seconds until it is ready." : "It is retried every hour until it is stored."}</p>
+        <p>
+          {props.refreshing
+            ? "This page reloads itself every few seconds for the first two minutes."
+            : `If it does not arrive, the hourly repair tries again, up to ${CAPTURE_MAX_ATTEMPTS} attempts in all.`}
+        </p>
       </div>
     );
   }
@@ -505,6 +529,7 @@ const KEY: { outcome: Outcome; text: string; pulled?: true }[] = [
 
 function CheckLog(props: { ctx: Ctx; checks: Check[] }) {
   const { ctx, checks } = props;
+  const gone = isGone(ctx.detail.page.status);
   const oldestFirst = [...checks].reverse();
   const seen = new Set(checks.map((c) => c.outcome));
   const anyPulled = checks.some((c) => c.run.trigger === "pull");
@@ -515,8 +540,9 @@ function CheckLog(props: { ctx: Ctx; checks: Check[] }) {
       {checks.length === 0 ? null : (
         <>
           <p class="page-note">
-            Monitor reads the page on its schedule. A read becomes a version only when the words or figures changed; a read that
-            differs only in noise is filtered out and counted here.
+            {gone
+              ? "While this page was watched, Monitor read it on its schedule. A read became a version only when the words or figures changed; a read that differed only in noise was filtered out and counted here."
+              : "Monitor reads the page on its schedule. A read becomes a version only when the words or figures changed; a read that differs only in noise is filtered out and counted here."}
           </p>
           <div class="marks-panel card">
             <ol class="marks" aria-hidden="true">
@@ -582,8 +608,7 @@ export function PageView(props: PageViewProps) {
   const { page, versions } = detail;
   const ctx: Ctx = { detail, pageHref: `/pages/${encodeURIComponent(page.id)}`, label: page.label };
   const checks = checksOf(detail);
-  const noise = checks.filter((c) => c.outcome === "noise").length;
-  const refreshing = refreshes(selected, nowMs);
+  const refreshing = refreshes(selected, isGone(page.status), nowMs);
   const first = versions[versions.length - 1];
   return (
     <Layout
@@ -598,7 +623,7 @@ export function PageView(props: PageViewProps) {
       refreshSeconds={refreshing ? REFRESH_SECONDS : undefined}
     >
       <div class="wrap page">
-        <PageHead ctx={ctx} noise={noise} />
+        <PageHead ctx={ctx} />
         {selected === null ? (
           <p class="empty card">No version of this page is recorded yet.</p>
         ) : (

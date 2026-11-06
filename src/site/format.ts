@@ -2,7 +2,7 @@
 // ISO 8601 stays in data and URLs. Nothing here touches the DOM, the database or the clock.
 import type { BlockCounts, Delta } from "../core/diff";
 import type { TriggerKind } from "../db/types";
-import { parseTime, type Stats } from "../readModel";
+import type { Stats } from "../readModel";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 const pad = (n: number): string => String(n).padStart(2, "0");
@@ -131,36 +131,44 @@ export function cronToWords(cron: string): string {
   return `${timesADay(hours.length)}, at ${listWords(hours.map((h) => `${pad(h)}:${pad(Number(minute))}`))} UTC`;
 }
 
-/** The `datetime-local` form, "2026-11-05T09:12" (seconds and milliseconds allowed), read as UTC. */
-const PICKER_FORM = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/;
-/** ISO 8601 as the API takes it: a date, or a date and time with Z or an offset. */
-const ISO_FORM = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
+/**
+ * An as-of time as a visitor types or picks it: a date ("2026-11-05", midnight UTC), or a date and a time
+ * ("2026-11-05T09:12", seconds and a fraction allowed, "T" or a space), with Z or an offset ("+03:00") or
+ * with none, which is the `datetime-local` picker's form and is read as UTC.
+ */
+const AS_OF_FORM = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:\d{2})?)?$/;
 
 /**
  * An as-of time typed or picked by a visitor, as the ISO string the database compares, or null when it
- * cannot be read. The picker's form has no zone and is read as UTC (Date.parse would read it as the
- * server's local time); a date that does not exist (30 February, 25:00) is refused, not rolled over.
- * ISO 8601 with Z or an offset, or a bare date (midnight UTC), is read as the JSON API reads it.
+ * cannot be read. Every field is checked as typed: Date.UTC (and Date.parse) would roll 30 February into
+ * March, 24:00 into the next day and 09:60 into 10:00, and read years 0 to 99 as 1900 to 1999, so a time
+ * whose fields do not come back unchanged is refused rather than moved. An offset is applied after that
+ * check; a result outside the years 0000 to 9999 is refused, as parseTime refuses it.
  */
 export function parseAsOfInput(raw: string): string | null {
-  const text = raw.trim();
-  const picked = PICKER_FORM.exec(text);
-  if (picked) {
-    const [y, mo, d, h, mi, s] = picked.slice(1, 7).map((part) => Number(part ?? "0")) as [number, number, number, number, number, number];
-    const ms = Number((picked[7] ?? "0").padEnd(3, "0"));
-    const date = new Date(Date.UTC(y, mo - 1, d, h, mi, s, ms));
-    // Date.UTC rolls 30 February into March and 25:00 into the next day, and reads years 0 to 99 as
-    // 1900 to 1999: each field must come back as it was typed.
-    const exact =
-      date.getUTCFullYear() === y &&
-      date.getUTCMonth() === mo - 1 &&
-      date.getUTCDate() === d &&
-      date.getUTCHours() === h &&
-      date.getUTCMinutes() === mi &&
-      date.getUTCSeconds() === s;
-    return exact ? date.toISOString() : null;
+  const m = AS_OF_FORM.exec(raw.trim());
+  if (!m) return null;
+  const [y, mo, d, h, mi, s] = m.slice(1, 7).map((part) => Number(part ?? "0")) as [number, number, number, number, number, number];
+  const ms = Number((m[7] ?? "0").slice(0, 3).padEnd(3, "0"));
+  const local = new Date(Date.UTC(y, mo - 1, d, h, mi, s, ms));
+  const exact =
+    local.getUTCFullYear() === y &&
+    local.getUTCMonth() === mo - 1 &&
+    local.getUTCDate() === d &&
+    local.getUTCHours() === h &&
+    local.getUTCMinutes() === mi &&
+    local.getUTCSeconds() === s;
+  if (!exact) return null;
+  const zone = m[8];
+  let offsetMinutes = 0;
+  if (zone !== undefined && zone.toUpperCase() !== "Z") {
+    const oh = Number(zone.slice(1, 3));
+    const om = Number(zone.slice(4, 6));
+    if (oh > 23 || om > 59) return null;
+    offsetMinutes = (zone[0] === "-" ? -1 : 1) * (oh * 60 + om);
   }
-  return ISO_FORM.test(text) ? parseTime(text) : null;
+  const iso = new Date(local.getTime() - offsetMinutes * 60_000).toISOString();
+  return /^\d{4}-/.test(iso) ? iso : null;
 }
 
 /** An ISO time in the picker's form, "2026-11-05T09:12" (UTC), rounded down or up to the minute. */

@@ -9,7 +9,8 @@ import type { Env } from "../env";
 import {
   countChanges,
   countRetiredPagesWithChanges,
-  getPageDetail,
+  findPage,
+  getPageRecord,
   getStats,
   getVersion,
   listChanges,
@@ -86,10 +87,13 @@ siteRouter.get("/", async (c) => {
 siteRouter.get("/pages/:id", async (c) => {
   if (!siteEnabled(c.env)) return c.notFound();
   const pageId = c.req.param("id");
-  // Nine queries: the stats every screen's stamp and spend meter need (six), and the page with its
-  // versions and runs, none with a text (three). v= and at= are resolved from the versions already read.
-  const [stats, detail] = await Promise.all([getStats(c.env), getPageDetail(c.env, pageId)]);
-  if (detail === null) return render(c, <NotFound />, 404);
+  // The page row (with its noise count) first: a page that is not there is the ledger's 404 after that one
+  // read, without the stats. Then nine in all: the stats every screen's stamp and spend meter need (six)
+  // beside the page's versions and runs (two), none with a text. v= and at= are resolved from the
+  // versions already read.
+  const head = await findPage(c.env, pageId);
+  if (head === null) return render(c, <NotFound />, 404);
+  const [stats, detail] = await Promise.all([getStats(c.env), getPageRecord(c.env, head)]);
 
   const nowMs = Date.now();
   const { versions } = detail;
