@@ -174,7 +174,7 @@ export type Screenshot = { bytes: ArrayBuffer; thumb?: ArrayBuffer | null; heigh
 /** The thumbnail clip, or null when it fails or takes over `ms`. */
 async function captureThumb(page: Page, ms: number): Promise<ArrayBuffer | null> {
   const shot = await within(page.send<{ data: string }>("Page.captureScreenshot", THUMB_CAPTURE), ms);
-  if (shot === null || typeof shot.data !== "string") return null;
+  if (shot == null || typeof shot.data !== "string") return null;
   try {
     return decodeBase64(shot.data);
   } catch {
