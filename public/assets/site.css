@@ -253,6 +253,86 @@ figcaption { margin-top: 8px; font: 400 11.5px/1.4 var(--font-data); letter-spac
 .checks-table { max-width: 780px; margin-top: 10px; font: var(--t-small); }
 .checks-table .when { font: var(--t-mono); font-size: 12px; }
 
+/* --- A recorded block (src/site/blockText.tsx): text only, in the block's own shape ------------ */
+:where(.diff-before, .diff-after, .diff-added, .diff-removed) > * + * { margin-top: 8px; }
+.bt-p, .bt-list li, .bt-h { overflow-wrap: anywhere; }
+.bt-h { font: 600 16px/1.35 var(--font-display); letter-spacing: -.01em; }
+.bt-h1, .bt-h2 { font-size: 18px; }
+.bt-list { padding-left: 1.25em; list-style: disc; }
+ol.bt-list { list-style: decimal; }
+.bt-list li + li { margin-top: 4px; }
+.bt-list li::marker { color: var(--ink-muted); }
+.bt-table { font: var(--t-mono); font-variant-numeric: tabular-nums; }
+.bt-row { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+:where(.bt-p, .bt-list, .bt-h) code { font: var(--t-mono); font-size: .9em; overflow-wrap: anywhere; }
+/* Where a long block was cut, and what was left out. Inline blocks, so a removed block's strike stays off them. */
+.bt-cut, .bt-more { display: inline-block; color: var(--ink-muted); }
+.bt-cut { font: 500 15px/1 var(--font-data); letter-spacing: .1em; }
+.bt-more { font: var(--t-small); }
+
+/* Word marks (the comp's del and ins): struck in muted ink on the before side, washed on the after side. */
+del { color: var(--ink-muted); text-decoration: line-through; text-decoration-thickness: 1px; }
+ins { color: var(--ink); text-decoration: none; background: var(--accent-wash); box-shadow: 0 0 0 2px var(--accent-wash); border-radius: 1px; }
+
+/* --- Diff view (DESIGN.md "Diff view"): before and after in two columns, stacked on a phone --------- */
+.pair { display: grid; gap: 12px; }
+@media (min-width: 800px) { .pair { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; } }
+.side { min-width: 0; }
+.side .label { margin-bottom: 8px; }
+/* A changed block: the before side sunken (its gone words struck), the after side raised with the accent bar
+   (its new words washed). Only the words carry the change, never the whole block. */
+.diff-before, .diff-after { padding: 12px 14px; font-size: 15px; line-height: 1.6; border-radius: var(--r); }
+.diff-before { color: var(--ink-soft); background: var(--paper-sunken); }
+.diff-after { color: var(--ink); background: var(--paper-raised); border: var(--hairline); border-left: 3px solid var(--accent); }
+.diff-note { grid-column: 1 / -1; font: var(--t-small); color: var(--ink-muted); }
+/* An added or a removed block (tokens.css: the wash with the bar, the sunken strike), at a reading measure. */
+.diff-added, .diff-removed { max-width: 76ch; font-size: 15px; line-height: 1.6; border-radius: var(--r); }
+.diff-added { padding: 10px 14px; color: var(--ink); }
+.diff-removed { padding: 10px 14px; text-decoration-thickness: 1px; }
+/* A run of added (or removed) blocks reads as one stretch: a hairline of paper between them, not a gap. */
+.diff-added + .diff-added, .diff-removed + .diff-removed { margin-top: -12px; }
+
+/* --- Compare view ---------------------------------------------------------------------------------- */
+.compare-span { margin-top: 10px; font: 500 12px/1.5 var(--font-data); letter-spacing: .02em; font-variant-numeric: tabular-nums; color: var(--ink-muted); }
+.compare-span time { color: var(--ink); }
+.compare-lead { max-width: 68ch; margin-top: 20px; }
+.compare-lead .row { margin: 0 0 10px; }
+.compare-lead .vcard-summary { margin-top: 0; }
+.compare-lead .origin { display: block; margin-top: 6px; }
+.compare > .state-line { margin-top: 24px; }
+section.facts-diff, section.diff, section.compare-shots { padding-top: 44px; }
+.facts-diff .table { max-width: 780px; }
+.facts-diff .facts-note { max-width: 68ch; }
+.facts .what { font: var(--t-label); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+.facts .was { color: var(--ink-muted); }
+/* The new price of a changed fact: the one accent figure on the screen. */
+.facts .is-key { font-weight: 500; color: var(--accent); }
+.diff-count { font: 500 19px/1.35 var(--font-display); letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.diff > .page-note { max-width: 68ch; margin: 6px 0 0; }
+section.diff-group { padding-top: 32px; }
+.diff-section { margin-bottom: 14px; padding-bottom: 8px; font: var(--t-h3); letter-spacing: -.01em; overflow-wrap: anywhere; border-bottom: var(--hairline); }
+.diff-blocks { display: grid; gap: 14px; }
+.compare-shots .shots { grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 700px) { .compare-shots .shots { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.compare-links { margin-top: 28px; }
+
+/* --- Screenshots side by side (the comp's .shots), each a figure; a missing one is said in words ------ */
+.shots { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 24px; }
+@media (min-width: 800px) { .shots { gap: 24px; } }
+.shot { min-width: 0; }
+.shot-link { display: block; aspect-ratio: 16 / 10; overflow: hidden; background: var(--paper-sunken); border: var(--border); border-radius: var(--r); }
+.shot-link img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.shot-none { display: flex; flex-direction: column; justify-content: center; gap: 6px; aspect-ratio: 16 / 10; padding: 12px; overflow: hidden; font: var(--t-small); color: var(--ink-soft); background: var(--paper-sunken); border: var(--hairline); border-radius: var(--r); }
+.shot-none .vshot-state { font-size: 13px; }
+.shot .evidence { margin-top: 6px; }
+
+/* --- Home: the featured catch (design/comp-home.html "The latest catch, up close") ------------------- */
+.feature { padding: 20px; }
+@media (min-width: 700px) { .feature { padding: 28px; } }
+.feature-summary { max-width: 62ch; margin-top: 10px; font: 500 20px/1.35 var(--font-display); letter-spacing: -.01em; text-wrap: pretty; overflow-wrap: anywhere; }
+.feature .pair { margin-top: 24px; }
+@media (max-width: 699.98px) { .feature-summary { font-size: 18px; } .feature .shot-none p + p { display: none; } }
+
 /* --- Status chips (tokens.css has ok, warn, bad) --------------------------------------------- */
 .chip.muted { color: var(--ink-muted); }
 

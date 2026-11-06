@@ -7,7 +7,7 @@
 import { CAPTURE_MAX_ATTEMPTS } from "../../core/limits";
 import type { PageDetail, RunItem, Stats, VersionItem } from "../../readModel";
 import { MAX_RUNS_SHOWN } from "../../readModel";
-import { DeltaBadge, EvidenceLine, FactsTable, hasDeltaBadge, LAYOUT_ONLY_LINE, StatusChip } from "../components";
+import { CompareForm, DeltaBadge, EvidenceLine, FactsTable, hasDeltaBadge, LAYOUT_ONLY_LINE, StatusChip } from "../components";
 import {
   cronToWords,
   formatUtc,
@@ -480,12 +480,6 @@ function ComparePick(props: { ctx: Ctx; selected: VersionItem }) {
   // To the selected version from the one before it; from the oldest, to the one after it.
   const [fromId, toId] =
     index < versions.length - 1 ? [versions[index + 1]!.id, selected.id] : [selected.id, versions[Math.max(index - 1, 0)]!.id];
-  const options = (chosen: string) =>
-    versions.map((v) => (
-      <option value={v.id} selected={v.id === chosen}>
-        {`${formatUtc(v.captured_at)}${v.is_baseline ? " · baseline" : ""}`}
-      </option>
-    ));
   return (
     <section class="pick-section" aria-labelledby="compare-h">
       <h2 id="compare-h">Compare two versions</h2>
@@ -494,23 +488,7 @@ function ComparePick(props: { ctx: Ctx; selected: VersionItem }) {
       ) : (
         <>
           <p class="page-note">Pick any two versions and see exactly which words changed.</p>
-          <form class="pick card" method="get" action={`${ctx.pageHref}/compare`}>
-            <div class="field">
-              <label for="from">From</label>
-              <select class="input" id="from" name="from">
-                {options(fromId)}
-              </select>
-            </div>
-            <div class="field">
-              <label for="to">To</label>
-              <select class="input" id="to" name="to">
-                {options(toId)}
-              </select>
-            </div>
-            <button class="btn" type="submit">
-              Compare
-            </button>
-          </form>
+          <CompareForm action={`${ctx.pageHref}/compare`} versions={versions} fromId={fromId} toId={toId} />
         </>
       )}
     </section>

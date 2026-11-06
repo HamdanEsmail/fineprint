@@ -9,17 +9,20 @@ import type { Env } from "../env";
 import {
   countChanges,
   countRetiredPagesWithChanges,
+  diffVersions,
   findPage,
   getPageRecord,
   getStats,
   getVersion,
   listChanges,
+  listVersionsForDiff,
   parseTime,
   versionInForce,
   type VersionItem,
 } from "../readModel";
 import { parseAsOfInput } from "./format";
-import { FEED_SIZE, Home } from "./views/home";
+import { CompareView, type CompareState } from "./views/compare";
+import { FEED_SIZE, featuredCatch, Home } from "./views/home";
 import { NotFound, ServerError } from "./views/notFound";
 import { PageView, type AsOf } from "./views/page";
 
@@ -76,9 +79,18 @@ siteRouter.get("/", async (c) => {
     countChanges(c.env, { since, includeRetired: false, excludeLayoutOnly: true }),
     countRetiredPagesWithChanges(c.env),
   ]);
+  // The featured catch is on the newest screen only; it reads its candidates from the feed it is shown above.
+  const featured = before === null ? await featuredCatch(c.env, changes) : null;
   return render(
     c,
-    <Home stats={stats} weekCount={weekCount} changes={changes} before={before} retiredWithChanges={retiredWithChanges} />,
+    <Home
+      stats={stats}
+      weekCount={weekCount}
+      changes={changes}
+      before={before}
+      retiredWithChanges={retiredWithChanges}
+      featured={featured}
+    />,
   );
 });
 
@@ -133,4 +145,46 @@ siteRouter.get("/pages/:id", async (c) => {
       : null;
 
   return render(c, <PageView stats={stats} detail={detail} selected={selected} asOf={asOf} text={text} nowMs={nowMs} />);
+});
+
+// --- Compare view: the diff between two versions -------------------------------------------------
+
+siteRouter.get("/pages/:id/compare", async (c) => {
+  if (!siteEnabled(c.env)) return c.notFound();
+  const pageId = c.req.param("id");
+  // As the page view: the page first, so an unknown page is the ledger's 404 after one query. Then the
+  // stats (six) and the page's versions (one, no text); from= and to= are found among those versions, so a
+  // version this page does not have is the 404 too, and only then is the diff read (one query when it is
+  // stored, or the two texts and two counts and the cache write when it is not).
+  const head = await findPage(c.env, pageId);
+  if (head === null) return render(c, <NotFound />, 404);
+  const [stats, versions] = await Promise.all([getStats(c.env), listVersionsForDiff(c.env, pageId)]);
+  const items = versions.map((v) => v.item);
+
+  const indexOf = (id: string | undefined): number | null => {
+    if (id === undefined || id === "") return null;
+    const i = versions.findIndex((v) => v.row.id === id);
+    return i === -1 ? -1 : i;
+  };
+  let fromIndex = indexOf(c.req.query("from"));
+  let toIndex = indexOf(c.req.query("to"));
+  if (fromIndex === -1 || toIndex === -1) return render(c, <NotFound />, 404);
+
+  const view = (state: CompareState) => <CompareView stats={stats} page={head.page} versions={items} state={state} />;
+  if (versions.length < 2) return render(c, view({ kind: "single" }));
+
+  // Versions are newest first. Without to=, the latest; without from=, the one just before `to` (the one
+  // just after it when `to` is the first version).
+  toIndex ??= 0;
+  fromIndex ??= toIndex + 1 < versions.length ? toIndex + 1 : toIndex - 1;
+  if (fromIndex === toIndex) return render(c, view({ kind: "same", at: items[toIndex]! }));
+  // `from` is the older: a reversed pair is swapped, so the cache key is the one the JSON route uses.
+  if (fromIndex < toIndex) [fromIndex, toIndex] = [toIndex, fromIndex];
+
+  const from = versions[fromIndex]!;
+  const to = versions[toIndex]!;
+  const answer = await diffVersions(c.env, head.page, from.row, to.row);
+  // A version deleted between the two reads.
+  if (answer === null) return render(c, <NotFound />, 404);
+  return render(c, view({ kind: "diff", from: from.item, to: to.item, diff: answer.diff, all: c.req.query("all") === "1" }));
 });

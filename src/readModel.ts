@@ -5,24 +5,31 @@
 // Nothing here reads a version's `text` unless the caller asks for it by name (getVersion and
 // getVersionAsOf, for the JSON version endpoints and the page view's `text=1`): the free plan's 10 ms of
 // CPU a request has no room for it.
-import type { Delta } from "./core/diff";
+import { factsDiff, structuredDiff, type Delta, type FactsDiff, type StructuredDiff } from "./core/diff";
 import { FACTS_PAUSE_USD, PUBLIC_SLOTS, SPEND_PAUSE_USD } from "./core/limits";
+import { normalize } from "./core/normalize";
 import { PRICES, type SpendKind } from "./core/spend";
+import { getCachedDiff, putCachedDiff } from "./db/diffCache";
 import { getPage, getPageWithNoiseCount, publicSlotUsage } from "./db/pages";
-import { countNoiseByReason, countRunsByTrigger, listRunsOfPage } from "./db/runs";
-import type { FactsStatus, PageKind, PageRow, PageStatus, SummarySource, TriggerKind } from "./db/types";
+import { countNoiseBetween, countNoiseByReason, countRunsByTrigger, listRunsOfPage } from "./db/runs";
+import type { CaptureStatus, FactsStatus, PageKind, PageRow, PageStatus, SummarySource, TriggerKind } from "./db/types";
 import {
   baselineVersion,
   countChanges as countChangeRows,
+  countVersionsBetween,
+  getVersion as getVersionRow,
   getVersionOfPage,
   LAYOUT_ONLY_SQL,
   listChanges as listChangeRows,
   listVersions,
   NOT_RETIRED_SQL,
+  PREVIOUS_OF_V,
   versionAsOf,
+  type VersionSummary,
+  type WithTrigger,
 } from "./db/versions";
 import type { Env } from "./env";
-import { objectUrls, parseDelta, thumbUrl, versionJson, versionSummaryJson } from "./handlers/versionJson";
+import { objectUrls, parseDelta, parseFacts, thumbUrl, versionJson, versionSummaryJson } from "./handlers/versionJson";
 
 // --- Times ------------------------------------------------------------------------------------
 
@@ -388,4 +395,266 @@ export async function getVersionAsOf(env: Env, pageId: string, atIso: string): P
  */
 export function versionInForce<T extends { captured_at: string }>(versionsNewestFirst: readonly T[], atIso: string): T | null {
   return versionsNewestFirst.find((v) => v.captured_at <= atIso) ?? null;
+}
+
+// --- Diff -------------------------------------------------------------------------------------
+//
+// The diff of two versions (spec 4.7), as GET /api/pages/:id/diff answers it, the compare view shows it and
+// the home's featured catch reads one block of it. The one expensive answer: it is stored in `diff_cache`
+// under the two version ids so later requests only read it. It is stored only once both versions are final
+// (`complete` or `failed`, with no facts run in flight) and the `to` version's summary is filled: a version's
+// text never changes, but its screenshot, source, facts and summary are filled in after it is inserted (a
+// capture takes minutes, the facts queue up to an hour), so the diff of a version still being captured is
+// computed again on every request and a stored one would freeze it without them. What a stored diff also
+// depends on (the page's ignore patterns and label) is dropped from the cache when it is edited.
+
+/** One end of a diff: the version, its stored copies as public urls, how it was read and its facts status. */
+export type DiffEnd = {
+  version_id: string;
+  captured_at: string;
+  screenshot_url: string | null;
+  source_url: string | null;
+  trigger: TriggerKind | null;
+  facts_status: FactsStatus;
+};
+
+/** The diff of two versions of a page, as `GET /api/pages/:id/diff` returns it. */
+export type Diff = {
+  page: { id: string; url: string; label: string };
+  from: DiffEnd;
+  to: DiffEnd;
+  /** The `to` version's one-line summary (TinyFish's, else the diff line): the latest hop's. */
+  summary: string | null;
+  summary_source: SummarySource | null;
+  blocks: StructuredDiff;
+  facts: FactsDiff | null;
+  /** Versions captured in (from, to]. */
+  hops: number;
+  /** Runs suppressed as noise received in (from, to]. */
+  noise_suppressed_between: number;
+};
+
+/** A version as a diff reads it: every column but the text, with its run's trigger. */
+export type DiffSide = WithTrigger<VersionSummary>;
+
+/** What a diff needs of its page: the envelope's id, url and label, and the ignore patterns the texts are normalized with. */
+export type DiffPage = { id: string; url: string; label: string; ignore_patterns: string[] };
+
+/**
+ * A diff as JSON text and as an object. A stored diff is served as the text it was stored with and parsed
+ * only when the object is asked for; a fresh one is serialized once, for the cache and the JSON route alike.
+ */
+export type DiffAnswer = { readonly json: string; readonly diff: Diff };
+
+/**
+ * True when nothing a stored diff shows of a version will change any more: its capture is terminal
+ * (`complete` or `failed`) and no facts run is in flight for it (`agent_run_id` set, a run id or a claim,
+ * with no facts yet: a version can hold the facts slot while `failed`, or `complete` after its attempts).
+ * A `pending`, `partial` or `awaiting_facts` version is still gaining its screenshot, source or facts.
+ */
+const isFinal = (v: Pick<VersionSummary, "capture_status" | "agent_run_id" | "facts_json">): boolean =>
+  (v.capture_status === "complete" || v.capture_status === "failed") && !(v.agent_run_id !== null && v.facts_json === null);
+
+// A version's trigger never changes, so a stored diff keeps it. Its facts status does until the version is
+// final, and a diff is stored only once both of its versions are.
+const diffEnd = (env: Env, v: DiffSide): DiffEnd => ({
+  version_id: v.id,
+  captured_at: v.captured_at,
+  ...objectUrls(env, v),
+  trigger: v.trigger_kind,
+  facts_status: v.facts_status,
+});
+
+/**
+ * The diff of two resolved versions, or null if a version is gone or, with `maxTextChars`, either text is
+ * longer than that. `hops` counts the versions captured in (from, to] and `noise_suppressed_between` the
+ * suppressed runs received in the same interval. Blocks come from the normalized texts, normalized with the
+ * page's current ignore patterns, as the change gate does. One version on both sides is an empty diff and
+ * reads no text.
+ */
+async function buildDiff(env: Env, page: DiffPage, from: DiffSide, to: DiffSide, maxTextChars?: number): Promise<Diff | null> {
+  let blocks: StructuredDiff = { added: [], removed: [], changed: [] };
+  let hops = 0;
+  let noiseBetween = 0;
+
+  if (from.id !== to.id) {
+    const db = env.DB;
+    const [fromFull, toFull, hopCount, noiseCount] = await Promise.all([
+      getVersionRow(db, from.id),
+      getVersionRow(db, to.id),
+      countVersionsBetween(db, page.id, from.captured_at, to.captured_at),
+      countNoiseBetween(db, page.id, from.captured_at, to.captured_at),
+    ]);
+    if (!fromFull || !toFull) return null;
+    if (maxTextChars !== undefined && (fromFull.text.length > maxTextChars || toFull.text.length > maxTextChars)) return null;
+    blocks = structuredDiff(normalize(fromFull.text, page.ignore_patterns).text, normalize(toFull.text, page.ignore_patterns).text);
+    hops = hopCount;
+    noiseBetween = noiseCount;
+  }
+
+  return {
+    page: { id: page.id, url: page.url, label: page.label },
+    from: diffEnd(env, from),
+    to: diffEnd(env, to),
+    summary: to.summary,
+    summary_source: to.summary_source,
+    blocks,
+    facts: factsDiff(parseFacts(from.facts_json), parseFacts(to.facts_json)),
+    hops,
+    noise_suppressed_between: noiseBetween,
+  };
+}
+
+function storedAnswer(json: string): DiffAnswer {
+  let parsed: Diff | undefined;
+  return {
+    json,
+    get diff(): Diff {
+      return (parsed ??= JSON.parse(json) as Diff);
+    },
+  };
+}
+
+function freshAnswer(diff: Diff): DiffAnswer {
+  let text: string | undefined;
+  return {
+    diff,
+    get json(): string {
+      return (text ??= JSON.stringify(diff));
+    },
+  };
+}
+
+/**
+ * The diff of two versions of a page that the caller has already read (the JSON route resolves two times to
+ * them, the compare view picks them from the page's versions). `from` is the older of the two; the cache is
+ * keyed by the pair in that order. A stored answer is served as it was stored (the viewer never recomputes);
+ * an answer for a version still being captured is computed fresh, so it shows the screenshots and facts that
+ * have arrived, and is not kept. Null when a version is gone, or when it is not stored and `maxTextChars` is
+ * given and either text is longer (the home's featured catch never diffs a large page on its own request).
+ */
+export async function diffVersions(
+  env: Env,
+  page: DiffPage,
+  from: DiffSide,
+  to: DiffSide,
+  opts: { maxTextChars?: number } = {},
+): Promise<DiffAnswer | null> {
+  const db = env.DB;
+  // The `to` version's summary is part of the answer, so a change whose summary is not filled yet waits too.
+  const final = isFinal(from) && isFinal(to) && (to.is_baseline === 1 || to.summary !== null);
+  if (final) {
+    const cached = await getCachedDiff(db, from.id, to.id);
+    if (cached !== null) return storedAnswer(cached);
+  }
+
+  const diff = await buildDiff(env, page, from, to, opts.maxTextChars);
+  if (diff === null) return null;
+  const answer = freshAnswer(diff);
+  if (final) {
+    try {
+      await putCachedDiff(db, from.id, to.id, answer.json);
+    } catch (err) {
+      // The answer is right whether or not it could be kept; the next request computes it again.
+      console.error("diff cache write failed", err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 200) : "unknown error");
+    }
+  }
+  return answer;
+}
+
+/**
+ * The diff from one version of a page to another, by their ids (`from` the older): the page and the two
+ * versions are read (three queries at once), then diffVersions. Null when the page is unknown, either
+ * version is not one of its versions, or diffVersions says null.
+ */
+export async function getDiff(
+  env: Env,
+  pageId: string,
+  fromVersionId: string,
+  toVersionId: string,
+  opts: { maxTextChars?: number } = {},
+): Promise<Diff | null> {
+  const db = env.DB;
+  const [page, from, to] = await Promise.all([
+    getPage(db, pageId),
+    getVersionOfPage(db, pageId, fromVersionId, false),
+    getVersionOfPage(db, pageId, toVersionId, false),
+  ]);
+  if (!page || !from || !to) return null;
+  return (await diffVersions(env, pageToJson(page), from, to, opts))?.diff ?? null;
+}
+
+/**
+ * A page's versions as the compare view reads them: newest first, without text, each as the diff reads it
+ * (`row`) and as the API shows it (`item`). One query.
+ */
+export async function listVersionsForDiff(env: Env, pageId: string): Promise<{ row: DiffSide; item: VersionItem }[]> {
+  const rows = await listVersions(env.DB, pageId);
+  return rows.map((row) => ({ row, item: versionSummaryJson(env, row) }));
+}
+
+/** What the home's featured catch needs to know about a change before it reads its diff. */
+export type FeatureCandidate = {
+  /** The change (a version that is not a baseline). */
+  id: string;
+  capture_status: CaptureStatus;
+  page_status: PageStatus | null;
+  /** The version before it, the `from` of the diff. */
+  from: { id: string; captured_at: string; screenshot_url: string | null; thumb_url: string | null; capture_status: CaptureStatus };
+  /** The lengths of the two texts, in characters. */
+  from_length: number;
+  to_length: number;
+  /** The length of the stored diff of the pair, or null when none is stored. */
+  cached_length: number | null;
+};
+
+/**
+ * For each of the given changes, the version before it, the lengths of the two texts and of the stored diff
+ * of the pair, in one query that reads no text out (SQLite counts the characters). Changes without a
+ * previous version, and unknown ids, are left out. At most 100 ids (D1's bound parameters).
+ */
+export async function featureCandidates(env: Env, versionIds: string[]): Promise<FeatureCandidate[]> {
+  const ids = versionIds.slice(0, 100);
+  if (ids.length === 0) return [];
+  const { results } = await env.DB.prepare(
+    `SELECT v.id, v.capture_status, pg.status AS page_status,
+       p.id AS from_id, p.captured_at AS from_at, p.screenshot_key AS from_screenshot_key, p.html_key AS from_html_key,
+       p.thumb_key AS from_thumb_key, p.capture_status AS from_capture_status,
+       COALESCE(length(v.text), 0) AS to_length, COALESCE(length(p.text), 0) AS from_length,
+       (SELECT length(d.json) FROM diff_cache d WHERE d.from_version_id = p.id AND d.to_version_id = v.id) AS cached_length
+     FROM versions v
+       JOIN versions p ON p.id = (SELECT w.id ${PREVIOUS_OF_V})
+       JOIN pages pg ON pg.id = v.page_id
+     WHERE v.id IN (${ids.map(() => "?").join(", ")})`,
+  )
+    .bind(...ids)
+    .all<{
+      id: string;
+      capture_status: CaptureStatus;
+      page_status: PageStatus | null;
+      from_id: string;
+      from_at: string;
+      from_screenshot_key: string | null;
+      from_html_key: string | null;
+      from_thumb_key: string | null;
+      from_capture_status: CaptureStatus;
+      to_length: number;
+      from_length: number;
+      cached_length: number | null;
+    }>();
+  return results.map((r) => ({
+    id: r.id,
+    capture_status: r.capture_status,
+    page_status: r.page_status,
+    from: {
+      id: r.from_id,
+      captured_at: r.from_at,
+      screenshot_url: objectUrls(env, { id: r.from_id, screenshot_key: r.from_screenshot_key, html_key: r.from_html_key }).screenshot_url,
+      thumb_url: thumbUrl(env, { id: r.from_id, thumb_key: r.from_thumb_key }),
+      capture_status: r.from_capture_status,
+    },
+    from_length: r.from_length,
+    to_length: r.to_length,
+    cached_length: r.cached_length,
+  }));
 }

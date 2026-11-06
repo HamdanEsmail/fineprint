@@ -3,36 +3,18 @@
 // and the stats. All of it is GET and JSON; CORS is added for /api/* in index.ts.
 //
 // The free plan allows 10 ms of CPU a request, so nothing here loops over pages with a query
-// each, and no list reads a version's `text`. The one expensive answer, a diff, is stored in
-// `diff_cache` under the two version ids so later requests only read it. It is stored only once
-// both versions are final (`complete` or `failed`, with no facts run in flight) and the `to`
-// version's summary is filled: a version's text never changes, but its screenshot, source, facts
-// and summary are filled in after it is inserted (a capture takes minutes, the facts queue up to an
-// hour), so the diff of a version still being captured is computed again on every request and a
-// stored one would freeze it without them. What a stored diff also depends on (the page's ignore
-// patterns and label) is dropped from the cache when it is edited. Every version is shown through
-// the one mapper in ./versionJson.ts.
+// each, and no list reads a version's `text`. The one expensive answer, a diff, is computed and
+// stored in `diff_cache` by src/readModel.ts (diffVersions), which the site's compare view calls
+// too; see there for when a diff is kept. Every version is shown through the one mapper in
+// ./versionJson.ts.
 import { Hono } from "hono";
 import type { Context } from "hono";
-import { factsDiff, structuredDiff, type FactsDiff, type StructuredDiff } from "../core/diff";
-import { normalize } from "../core/normalize";
-import { getCachedDiff, putCachedDiff } from "../db/diffCache";
 import { getPage, listPages } from "../db/pages";
-import { countNoiseBetween } from "../db/runs";
-import type { FactsStatus, PageRow, SummarySource, TriggerKind } from "../db/types";
-import {
-  baselineVersion,
-  countVersionsBetween,
-  getVersion,
-  listAllVersionSummaries,
-  versionSummaryAsOf,
-  type VersionSummary,
-  type WithTrigger,
-} from "../db/versions";
+import { baselineVersion, listAllVersionSummaries, versionSummaryAsOf, type VersionSummary, type WithTrigger } from "../db/versions";
 import type { Env } from "../env";
-import { getStats, getVersion as readVersion, getVersionAsOf, listChanges, parseTime } from "../readModel";
+import { diffVersions, getStats, getVersion as readVersion, getVersionAsOf, listChanges, parseTime } from "../readModel";
 import { pageToJson } from "./pages";
-import { objectUrls, parseFacts, versionSummaryJson } from "./versionJson";
+import { versionSummaryJson } from "./versionJson";
 
 type AppContext = Context<{ Bindings: Env }>;
 
@@ -44,15 +26,6 @@ historyRouter.onError((err, c) => {
 });
 
 // --- Helpers ----------------------------------------------------------------------------------
-
-/**
- * True when nothing a stored diff shows of a version will change any more: its capture is terminal
- * (`complete` or `failed`) and no facts run is in flight for it (`agent_run_id` set, a run id or a claim,
- * with no facts yet: a version can hold the facts slot while `failed`, or `complete` after its attempts).
- * A `pending`, `partial` or `awaiting_facts` version is still gaining its screenshot, source or facts.
- */
-const isFinal = (v: Pick<VersionSummary, "capture_status" | "agent_run_id" | "facts_json">): boolean =>
-  (v.capture_status === "complete" || v.capture_status === "failed") && !(v.agent_run_id !== null && v.facts_json === null);
 
 const notFound = (c: AppContext): Response => c.json({ error: "not_found" }, 404);
 
@@ -87,83 +60,6 @@ historyRouter.get("/pages/:id/as-of", async (c) => {
 
 // --- Diff -------------------------------------------------------------------------------------
 
-type DiffEnd = {
-  version_id: string;
-  captured_at: string;
-  screenshot_url: string | null;
-  source_url: string | null;
-  trigger: TriggerKind | null;
-  facts_status: FactsStatus;
-};
-
-type DiffJson = {
-  page: { id: string; url: string; label: string };
-  from: DiffEnd;
-  to: DiffEnd;
-  summary: string | null;
-  summary_source: SummarySource | null;
-  blocks: StructuredDiff;
-  facts: FactsDiff | null;
-  hops: number;
-  noise_suppressed_between: number;
-};
-
-// A version's trigger never changes, so a stored diff keeps it. Its facts status does until the version is
-// final, and a diff is stored only once both of its versions are.
-const diffEnd = (env: Env, v: WithTrigger<VersionSummary>): DiffEnd => ({
-  version_id: v.id,
-  captured_at: v.captured_at,
-  ...objectUrls(env, v),
-  trigger: v.trigger_kind,
-  facts_status: v.facts_status,
-});
-
-/**
- * The diff of two resolved versions (spec 4.7), or null if a version is gone. `hops` counts the
- * versions captured in (from, to] and `noise_suppressed_between` the suppressed runs received in
- * the same interval. Blocks come from the normalized texts, normalized with the page's current
- * ignore patterns, as the change gate does. One version on both sides is an empty diff and reads
- * no text.
- */
-async function buildDiff(
-  env: Env,
-  page: PageRow,
-  from: WithTrigger<VersionSummary>,
-  to: WithTrigger<VersionSummary>,
-): Promise<DiffJson | null> {
-  let blocks: StructuredDiff = { added: [], removed: [], changed: [] };
-  let hops = 0;
-  let noiseBetween = 0;
-
-  if (from.id !== to.id) {
-    const db = env.DB;
-    const [fromFull, toFull, hopCount, noiseCount] = await Promise.all([
-      getVersion(db, from.id),
-      getVersion(db, to.id),
-      countVersionsBetween(db, page.id, from.captured_at, to.captured_at),
-      countNoiseBetween(db, page.id, from.captured_at, to.captured_at),
-    ]);
-    if (!fromFull || !toFull) return null;
-    const patterns = pageToJson(page).ignore_patterns;
-    blocks = structuredDiff(normalize(fromFull.text, patterns).text, normalize(toFull.text, patterns).text);
-    hops = hopCount;
-    noiseBetween = noiseCount;
-  }
-
-  return {
-    page: { id: page.id, url: page.url, label: page.label },
-    from: diffEnd(env, from),
-    to: diffEnd(env, to),
-    // The latest hop's summary: the `to` version's stored one-line summary (TinyFish's, else the diff line).
-    summary: to.summary,
-    summary_source: to.summary_source,
-    blocks,
-    facts: factsDiff(parseFacts(from.facts_json), parseFacts(to.facts_json)),
-    hops,
-    noise_suppressed_between: noiseBetween,
-  };
-}
-
 historyRouter.get("/pages/:id/diff", async (c) => {
   const db = c.env.DB;
   const page = await getPage(db, c.req.param("id"));
@@ -181,28 +77,11 @@ historyRouter.get("/pages/:id/diff", async (c) => {
   // only when the range is reversed (R19). Two ends in one version are an empty diff.
   if (from.id !== to.id && from.captured_at > to.captured_at) return c.json({ error: "invalid_range" }, 400);
 
-  // A diff is kept only once both versions are final, and only a kept one is read: a stored answer
-  // is served as it was stored (the viewer never recomputes), and an answer for a version still
-  // being captured is computed fresh, so it shows the screenshots and facts that have arrived. The
-  // `to` version's summary is part of the answer, so a change whose summary is not filled yet waits too.
-  const final = isFinal(from) && isFinal(to) && (to.is_baseline === 1 || to.summary !== null);
-  if (final) {
-    const cached = await getCachedDiff(db, from.id, to.id);
-    if (cached !== null) return c.body(cached, 200, { "Content-Type": "application/json" });
-  }
-
-  const diff = await buildDiff(c.env, page, from, to);
-  if (diff === null) return notFound(c);
-  const json = JSON.stringify(diff);
-  if (final) {
-    try {
-      await putCachedDiff(db, from.id, to.id, json);
-    } catch (err) {
-      // The answer is right whether or not it could be kept; the next request computes it again.
-      console.error("diff cache write failed", err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 200) : "unknown error");
-    }
-  }
-  return c.body(json, 200, { "Content-Type": "application/json" });
+  // The same diff, from the same cache, as the site's compare view (src/readModel.ts diffVersions): a stored
+  // answer is served as the text it was stored with.
+  const answer = await diffVersions(c.env, pageToJson(page), from, to);
+  if (answer === null) return notFound(c);
+  return c.body(answer.json, 200, { "Content-Type": "application/json" });
 });
 
 // --- Change feed ------------------------------------------------------------------------------

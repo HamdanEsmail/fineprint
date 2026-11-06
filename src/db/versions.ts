@@ -330,7 +330,7 @@ export type SummaryCandidate = Pick<VersionRow, "id" | "page_id" | "captured_at"
 };
 
 /** The version of the same page captured just before `v` (ties by insertion), as a correlated subquery's FROM and WHERE. */
-const PREVIOUS_OF_V = `FROM versions w
+export const PREVIOUS_OF_V = `FROM versions w
   WHERE w.page_id = v.page_id AND w.id != v.id
     AND (w.captured_at < v.captured_at OR (w.captured_at = v.captured_at AND w.rowid < v.rowid))
   ORDER BY w.captured_at DESC, w.rowid DESC LIMIT 1`;

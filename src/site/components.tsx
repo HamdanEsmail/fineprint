@@ -3,8 +3,10 @@
 // ever emitted as markup.
 import type { Child } from "hono/jsx";
 import type { Delta, Fact } from "../core/diff";
-import type { PageStatus, TriggerKind } from "../db/types";
-import { deltaParts, formatUtc, sourceLabel, triggerLabel, webHref } from "./format";
+import { CAPTURE_MAX_ATTEMPTS } from "../core/limits";
+import type { CaptureStatus, PageStatus, TriggerKind } from "../db/types";
+import type { VersionItem } from "../readModel";
+import { deltaParts, formatUtc, ownPath, sourceLabel, triggerLabel, webHref } from "./format";
 
 /**
  * The last line of every record: `Source: <host/path> · read 5 Nov 2026, 09:12 UTC · Monitor (webhook)`.
@@ -149,5 +151,95 @@ export function Notice(props: { children: Child }) {
         <p>{props.children}</p>
       </div>
     </div>
+  );
+}
+
+/** What a screenshot figure needs of a version: when it was read, its stored copies and how its capture went. */
+export type ShotOf = {
+  captured_at: string;
+  screenshot_url: string | null;
+  thumb_url: string | null;
+  source_url: string | null;
+  capture_status: CaptureStatus;
+};
+
+/**
+ * A version's screenshot as a figure: the thumbnail (the full image when there is no thumbnail), by path,
+ * linking to the full image, with the caption "The page as it was read on {time}". Without a screenshot the
+ * box says so in words, never as a broken image: "Taking the screenshot…" while the capture may still bring
+ * one (not on a page that is no longer watched, whose captures the hourly repair skips), else "Screenshot
+ * unavailable." with the stored source and the live page. `children` goes under the caption (an evidence line).
+ */
+export function ShotFigure(props: { v: ShotOf; pageLabel: string; liveUrl: string; gone: boolean; children?: Child }) {
+  const { v } = props;
+  const time = formatUtc(v.captured_at);
+  const full = ownPath(v.screenshot_url);
+  if (full !== null) {
+    return (
+      <figure class="shot">
+        <a class="shot-link" href={full} data-full="">
+          <img src={ownPath(v.thumb_url) ?? full} width={640} height={400} loading="lazy" decoding="async" alt={`Screenshot of ${props.pageLabel} as recorded ${time}`} />
+        </a>
+        <figcaption>{`The page as it was read on ${time}`}</figcaption>
+        {props.children}
+      </figure>
+    );
+  }
+  const pending = !props.gone && v.capture_status !== "complete" && v.capture_status !== "failed";
+  const source = ownPath(v.source_url);
+  const live = webHref(props.liveUrl);
+  return (
+    <figure class="shot">
+      <div class="shot-none" role={pending ? "status" : undefined}>
+        {pending ? (
+          <>
+            <p class="vshot-state">Taking the screenshot…</p>
+            <p>{`If it does not arrive, the hourly repair tries again, up to ${CAPTURE_MAX_ATTEMPTS} attempts in all.`}</p>
+          </>
+        ) : (
+          <>
+            <p class="vshot-state">Screenshot unavailable.</p>
+            <p class="vshot-links">
+              {source === null ? null : <a href={source}>Stored source</a>}
+              {live === null ? <span>Live page: {props.liveUrl}</span> : <a href={live}>Live page</a>}
+            </p>
+          </>
+        )}
+      </div>
+      <figcaption>{`The page as it was read on ${time}`}</figcaption>
+      {props.children}
+    </figure>
+  );
+}
+
+/**
+ * The GET form to a page's compare view: two labelled selects of the page's version times (`from`, `to`,
+ * newest first, the baseline marked) and a Compare button.
+ */
+export function CompareForm(props: { action: string; versions: VersionItem[]; fromId: string; toId: string }) {
+  const options = (chosen: string) =>
+    props.versions.map((v) => (
+      <option value={v.id} selected={v.id === chosen}>
+        {`${formatUtc(v.captured_at)}${v.is_baseline ? " · baseline" : ""}`}
+      </option>
+    ));
+  return (
+    <form class="pick card" method="get" action={props.action}>
+      <div class="field">
+        <label for="from">From</label>
+        <select class="input" id="from" name="from">
+          {options(props.fromId)}
+        </select>
+      </div>
+      <div class="field">
+        <label for="to">To</label>
+        <select class="input" id="to" name="to">
+          {options(props.toId)}
+        </select>
+      </div>
+      <button class="btn" type="submit">
+        Compare
+      </button>
+    </form>
   );
 }
