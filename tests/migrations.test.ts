@@ -143,7 +143,7 @@ describe("migration 0006: summaries and the pull backoff", () => {
       versionColumns: await all<{ name: string }>("PRAGMA table_info(versions)"),
     };
 
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+    await applyD1Migrations(env.DB, upTo("0007"));
 
     const pageColumns = await all<{ name: string; type: string; notnull: number; dflt_value: string | null }>("PRAGMA table_info(pages)");
     const versionColumns = await all<{ name: string; type: string; notnull: number; dflt_value: string | null }>("PRAGMA table_info(versions)");
@@ -168,6 +168,39 @@ describe("migration 0006: summaries and the pull backoff", () => {
     expect(await all("SELECT * FROM runs")).toEqual(before.runs);
     // A diff stored under the old finality rule may hold an end whose facts run was still in flight.
     expect(await all("SELECT * FROM diff_cache")).toEqual([]);
+  });
+});
+
+describe("migration 0007: site fields", () => {
+  it("only adds delta_json and thumb_key to versions; every existing value and table is kept", async () => {
+    await applyD1Migrations(env.DB, upTo("0007"));
+    await page("p1", "pricing");
+    await runRow("r1", "p1", 1);
+    await version("v1", "p1", null);
+    await version("v2", "p1", "r1", { is_baseline: 0, captured_at: "2026-11-02T00:00:00.000Z", summary: "s", summary_source: "diff" });
+    await run("INSERT INTO diff_cache (from_version_id, to_version_id, json, created_at) VALUES ('v1', 'v2', '{}', 'x')");
+    const tables = ["pages", "runs", "diff_cache", "spend"];
+    const before = {
+      rows: await Promise.all(tables.map((t) => all(`SELECT * FROM ${t} ORDER BY rowid`))),
+      columns: await Promise.all(tables.map((t) => all(`PRAGMA table_info(${t})`))),
+      versions: await all("SELECT rowid AS rid, * FROM versions ORDER BY rowid"),
+      versionColumns: await all<{ name: string }>("PRAGMA table_info(versions)"),
+    };
+
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+
+    const versionColumns = await all<{ name: string; type: string; notnull: number; dflt_value: string | null }>("PRAGMA table_info(versions)");
+    expect(versionColumns.slice(0, before.versionColumns.length)).toEqual(before.versionColumns);
+    expect(versionColumns.slice(before.versionColumns.length).map((c) => [c.name, c.type, c.notnull, c.dflt_value])).toEqual([
+      ["delta_json", "TEXT", 0, null],
+      ["thumb_key", "TEXT", 0, null],
+    ]);
+    expect(await all("SELECT rowid AS rid, * FROM versions ORDER BY rowid")).toEqual(
+      before.versions.map((v) => ({ ...v, delta_json: null, thumb_key: null })),
+    );
+    // Nothing else changes: not the other tables' columns or rows, and the diff cache is kept.
+    expect(await Promise.all(tables.map((t) => all(`SELECT * FROM ${t} ORDER BY rowid`)))).toEqual(before.rows);
+    expect(await Promise.all(tables.map((t) => all(`PRAGMA table_info(${t})`)))).toEqual(before.columns);
   });
 });
 

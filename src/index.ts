@@ -17,6 +17,7 @@ const app = new Hono<{ Bindings: Env }>();
 // too, so a page elsewhere can fetch them; they keep their own sandbox and nosniff headers.
 app.use("/api/*", cors());
 app.use("/shots/*", cors());
+app.use("/thumbs/*", cors());
 app.use("/sources/*", cors());
 
 app.route("/api/pages", pagesRouter);

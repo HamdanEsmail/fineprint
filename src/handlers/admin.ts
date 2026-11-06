@@ -11,10 +11,11 @@ import { changedRunsForReplay, clearNoise, markNoise } from "../db/runs";
 import { deleteCachedDiffsOfPage } from "../db/diffCache";
 import { clearPullFailures, getPage, listPages, notePullFailure, setPageStatusIf, updatePage } from "../db/pages";
 import type { VersionRow } from "../db/types";
-import { baselineVersion, getVersion, insertVersion, latestVersion } from "../db/versions";
+import { baselineVersion, countVersionsWithoutThumb, getVersion, insertVersion, latestVersion, versionsWithoutThumb } from "../db/versions";
 import type { Env } from "../env";
 import { recordMonitorRun, type MonitorRun } from "../record";
-import { fillSummaries, requestSummary } from "../summary";
+import { fillDeltas, fillSummaries, requestSummary } from "../summary";
+import { thumbnailFromScreenshot } from "../thumbs";
 import { TinyFishError } from "../tinyfish/client";
 import { deleteMonitor, runMonitorNow, updateMonitor } from "../tinyfish/monitor";
 import { codeOf, pageToJson, readBody } from "./pages";
@@ -52,7 +53,14 @@ async function readRaw(store: R2Bucket, key: string): Promise<StoredRun | null> 
 }
 
 /** What the replay decided about one run. */
-type ReplayDecision = "existing_version" | "created" | "normalized_identical" | "partial_render" | "flap" | "skipped_unreadable";
+type ReplayDecision =
+  | "existing_version"
+  | "created"
+  | "normalized_identical"
+  | "partial_render"
+  | "layout_hold"
+  | "flap"
+  | "skipped_unreadable";
 
 /** The gate's verdict as a replay decision. */
 function decisionOf(verdict: Verdict): Exclude<ReplayDecision, "existing_version"> {
@@ -63,6 +71,8 @@ function decisionOf(verdict: Verdict): Exclude<ReplayDecision, "existing_version
       return verdict.reason;
     case "partial_suspect":
       return "partial_render";
+    case "layout_hold":
+      return "layout_hold";
     case "fetch_error":
       return "skipped_unreadable";
   }
@@ -71,16 +81,16 @@ function decisionOf(verdict: Verdict): Exclude<ReplayDecision, "existing_version
 /**
  * Walks the page's `changed` runs that kept a raw body, oldest first, against a chain that starts at
  * the baseline version, and decides each one again with the gate as it is now (src/core/gate.ts: the
- * normalization, the partial-render guard and flap suppression, as of the run's own receipt time). The
- * body may be a webhook payload or the 201 body of a run-now pull. A run that was a suspect read is
- * counted as suppressed (`partial_render`); the replay schedules no confirm reads.
+ * normalization, the partial-render guard, the layout hold and flap suppression, as of the run's own receipt
+ * time). The body may be a webhook payload or the 201 body of a run-now pull. A run that was a suspect read
+ * is counted as suppressed (`partial_render` or `layout_hold`); the replay schedules no confirm reads.
  * - a run that already made a version is left alone and the chain moves to that version, without its
  *   raw body being read. With `?would_now_be=1` the body is read and the answer also says what the gate
  *   would decide for it now (`would_now_be`); that is opt-in because it normalizes every such run, which
  *   does not fit the 10 ms CPU budget for a page with a long history. Either way nothing is changed;
  * - a body that is missing, unreadable, empty or carries an error is skipped (counted nowhere);
- * - a read that normalizes to the chain's text, is a suspect partial render or repeats a text of the
- *   last 72 hours is suppressed (and marked as noise, with that reason, if it was not);
+ * - a read that normalizes to the chain's text, is a suspect partial render or layout hold, or repeats a
+ *   text of the last 72 hours is suppressed (and marked as noise, with that reason, if it was not);
  * - any other read becomes a version, dated by the run's receipt time, with the note
  *   `created by replay on <iso>` (after any note of the gate's own), left `pending` with
  *   `capture_error "replayed"` for the hourly repair, and its run stops counting as noise. Its summary
@@ -150,8 +160,8 @@ adminRouter.post("/pages/:id/replay", adminOnly, async (c) => {
     }
 
     const verdict = await judge(stored, run.received_at);
-    if (verdict.kind === "suppressed" || verdict.kind === "partial_suspect") {
-      const reason = verdict.kind === "partial_suspect" ? "partial_render" : verdict.reason;
+    if (verdict.kind === "suppressed" || verdict.kind === "partial_suspect" || verdict.kind === "layout_hold") {
+      const reason = verdict.kind === "suppressed" ? verdict.reason : decisionOf(verdict);
       suppressed++;
       if (run.noise_suppressed !== 1 || run.noise_reason !== reason) {
         await beforeWrite();
@@ -214,6 +224,54 @@ adminRouter.post("/pages/:id/replay", adminOnly, async (c) => {
 adminRouter.post("/admin/backfill-summaries", adminOnly, async (c) => {
   const versionId = c.req.query("version");
   return c.json(await fillSummaries(c.env, versionId === undefined ? {} : { versionId }));
+});
+
+// --- Deltas -------------------------------------------------------------------------------------
+
+/**
+ * Fills the delta (block and fact counts, and the layout-only label) of non-baseline versions that have a
+ * summary and no delta (src/summary.ts), and answers `{filled, rebuilt, facts_filled, remaining, oversized}`.
+ * Computing a version's delta also rebuilds its diff summary under the line rule (`rebuilt`), once, since
+ * each version gets its delta once; TinyFish summaries are never touched. The facts part of a delta is added
+ * once both of its versions have stored facts (`facts_filled`). `?version=<id>` fills that one version,
+ * whatever its size; otherwise the call works within the same budget as the summary fill and lists in
+ * `oversized` the versions to fill with `?version=`. So the one-off backfill is this route called until
+ * `filled` is 0, then once with `?version=` for each id in `oversized`. The hourly cron calls it while any
+ * delta is missing.
+ */
+adminRouter.post("/admin/backfill-deltas", adminOnly, async (c) => {
+  const versionId = c.req.query("version");
+  return c.json(await fillDeltas(c.env, versionId === undefined ? {} : { versionId }));
+});
+
+// --- Thumbnails ---------------------------------------------------------------------------------
+
+const THUMBS_DEFAULT = 10;
+const THUMBS_MAX = 20;
+
+/**
+ * Makes thumbnails for versions that have a stored screenshot and no thumbnail, newest first, at most
+ * `?limit=` (default 10, at most 20), in one browser session (one `screenshot` spend unit), and answers
+ * `{made, remaining}`. Nothing is opened at the spend pause (`reason: "spend_paused"`) or when none is
+ * missing. A version whose image did not load stays without one, so a backfill is this route called until
+ * `remaining` is 0 or `made` is 0.
+ */
+adminRouter.post("/admin/thumbs", adminOnly, async (c) => {
+  const raw = Number(c.req.query("limit") ?? THUMBS_DEFAULT);
+  const limit = Number.isFinite(raw) ? Math.min(THUMBS_MAX, Math.max(1, Math.trunc(raw))) : THUMBS_DEFAULT;
+  const db = c.env.DB;
+  if (await spendPaused(db)) {
+    return c.json({ made: 0, remaining: await countVersionsWithoutThumb(db), reason: "spend_paused" });
+  }
+  const ids = await versionsWithoutThumb(db, limit);
+  let made = 0;
+  try {
+    made = await thumbnailFromScreenshot(c.env, ids);
+  } catch (err) {
+    logFailure("thumbs: the browser session failed", err);
+    return c.json({ error: "browser_failed", reason: codeOf(err) }, 502);
+  }
+  return c.json({ made, remaining: await countVersionsWithoutThumb(db) });
 });
 
 // --- Retire a page --------------------------------------------------------------------------------

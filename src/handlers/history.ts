@@ -236,8 +236,7 @@ historyRouter.get("/changes", async (c) => {
     // retired=0 leaves out the pages retired for unreliable reads; without it they stay in.
     includeRetired: c.req.query("retired") !== "0",
   });
-  // The page's kind is the site's; the JSON items stay as they were.
-  return c.json({ changes: items.map(({ kind: _kind, ...item }) => item) });
+  return c.json({ changes: items });
 });
 
 // --- Export -----------------------------------------------------------------------------------
@@ -264,8 +263,4 @@ historyRouter.get("/export.json", async (c) => {
 
 // --- Stats ------------------------------------------------------------------------------------
 
-historyRouter.get("/stats", async (c) => {
-  // `changes` (real changes outside retired pages) is the site's; the JSON stays as it was.
-  const { changes: _changes, ...stats } = await getStats(c.env);
-  return c.json(stats);
-});
+historyRouter.get("/stats", async (c) => c.json(await getStats(c.env)));

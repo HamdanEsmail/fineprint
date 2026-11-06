@@ -2,7 +2,8 @@
 // the serial facts queue moving (stale claims, runs whose callback was lost, rate-limited
 // starts), pulls Monitor checks whose scheduled run never arrived (with a backoff for pages whose
 // pulls keep failing), retires public pages at the end of their week, flags pages whose Monitor
-// TinyFish no longer runs, retries captures that did not finish, and asks for any missing summaries.
+// TinyFish no longer runs, retries captures that did not finish, and asks for any missing summaries
+// and deltas.
 //
 // Repair comes last and is capped (REPAIR_PER_TICK): each capture makes several outbound
 // requests, the free plan allows 50 per invocation, and a backlog must never starve the
@@ -21,9 +22,17 @@ import {
 } from "./core/limits";
 import { clearStalePending, expiredPublicPages, monitoredPages, pendingConfirmPages, setPageStatusIf } from "./db/pages";
 import { pullCandidates } from "./db/runs";
-import { countMissingSummaries, inFlightFactsRuns, listFactsClaims, pendingCaptures, updateIfFactsHolder } from "./db/versions";
+import {
+  countFactsDeltas,
+  countMissingDeltas,
+  countMissingSummaries,
+  inFlightFactsRuns,
+  listFactsClaims,
+  pendingCaptures,
+  updateIfFactsHolder,
+} from "./db/versions";
 import type { Env } from "./env";
-import { oldestOversizedSummary, requestSummary } from "./summary";
+import { oversizedForTick, requestDeltas, requestSummary } from "./summary";
 import { getRun } from "./tinyfish/agent";
 import { TinyFishError } from "./tinyfish/client";
 import { deleteMonitor, getMonitor, listMonitors, UNKNOWN_STATUS } from "./tinyfish/monitor";
@@ -79,6 +88,7 @@ export async function runCron(env: Env): Promise<CronResult> {
   await step("health", () => health(env, result));
   await step("repair", () => repair(env, result));
   await step("summaries", () => fillMissingSummaries(env));
+  await step("deltas", () => fillMissingDeltas(env));
   console.log("cron", {
     repaired: result.repaired,
     expired: result.expired,
@@ -347,13 +357,26 @@ async function repair(env: Env, result: CronResult): Promise<void> {
  * The safety net behind each new version's own summary request (src/summary.ts): when any non-baseline
  * version still has no summary (its request failed, or a replay created it), one fill is asked for, in
  * its own invocation through the SELF binding, within that route's per-call budget. That fill leaves a
- * version whose diff alone is over the budget, so the oldest such version also gets one request of its
- * own (`?version=<id>`), at most one a tick: if that one runs out of CPU it costs nothing and holds
- * nothing back.
+ * version whose diff alone is over the budget, so one such version also gets one request of its own
+ * (`?version=<id>`), at most one a tick, taken in turn by the hour of day: if that one runs out of CPU it
+ * costs nothing and holds nothing back, and the next tick tries another.
  */
 async function fillMissingSummaries(env: Env): Promise<void> {
   if ((await countMissingSummaries(env.DB)) === 0) return;
   await requestSummary(env);
-  const oversized = await oldestOversizedSummary(env.DB);
+  const oversized = await oversizedForTick(env.DB, "summaries", cronDeps.now());
   if (oversized !== null) await requestSummary(env, oversized);
+}
+
+/**
+ * The same for deltas: a version whose summary came from TinyFish gets its delta here (a diff line's
+ * request writes the delta with the line), and a delta whose facts landed after it was computed gets its
+ * facts part. One fill a tick while any delta is missing or can take its facts, plus one `?version=`
+ * request for a version too large for a shared call, in turn.
+ */
+async function fillMissingDeltas(env: Env): Promise<void> {
+  if ((await countMissingDeltas(env.DB)) === 0 && (await countFactsDeltas(env.DB)) === 0) return;
+  await requestDeltas(env);
+  const oversized = await oversizedForTick(env.DB, "deltas", cronDeps.now());
+  if (oversized !== null) await requestDeltas(env, oversized);
 }

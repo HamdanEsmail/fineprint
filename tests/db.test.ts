@@ -96,6 +96,8 @@ function versionInput(over: Partial<VersionRow> = {}): VersionRow {
     facts_status: "pending",
     summary: null,
     summary_source: null,
+    delta_json: null,
+    thumb_key: null,
     ...over,
   };
 }
@@ -367,6 +369,8 @@ describe("versions", () => {
       // A baseline has no change summary, whatever its run's judgment said.
       summary: null,
       summary_source: null,
+      delta_json: null,
+      thumb_key: null,
     });
     expect(await getVersion(db, "missing")).toBeNull();
   });

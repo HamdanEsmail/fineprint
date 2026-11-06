@@ -3,13 +3,15 @@
 // and serialize what they return; the site's views render it.
 //
 // Nothing here reads a version's `text`: the free plan's 10 ms of CPU a request has no room for it.
-import { FACTS_PAUSE_USD, SPEND_PAUSE_USD } from "./core/limits";
+import type { Delta } from "./core/diff";
+import { FACTS_PAUSE_USD, PUBLIC_SLOTS, SPEND_PAUSE_USD } from "./core/limits";
 import { PRICES, type SpendKind } from "./core/spend";
+import { publicSlotUsage } from "./db/pages";
 import { countNoiseByReason, countRunsByTrigger } from "./db/runs";
 import type { FactsStatus, PageKind, PageStatus, SummarySource, TriggerKind } from "./db/types";
 import { countChanges as countChangeRows, listChanges as listChangeRows } from "./db/versions";
 import type { Env } from "./env";
-import { objectUrls } from "./handlers/versionJson";
+import { objectUrls, parseDelta, thumbUrl } from "./handlers/versionJson";
 
 // --- Times ------------------------------------------------------------------------------------
 
@@ -34,8 +36,8 @@ export function parseTime(raw: string | undefined): string | null {
 // --- Change feed ------------------------------------------------------------------------------
 
 /**
- * One real change (a version that is not a baseline), as `/api/changes` lists it, plus the page's
- * `kind` for the site's label row (the JSON leaves `kind` out for now).
+ * One real change (a version that is not a baseline), as `/api/changes` lists it: with the page's `kind`,
+ * the change's `delta` (null until it is computed out of band) and its thumbnail beside the screenshot.
  */
 export type ChangeItem = {
   version_id: string;
@@ -50,6 +52,10 @@ export type ChangeItem = {
   facts_status: FactsStatus;
   /** The page's kind; null for a page stored without one. */
   kind: PageKind | null;
+  /** The change in counts against the version before it, with the layout-only label; null until computed. */
+  delta: Delta | null;
+  /** The 640 by 400 thumbnail, or null when there is none (show `screenshot_url` instead). */
+  thumb_url: string | null;
 };
 
 /**
@@ -77,6 +83,8 @@ export async function listChanges(
     trigger: row.trigger_kind,
     facts_status: row.facts_status,
     kind: row.kind,
+    delta: parseDelta(row.delta_json),
+    thumb_url: thumbUrl(env, row),
   }));
 }
 
@@ -105,7 +113,7 @@ const PAGE_STATUSES: readonly PageStatus[] = ["active", "paused", "failed", "exp
 /** Money rounded to six decimals, so adding floats leaves no drift (0.1 + 0.2 is 0.3). */
 const dollars = (amount: number): number => Math.round(amount * 1e6) / 1e6;
 
-/** The record so far, as `/api/stats` returns it, plus `changes` (the JSON leaves it out for now). */
+/** The record so far, as `/api/stats` returns it. */
 export type Stats = {
   pages: number;
   runs: number;
@@ -125,13 +133,23 @@ export type Stats = {
   cost_per_catch_usd: number | null;
   /** Which way the runs arrived: the add-page baselines, scheduled runs by webhook, overdue checks pulled. */
   runs_by_trigger: Record<TriggerKind, number>;
-  /** Real changes (versions that are not baselines) on pages that are not retired. */
+  /** Real changes (versions that are not baselines) on pages that are not retired, leaving out layout-only ones. */
   changes: number;
+  /** Changes on pages that are not retired that are labelled layout only (same words and figures, new structure). */
+  layout_only: number;
+  /** When the first page was added (the earliest page `created_at`); null before any page. */
+  recording_since: string | null;
+  /** The public add slots: how many there are, how many hold a page now, and when the next one frees (null when none is held). */
+  public_slots: { total: number; used: number; next_free_at: string | null };
 };
+
+// A version's layout-only label, read from its stored delta; 0 when it has no delta (or one that cannot be read).
+const LAYOUT_ONLY = "COALESCE(CASE WHEN json_valid(v.delta_json) THEN json_extract(v.delta_json, '$.layout_only') END, 0)";
+const NOT_RETIRED = "(p.status IS NULL OR p.status != 'retired')";
 
 export async function getStats(env: Env): Promise<Stats> {
   const db = env.DB;
-  const [totals, spendRows, statusRows, runsByTrigger, noiseReasons] = await Promise.all([
+  const [totals, spendRows, statusRows, runsByTrigger, noiseReasons, slots] = await Promise.all([
     db
       .prepare(
         `SELECT
@@ -140,7 +158,10 @@ export async function getStats(env: Env): Promise<Stats> {
            (SELECT COUNT(*) FROM versions) AS versions,
            (SELECT COUNT(*) FROM versions WHERE is_baseline = 0) AS catches,
            (SELECT COUNT(*) FROM versions v JOIN pages p ON p.id = v.page_id
-              WHERE v.is_baseline = 0 AND (p.status IS NULL OR p.status != 'retired')) AS changes,
+              WHERE v.is_baseline = 0 AND ${NOT_RETIRED} AND ${LAYOUT_ONLY} = 0) AS changes,
+           (SELECT COUNT(*) FROM versions v JOIN pages p ON p.id = v.page_id
+              WHERE v.is_baseline = 0 AND ${NOT_RETIRED} AND ${LAYOUT_ONLY} = 1) AS layout_only,
+           (SELECT MIN(created_at) FROM pages) AS recording_since,
            (SELECT COUNT(*) FROM runs WHERE noise_suppressed = 1) AS noise_suppressed,
            (SELECT COUNT(*) FROM versions WHERE facts_status = 'unavailable') AS facts_unavailable,
            (SELECT COALESCE(SUM(amount_usd), 0) FROM spend) AS spend_usd`,
@@ -151,6 +172,8 @@ export async function getStats(env: Env): Promise<Stats> {
         versions: number;
         catches: number;
         changes: number;
+        layout_only: number;
+        recording_since: string | null;
         noise_suppressed: number;
         facts_unavailable: number;
         spend_usd: number;
@@ -159,6 +182,7 @@ export async function getStats(env: Env): Promise<Stats> {
     db.prepare("SELECT status, COUNT(*) AS n FROM pages GROUP BY status").all<{ status: string | null; n: number }>(),
     countRunsByTrigger(db),
     countNoiseByReason(db),
+    publicSlotUsage(db),
   ]);
 
   const spendByKind = Object.fromEntries(SPEND_KINDS.map((kind) => [kind, 0])) as Record<SpendKind, number>;
@@ -170,8 +194,8 @@ export async function getStats(env: Env): Promise<Stats> {
     if ((PAGE_STATUSES as readonly (string | null)[]).includes(row.status)) monitors[row.status as PageStatus] = row.n;
   }
 
-  // The three reasons are always present; a reason this code does not know is counted under its own key.
-  const noiseByReason: Record<string, number> = { normalized_identical: 0, partial_render: 0, flap: 0, ...noiseReasons };
+  // The four reasons are always present; a reason this code does not know is counted under its own key.
+  const noiseByReason: Record<string, number> = { normalized_identical: 0, partial_render: 0, flap: 0, layout_hold: 0, ...noiseReasons };
 
   const spend = totals?.spend_usd ?? 0;
   const catches = totals?.catches ?? 0;
@@ -192,5 +216,8 @@ export async function getStats(env: Env): Promise<Stats> {
     cost_per_catch_usd: catches > 0 ? dollars(spend / catches) : null,
     runs_by_trigger: runsByTrigger,
     changes: totals?.changes ?? 0,
+    layout_only: totals?.layout_only ?? 0,
+    recording_since: totals?.recording_since ?? null,
+    public_slots: { total: PUBLIC_SLOTS, used: slots.used, next_free_at: slots.next_free_at },
   };
 }

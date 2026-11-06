@@ -1,7 +1,9 @@
 // The capture pipeline (spec 4.4). Every new version gets a full-page screenshot
-// (TinyBrowser over raw CDP), its HTML source (TinyFetch) and, on pricing and fee
-// pages, the price facts (TinyAgent). Each capture is written to D1 the moment it
-// finishes and fails on its own, so one failure never loses the others.
+// (TinyBrowser over raw CDP) with a thumbnail of the top of the page taken in the same
+// browser session, its HTML source (TinyFetch) and, on pricing and fee pages, the price
+// facts (TinyAgent). Each capture is written to D1 the moment it finishes and fails on
+// its own, so one failure never loses the others; a thumbnail that cannot be taken or
+// stored never fails the screenshot.
 //
 // capture_status:
 //   pending         nothing attempted yet
@@ -102,17 +104,22 @@ function statusPair(v: StatusInput, needsFacts: boolean): { capture_status: Capt
   return { capture_status: captureStatusFor(v, needsFacts), facts_status: factsStatusFor(v, needsFacts) };
 }
 
-/** Facts are taken on pricing and fee pages: always for the baseline, and for a later version unless its run was judged not relevant. */
+/**
+ * Facts are taken on pricing and fee pages: always for the baseline, and for a later version unless its
+ * run was judged not relevant. Never on a page a public visitor added, whatever kind it was sent with: a
+ * facts run costs Agent steps, and a public add must not (site plan, Task 2).
+ */
 export function needsFacts(
-  page: Pick<PageRow, "kind">,
+  page: Pick<PageRow, "kind"> & Partial<Pick<PageRow, "added_by">>,
   version: Pick<VersionRow, "is_baseline">,
   run: Pick<RunRow, "judgment_relevant"> | null,
 ): boolean {
+  if (page.added_by === "public") return false;
   if (page.kind !== "pricing" && page.kind !== "fees") return false;
   return version.is_baseline === 1 || run?.judgment_relevant !== 0;
 }
 
-async function loadNeedsFacts(db: D1Database, page: Pick<PageRow, "kind">, version: VersionRow): Promise<boolean> {
+async function loadNeedsFacts(db: D1Database, page: Pick<PageRow, "kind" | "added_by">, version: VersionRow): Promise<boolean> {
   const run = version.run_id === null ? null : await getRunById(db, version.run_id);
   return needsFacts(page, version, run);
 }
@@ -309,14 +316,26 @@ async function capture(env: Env, versionId: string): Promise<void> {
 
 async function captureScreenshot(env: Env, versionId: string, url: string): Promise<void> {
   let bytes: ArrayBuffer;
+  let thumb: ArrayBuffer | null | undefined;
   try {
-    ({ bytes } = await captureDeps.screenshotFullPage(env, url));
+    ({ bytes, thumb } = await captureDeps.screenshotFullPage(env, url));
   } catch (err) {
     throw new CaptureFailure(codeOf(err, "cdp_failed", true));
   }
   const key = `shots/${versionId}.jpg`;
   await env.STORE.put(key, bytes, { httpMetadata: { contentType: "image/jpeg" } });
-  await updateCapture(env.DB, versionId, { screenshot_key: key });
+  // The thumbnail is a comfort: when it was not taken or cannot be stored, the version keeps its screenshot
+  // and no thumb_key, and the site shows the screenshot instead. Nothing is retried for it.
+  let thumbKey: string | undefined;
+  if (thumb) {
+    try {
+      await env.STORE.put(`thumbs/${versionId}.jpg`, thumb, { httpMetadata: { contentType: "image/jpeg" } });
+      thumbKey = `thumbs/${versionId}.jpg`;
+    } catch (err) {
+      logError(`thumbnail store failed for version ${versionId}`, err);
+    }
+  }
+  await updateCapture(env.DB, versionId, { screenshot_key: key, thumb_key: thumbKey });
 }
 
 async function captureSource(env: Env, versionId: string, url: string): Promise<void> {

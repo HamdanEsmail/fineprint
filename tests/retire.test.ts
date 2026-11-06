@@ -197,7 +197,9 @@ describe("a retired page", () => {
     expect(await countMonitors(env.DB)).toBe(1);
     expect(await countMonitors(env.DB, "public")).toBe(1);
 
-    // The queue: only the live page's baseline waits; with that one gone too the queue is empty.
+    // The queue: only the live page's baseline waits; with that one gone too the queue is empty. A public
+    // page never takes a facts run (site Task 2), so for the queue both pages are curated ones.
+    await env.DB.prepare("UPDATE pages SET added_by = 'curated'").run();
     expect((await nextFactsCandidate(env.DB))?.page_id).toBe(live);
     await setStatus(live, "expired");
     expect(await nextFactsCandidate(env.DB)).toBeNull();

@@ -12,6 +12,7 @@
 // by similarity once SIMILARITY_BUDGET bigram operations are spent.
 
 import { diffArrays } from "diff";
+import { LAYOUT_ONLY_MIN_BLOCKS, LAYOUT_ONLY_MIN_OVERLAP, LAYOUT_ONLY_MIN_SKEW } from "./limits";
 
 export type Block = {
   /** Text of the nearest heading at or above the block ("" before the first heading). */
@@ -347,6 +348,112 @@ export function structuredDiff(fromText: string, toText: string): StructuredDiff
   }
   settle();
   return out;
+}
+
+// --- Block set difference -------------------------------------------------------
+
+/**
+ * How many blocks of `fromText` have no identical block in `toText` (removed) and the other way round
+ * (added), counting repeated blocks one for one. No alignment and no similarity: a block edited in place
+ * counts once on each side, where structuredDiff would call it changed. The change gate's layout hold
+ * (src/core/gate.ts) uses it because it is linear in the text; on the 15 changes recorded by 6 Nov it
+ * holds exactly the reads structuredDiff's counts hold.
+ */
+export function blockSetDifference(fromText: string, toText: string): { added: number; removed: number } {
+  const from = splitBlocks(fromText);
+  const to = splitBlocks(toText);
+  // The blocks both texts start and end with cancel out; only the region between them is counted.
+  let start = 0;
+  while (start < from.length && start < to.length && from[start]!.text === to[start]!.text) start++;
+  let fromEnd = from.length;
+  let toEnd = to.length;
+  while (fromEnd > start && toEnd > start && from[fromEnd - 1]!.text === to[toEnd - 1]!.text) {
+    fromEnd--;
+    toEnd--;
+  }
+  const left = new Map<string, number>();
+  for (let i = start; i < fromEnd; i++) left.set(from[i]!.text, (left.get(from[i]!.text) ?? 0) + 1);
+  let added = 0;
+  for (let i = start; i < toEnd; i++) {
+    const n = left.get(to[i]!.text) ?? 0;
+    if (n > 0) left.set(to[i]!.text, n - 1);
+    else added++;
+  }
+  let removed = 0;
+  for (const n of left.values()) removed += n;
+  return { added, removed };
+}
+
+// --- Delta and the layout-only label ----------------------------------------------
+
+export type BlockCounts = { added: number; removed: number; changed: number };
+
+/**
+ * What a change did, in counts, against the version before it (site plan, Task 2): its blocks, its facts
+ * (null while either version has no stored facts) and whether it only restructured the page.
+ */
+export type Delta = { blocks: BlockCounts; facts: BlockCounts | null; layout_only: boolean };
+
+export const blockCounts = (diff: StructuredDiff): BlockCounts => ({
+  added: diff.added.length,
+  removed: diff.removed.length,
+  changed: diff.changed.length,
+});
+
+/** A facts diff in counts; `changed` counts facts, not fields (a fact whose price and unit both changed is one). */
+export function factCounts(diff: FactsDiff | null): BlockCounts | null {
+  if (diff === null) return null;
+  return {
+    added: diff.added.length,
+    removed: diff.removed.length,
+    changed: new Set(diff.changed.map((c) => factKey(c.name))).size,
+  };
+}
+
+// The words of a text, lower-cased: letters, digits and the marks that sit inside a figure.
+const WORD_RE = /[\p{L}\p{N}$€£.,%/-]+/gu;
+// A dollar price ("$20", "US$ 1,200.50"). The validation of 6 Nov used prices only: counting every number
+// as well would miss the OpenAI privacy policy, whose restructure also moved a few dates.
+const PRICE_RE = /(?:US)?\$\s?\d[\d,]*(?:\.\d+)?/g;
+
+/** Shared share of two word multisets: 2 × |A ∩ B| / (|A| + |B|). */
+function wordOverlap(before: string, after: string): number {
+  const counts = new Map<string, number>();
+  let left = 0;
+  for (const word of before.toLowerCase().match(WORD_RE) ?? []) {
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+    left++;
+  }
+  let right = 0;
+  let shared = 0;
+  for (const word of after.toLowerCase().match(WORD_RE) ?? []) {
+    right++;
+    const n = counts.get(word) ?? 0;
+    if (n > 0) {
+      counts.set(word, n - 1);
+      shared++;
+    }
+  }
+  return (2 * shared) / (left + right || 1);
+}
+
+/** The set of price tokens in a text, as one sorted string. */
+const priceTokens = (text: string): string => [...new Set(text.match(PRICE_RE) ?? [])].sort().join(" ");
+
+/**
+ * Whether a change only restructured the page: the same words and figures, a different block structure
+ * (the GitHub pricing table on 5 Nov, rows merged into one table). True when all four hold, on the
+ * normalized texts: at least LAYOUT_ONLY_MIN_BLOCKS blocks added plus removed, a block skew
+ * |added − removed| / (added + removed) of at least LAYOUT_ONLY_MIN_SKEW, the same set of price tokens on
+ * both sides, and a word overlap of at least LAYOUT_ONLY_MIN_OVERLAP. The cheap tests come first, so most
+ * changes never count a word. A label only: the version, its screenshot and its diff stay.
+ */
+export function isLayoutOnly(before: string, after: string, blocks: BlockCounts): boolean {
+  const touched = blocks.added + blocks.removed;
+  if (touched < LAYOUT_ONLY_MIN_BLOCKS) return false;
+  if (Math.abs(blocks.added - blocks.removed) / touched < LAYOUT_ONLY_MIN_SKEW) return false;
+  if (priceTokens(before) !== priceTokens(after)) return false;
+  return wordOverlap(before, after) >= LAYOUT_ONLY_MIN_OVERLAP;
 }
 
 // --- Facts diff ---------------------------------------------------------------

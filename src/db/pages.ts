@@ -229,6 +229,20 @@ export async function clearStalePending(db: D1Database, beforeIso: string): Prom
 }
 
 /**
+ * The public add slots in use: how many public pages hold a Monitor slot (as countMonitors counts them)
+ * and the earliest expiry among them, when the next slot frees (null when none is held). One query.
+ */
+export async function publicSlotUsage(db: D1Database): Promise<{ used: number; next_free_at: string | null }> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS used, MIN(expires_at) AS next_free_at FROM pages
+       WHERE added_by = 'public' AND status IN ('active', 'paused', 'failed')`,
+    )
+    .first<{ used: number; next_free_at: string | null }>();
+  return { used: row?.used ?? 0, next_free_at: row?.next_free_at ?? null };
+}
+
+/**
  * Pages that hold a Monitor slot: active, paused and failed (the Monitor of an
  * expired or retired page is deleted). Pass `addedBy` to count one origin only.
  */

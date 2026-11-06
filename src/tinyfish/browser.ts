@@ -1,6 +1,7 @@
 // TinyBrowser: a full-page screenshot over raw Chrome DevTools Protocol, from inside
 // a Worker. A straight port of the verified spike (spikes/worker-shot/src/index.js):
-// no Playwright, no Node APIs.
+// no Playwright, no Node APIs. The same session also takes the version's thumbnail, and
+// the thumbnail backfill (src/thumbs.ts) photographs stored screenshots in one session.
 import { SCREENSHOT_MAX_HEIGHT } from "../core/limits";
 import { PRICES } from "../core/spend";
 import type { Env } from "../env";
@@ -12,19 +13,45 @@ const COMMAND_TIMEOUT_MS = 45_000;
 const SETTLE_MS = 6_000;
 const VIEWPORT_WIDTH = 1280;
 const VIEWPORT_HEIGHT = 800;
+/** How long the thumbnail backfill waits for a stored screenshot to load in its wrapper page. */
+const IMAGE_WAIT_MS = 15_000;
+
+/**
+ * The thumbnail: the top 1280 by 800 of the page (the viewport the device metrics set, so what a visitor
+ * first sees) at half scale, a 640 by 400 JPEG at quality 70. Taken without captureBeyondViewport: the clip
+ * lies inside the viewport.
+ */
+export const THUMB_CAPTURE = {
+  format: "jpeg",
+  quality: 70,
+  clip: { x: 0, y: 0, width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT, scale: 0.5 },
+} as const;
 
 type CdpReply = { id?: number; result?: unknown; error?: unknown };
 type Pending = { resolve: (result: unknown) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> };
 
-export async function screenshotFullPage(
-  env: Env,
-  url: string,
-): Promise<{ bytes: ArrayBuffer; height: number; sessionId: string }> {
+/** One attached page of a TinyBrowser session: CDP commands go to it. */
+type Page = { send: <T>(method: string, params?: Record<string, unknown>) => Promise<T>; sessionId: string };
+
+/** Base64 to bytes in plain JS: right for a thumbnail's few dozen KB, and no subrequest. */
+function decodeBase64(data: string): ArrayBuffer {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+/**
+ * Opens one TinyBrowser session (the billed step: one `screenshot` spend row, with `spendRef`), attaches to
+ * its page at a 1280 by 800 viewport, runs `work`, and always closes the browser so billing stops, then the
+ * socket.
+ */
+async function withPage<T>(env: Env, url: string, spendRef: string, work: (page: Page) => Promise<T>): Promise<T> {
   // Session creation is the billed step, so it records the spend row (one browser-minute).
   const created = await tinyfishFetch(env, BROWSER_API, {
     method: "POST",
     body: JSON.stringify({ url }),
-    spend: { kind: "screenshot", amountUsd: PRICES.screenshot, ref: url },
+    spend: { kind: "screenshot", amountUsd: PRICES.screenshot, ref: spendRef },
   });
   const session = (await created.json()) as { session_id?: unknown; cdp_url?: unknown };
   if (typeof session.cdp_url !== "string" || session.cdp_url === "") {
@@ -97,30 +124,7 @@ export async function screenshotFullPage(
       { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT, deviceScaleFactor: 1, mobile: false },
       cdpSession,
     );
-    await send("Page.navigate", { url }, cdpSession);
-    await new Promise<void>((resolve) => setTimeout(resolve, SETTLE_MS));
-    const metrics = await send<{ cssContentSize?: { height?: number }; contentSize?: { height?: number } }>(
-      "Page.getLayoutMetrics",
-      {},
-      cdpSession,
-    );
-    const height = Math.min(
-      Math.ceil(metrics.cssContentSize?.height || metrics.contentSize?.height || VIEWPORT_HEIGHT),
-      SCREENSHOT_MAX_HEIGHT,
-    );
-    const shot = await send<{ data: string }>(
-      "Page.captureScreenshot",
-      {
-        format: "jpeg",
-        quality: 80,
-        captureBeyondViewport: true,
-        clip: { x: 0, y: 0, width: VIEWPORT_WIDTH, height, scale: 1 },
-      },
-      cdpSession,
-    );
-    // Decoding through fetch keeps CPU time tiny; a JS loop over ~1 MB of base64 would not.
-    const bytes = await (await fetch(`data:image/jpeg;base64,${shot.data}`)).arrayBuffer();
-    return { bytes, height, sessionId };
+    return await work({ send: <R>(method: string, params?: Record<string, unknown>) => send<R>(method, params, cdpSession), sessionId });
   } finally {
     // Always close the browser so billing stops, then the socket.
     try {
@@ -134,4 +138,102 @@ export async function screenshotFullPage(
       // already closed
     }
   }
+}
+
+/**
+ * What a screenshot session returns: the full-page JPEG (`bytes`) and its thumbnail. `thumb` is null when the
+ * thumbnail capture failed; it is optional in the type so a stand-in that takes no thumbnail stays valid.
+ */
+export type Screenshot = { bytes: ArrayBuffer; thumb?: ArrayBuffer | null; height: number; sessionId: string };
+
+/**
+ * A full-page screenshot of `url` (at most SCREENSHOT_MAX_HEIGHT pixels high) and, as a second capture in
+ * the same session before the browser closes, its thumbnail (THUMB_CAPTURE): no second session and no
+ * second spend row. `thumb` is null when the thumbnail capture fails; the full screenshot is returned
+ * either way. `settleMs` is the wait for the page to load and paint (tests pass 0).
+ */
+export async function screenshotFullPage(env: Env, url: string, opts: { settleMs?: number } = {}): Promise<Screenshot> {
+  return withPage(env, url, url, async (page) => {
+    await page.send("Page.navigate", { url });
+    await new Promise<void>((resolve) => setTimeout(resolve, opts.settleMs ?? SETTLE_MS));
+    const metrics = await page.send<{ cssContentSize?: { height?: number }; contentSize?: { height?: number } }>("Page.getLayoutMetrics");
+    const height = Math.min(
+      Math.ceil(metrics.cssContentSize?.height || metrics.contentSize?.height || VIEWPORT_HEIGHT),
+      SCREENSHOT_MAX_HEIGHT,
+    );
+    const shot = await page.send<{ data: string }>("Page.captureScreenshot", {
+      format: "jpeg",
+      quality: 80,
+      captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width: VIEWPORT_WIDTH, height, scale: 1 },
+    });
+    // Decoding through fetch keeps CPU time tiny; a JS loop over ~1 MB of base64 would not.
+    const bytes = await (await fetch(`data:image/jpeg;base64,${shot.data}`)).arrayBuffer();
+    let thumb: ArrayBuffer | null = null;
+    try {
+      thumb = decodeBase64((await page.send<{ data: string }>("Page.captureScreenshot", THUMB_CAPTURE)).data);
+    } catch {
+      // No thumbnail: the version keeps its screenshot, and the site shows that instead.
+    }
+    return { bytes, thumb, height, sessionId: page.sessionId };
+  });
+}
+
+const escapeAttribute = (text: string): string =>
+  text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/** The page a stored screenshot is photographed in: the image at its own width, top left, nothing else. */
+const wrapperUrl = (imageUrl: string): string =>
+  `data:text/html,${encodeURIComponent(
+    `<body style="margin:0"><img src="${escapeAttribute(imageUrl)}" width="${VIEWPORT_WIDTH}" style="display:block"></body>`,
+  )}`;
+
+// Resolves true once the wrapper's image has loaded, false when it fails or takes over IMAGE_WAIT_MS. It also
+// waits for the data: page itself, in case the evaluation lands before the navigation is in place.
+const WAIT_FOR_IMAGE = `new Promise((resolve) => {
+  const deadline = Date.now() + ${IMAGE_WAIT_MS};
+  const check = () => {
+    const img = document.images[0];
+    if (location.protocol === "data:" && img && img.complete) return resolve(img.naturalWidth > 0);
+    if (Date.now() > deadline) return resolve(false);
+    setTimeout(check, 100);
+  };
+  check();
+})`;
+
+/**
+ * Thumbnails of stored screenshots (the backfill of versions that were captured before thumbnails existed:
+ * the page as it was is gone, so its screenshot is photographed instead). One session for the whole list:
+ * each image is opened in a `data:` wrapper page, waited for, and clipped with THUMB_CAPTURE. Returns the
+ * thumbnail of each id, or null for one whose image did not load or whose capture failed. The browser is
+ * always closed.
+ */
+export async function thumbnailsOfShots(
+  env: Env,
+  items: { id: string; imageUrl: string }[],
+): Promise<Map<string, ArrayBuffer | null>> {
+  const out = new Map<string, ArrayBuffer | null>();
+  if (items.length === 0) return out;
+  // The session opens on the first stored screenshot (a plain https url, as a screenshot session opens on
+  // its page); each image is then shown in its wrapper.
+  return withPage(env, items[0]!.imageUrl, `thumbnail backfill: ${items.length} versions`, async (page) => {
+    for (const item of items) {
+      try {
+        await page.send("Page.navigate", { url: wrapperUrl(item.imageUrl) });
+        const loaded = await page.send<{ result?: { value?: unknown } }>("Runtime.evaluate", {
+          expression: WAIT_FOR_IMAGE,
+          awaitPromise: true,
+          returnByValue: true,
+        });
+        if (loaded.result?.value !== true) {
+          out.set(item.id, null);
+          continue;
+        }
+        out.set(item.id, decodeBase64((await page.send<{ data: string }>("Page.captureScreenshot", THUMB_CAPTURE)).data));
+      } catch {
+        out.set(item.id, null);
+      }
+    }
+    return out;
+  });
 }

@@ -18,6 +18,7 @@ import {
   getPageByUrl,
   insertPage,
   listPages,
+  publicSlotUsage,
   updatePage,
   type PagePatch,
 } from "../db/pages";
@@ -220,13 +221,9 @@ async function rollbackAdd(db: D1Database, pageId: string): Promise<void> {
 
 const isUniqueViolation = (err: unknown): boolean => err instanceof Error && /UNIQUE constraint/i.test(err.message);
 
-/** When the next public slot frees up: the earliest expiry among live public pages. */
+/** When the next public slot frees up: the earliest expiry among the public pages that hold a slot. */
 async function nextPublicSlotAt(db: D1Database): Promise<string | null> {
-  const expiries = (await listPages(db))
-    .filter((p) => p.added_by === "public" && p.status !== "expired" && p.status !== "retired" && p.expires_at !== null)
-    .map((p) => p.expires_at as string)
-    .sort();
-  return expiries[0] ?? null;
+  return (await publicSlotUsage(db)).next_free_at;
 }
 
 type CapHit = "watchlist_full" | "public_slots_full";
@@ -394,8 +391,10 @@ async function createPage(c: AppContext, req: NewPageRequest): Promise<Response>
     return c.json({ error: "monitor_create_failed", reason: codeOf(err) }, 502);
   }
 
-  // 5. The page, its baseline run and its baseline version.
+  // 5. The page, its baseline run and its baseline version. A public page keeps the kind it was sent with
+  //    (the site shows it), but never takes a facts run (needsFacts), so a visitor's add costs no Agent steps.
   const ignorePatterns = fields.ignorePatterns ?? [];
+  const addedBy = admin ? "admin" : "public";
   const now = new Date();
   const nowIso = now.toISOString();
   const pageId = crypto.randomUUID();
@@ -412,7 +411,7 @@ async function createPage(c: AppContext, req: NewPageRequest): Promise<Response>
       schedule_cron: cronForIndex(held),
       purpose: PURPOSE,
       status: "active",
-      added_by: admin ? "admin" : "public",
+      added_by: addedBy,
       ignore_patterns: JSON.stringify(ignorePatterns),
       expires_at: admin ? null : new Date(now.getTime() + PUBLIC_TTL_DAYS * DAY_MS).toISOString(),
     });
@@ -460,7 +459,7 @@ async function createPage(c: AppContext, req: NewPageRequest): Promise<Response>
         normalized_hash: await hashText(normalize(monitor.baselineText, ignorePatterns).text),
         judgment_summary: null,
         capture_status: "pending",
-        facts_status: needsFacts({ kind: fields.kind ?? "other" }, { is_baseline: 1 }, null) ? "pending" : "not_needed",
+        facts_status: needsFacts({ kind: fields.kind ?? "other", added_by: addedBy }, { is_baseline: 1 }, null) ? "pending" : "not_needed",
       });
     }
   } catch (err) {

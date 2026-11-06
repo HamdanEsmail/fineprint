@@ -101,9 +101,9 @@ export async function recordMonitorRun(
   try {
     if (verdict?.kind === "fetch_error") {
       await setRunNote(db, runId, "fetch_error");
-    } else if (verdict?.kind === "partial_suspect") {
+    } else if (verdict?.kind === "partial_suspect" || verdict?.kind === "layout_hold") {
       // No version: the page is held for a confirm read (the cron pulls it within the hour).
-      await markNoise(db, runId, "partial_render");
+      await markNoise(db, runId, verdict.kind === "layout_hold" ? "layout_hold" : "partial_render");
       suppressed = true;
       await updatePage(db, page.id, { pending_hash: verdict.hash, pending_run_id: runId, pending_at: receivedAt });
     } else if (verdict?.kind === "suppressed") {

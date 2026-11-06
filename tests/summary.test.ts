@@ -61,29 +61,29 @@ describe("diffSummary", () => {
   });
 
   it("one changed block: names the line that changed, not the block's first line", () => {
-    const from = ["## Pro", "", "Pro plan", "$20 per month", "10 projects"].join("\n");
-    const to = ["## Pro", "", "Pro plan", "$25 per month", "10 projects"].join("\n");
-    expect(summarize(from, to)).toBe('1 block changed: "$25 per month"');
+    const from = ["## Pro", "", "Pro plan for growing teams and agencies", "$20 per month for every seat in the team", "10 projects"].join("\n");
+    const to = ["## Pro", "", "Pro plan for growing teams and agencies", "$25 per month for every seat in the team", "10 projects"].join("\n");
+    expect(summarize(from, to)).toBe('1 block changed: "$25 per month for every seat in the team"');
   });
 
   it("takes whichever of the first added and first changed block comes first in the new text", () => {
-    const from = ["## A", "", "Alpha costs $1.", "", "## B", "", "Beta"].join("\n");
-    const to = ["## A", "", "Alpha costs $2.", "", "## B", "", "Beta", "", "Gamma is new."].join("\n");
-    expect(summarize(from, to)).toBe('1 block added, 1 changed: "Alpha costs $2."');
+    const from = ["## A", "", "Alpha costs $1 per month for each seat.", "", "## B", "", "Beta"].join("\n");
+    const to = ["## A", "", "Alpha costs $2 per month for each seat.", "", "## B", "", "Beta", "", "Gamma is a new plan for large teams."].join("\n");
+    expect(summarize(from, to)).toBe('1 block added, 1 changed: "Alpha costs $2 per month for each seat."');
   });
 
   it("lists added, changed and removed counts, and quotes a removed line only when nothing was added or changed", () => {
-    const from = ["## A", "", "Kept.", "", "Dropped paragraph one.", "", "Dropped paragraph two."].join("\n");
+    const from = ["## A", "", "Kept.", "", "Dropped paragraph one, about the old plan.", "", "Dropped paragraph two."].join("\n");
     const to = ["## A", "", "Kept."].join("\n");
-    expect(summarize(from, to)).toBe('2 blocks removed: "Dropped paragraph one."');
-    const mixed = ["## A", "", "Kept.", "", "Brand new line."].join("\n");
-    expect(summarize(from, mixed)).toBe('1 block added, 2 removed: "Brand new line."');
+    expect(summarize(from, to)).toBe('2 blocks removed: "Dropped paragraph one, about the old plan."');
+    const mixed = ["## A", "", "Kept.", "", "Brand new line that replaces the old ones."].join("\n");
+    expect(summarize(from, mixed)).toBe('1 block added, 2 removed: "Brand new line that replaces the old ones."');
   });
 
   it("is plain text: markdown heading marks, emphasis, code marks and link targets are dropped", () => {
     const from = "Intro";
-    const to = ["Intro", "", "## **New**: `Claude` [Code](https://example.com/x) is here"].join("\n");
-    expect(summarize(from, to)).toBe('1 block added: "New: Claude Code is here"');
+    const to = ["Intro", "", "* **New**: `Claude` [Code](https://example.com/x) is here for every plan"].join("\n");
+    expect(summarize(from, to)).toBe('1 block added: "New: Claude Code is here for every plan"');
   });
 
   it(`is cut to at most ${SUMMARY_MAX_CHARS} characters, with the quote shortened and closed`, () => {
@@ -197,7 +197,7 @@ describe("storing a summary when a version is created", () => {
     const res: Json = await (await callWorker(`/api/admin/pull/${PAGE}`, { method: "POST", headers: ADMIN })).json();
 
     expect(res).toMatchObject({ pulled: true, outcome: "changed" });
-    const expected = '1 block changed: "$25 per month per seat."';
+    const expected = "1 block changed";
     expect(await versionRow(res.version_id)).toMatchObject({ summary: expected, summary_source: "diff" });
     // Asked for once, for that version, through the fill seam (by default a SELF request to the admin route).
     expect(fills.mock.calls.map(([, id]) => id)).toEqual([res.version_id]);
@@ -248,7 +248,7 @@ describe("storing a summary when a version is created", () => {
     expect(errorLog.mock.calls.flat().map(String).join(" ")).toContain("subrequest failed");
     summaryDeps.fill = realFill;
     expect(await (await backfill()).json()).toEqual({ filled: 1, remaining: 0, oversized: [] });
-    expect(await versionRow(res.version_id)).toMatchObject({ summary: '1 block changed: "$25 per month per seat."', summary_source: "diff" });
+    expect(await versionRow(res.version_id)).toMatchObject({ summary: "1 block changed", summary_source: "diff" });
   });
 });
 
@@ -276,7 +276,7 @@ describe("POST /api/admin/backfill-summaries", () => {
 
     expect(await versionRow("v-0")).toMatchObject({ summary: null, summary_source: null });
     expect(await versionRow("v-1")).toMatchObject({ summary: "TinyFish: Pro rose to $25.", summary_source: "tinyfish" });
-    expect(await versionRow("v-2")).toMatchObject({ summary: '1 block added: "Includes 20 seats."', summary_source: "diff" });
+    expect(await versionRow("v-2")).toMatchObject({ summary: "1 block added", summary_source: "diff" });
     const before = await all("SELECT * FROM versions ORDER BY rowid");
     expect(await (await backfill()).json()).toEqual({ filled: 0, remaining: 0, oversized: [] });
     expect(await all("SELECT * FROM versions ORDER BY rowid")).toEqual(before);
@@ -289,7 +289,7 @@ describe("POST /api/admin/backfill-summaries", () => {
     await seedVersion("v-2", "2026-11-03T00:00:00.000Z", `${REAL_TEXT}\n\nIncludes 20 seats.\n\nNew footnote.`, { summary: null, summary_source: null });
     expect(await (await backfill()).json()).toEqual({ filled: 1, remaining: 0, oversized: [] });
     expect(await versionRow("v-1")).toMatchObject({ summary: "kept as it is" });
-    expect(await versionRow("v-2")).toMatchObject({ summary: '1 block added: "New footnote."', summary_source: "diff" });
+    expect(await versionRow("v-2")).toMatchObject({ summary: "1 block added", summary_source: "diff" });
   });
 
   it("?version=<id> fills only that version (an unknown id, a baseline or one already filled: nothing)", async () => {
@@ -304,7 +304,7 @@ describe("POST /api/admin/backfill-summaries", () => {
     await seedPage();
     await seedVersion("v-only", "2026-11-02T00:00:00.000Z", BASE_TEXT, { summary: null, summary_source: null });
     expect(await (await backfill()).json()).toEqual({ filled: 1, remaining: 0, oversized: [] });
-    expect(await versionRow("v-only")).toMatchObject({ summary: '4 blocks added: "Example pricing"', summary_source: "diff" });
+    expect(await versionRow("v-only")).toMatchObject({ summary: "4 blocks added", summary_source: "diff" });
   });
 
   it(`works on at most ${SUMMARY_TEXT_BUDGET_CHARS} characters of text a call and says how many remain`, async () => {
@@ -354,7 +354,7 @@ describe("POST /api/admin/backfill-summaries", () => {
       expect(await (await backfill()).json()).toEqual({ filled: 61, remaining: 1, oversized: ["big-1"] });
 
       expect(await versionRow("big-1")).toMatchObject({ summary: null, summary_source: null });
-      expect(await versionRow("b-1")).toMatchObject({ summary: '1 block changed: "$25 per month per seat."', summary_source: "diff" });
+      expect(await versionRow("b-1")).toMatchObject({ summary: "1 block changed", summary_source: "diff" });
       expect(await all("SELECT id FROM versions WHERE summary_source = 'tinyfish'")).toHaveLength(60);
       expect(await versionRow("tf-59")).toMatchObject({ summary: "TinyFish says 59", summary_source: "tinyfish" });
       // Called again, it fills nothing and lists the oversized one again.
@@ -364,7 +364,7 @@ describe("POST /api/admin/backfill-summaries", () => {
     it("?version=<id> fills an oversized version, in its own invocation", async () => {
       await seedOversizedFirst();
       expect(await (await backfill("?version=big-1")).json()).toEqual({ filled: 1, remaining: 1, oversized: [] });
-      expect(await versionRow("big-1")).toMatchObject({ summary: '1 block changed: "Entry 1."', summary_source: "diff" });
+      expect(await versionRow("big-1")).toMatchObject({ summary: "1 block changed", summary_source: "diff" });
     });
 
     it("the hourly cron asks for one default fill and at most one ?version= fill a tick, for the oldest oversized version", async () => {
@@ -373,6 +373,8 @@ describe("POST /api/admin/backfill-summaries", () => {
       const fills = vi.fn((e: Env, id?: string) => realFill(e, id));
       summaryDeps.fill = fills;
       vi.spyOn(console, "log").mockImplementation(() => {});
+      // The ?version= request takes the oversized versions in turn by the hour (site Task 2): an even hour takes the first.
+      cronDeps.now = () => new Date("2026-11-07T00:30:00.000Z");
 
       await runCron(env);
       expect(fills.mock.calls.map(([, id]) => id)).toEqual([undefined, "big-1"]);
@@ -410,7 +412,7 @@ describe("the hourly cron as a safety net", () => {
     await seedVersion("v-1", "2026-11-02T00:00:00.000Z", REAL_TEXT, { summary: null, summary_source: null });
     await runCron(env);
     expect(fills.mock.calls.map(([, id]) => id)).toEqual([undefined]);
-    expect(await versionRow("v-1")).toMatchObject({ summary: '1 block changed: "$25 per month per seat."', summary_source: "diff" });
+    expect(await versionRow("v-1")).toMatchObject({ summary: "1 block changed", summary_source: "diff" });
     expect(errorLog).not.toHaveBeenCalled();
   });
 

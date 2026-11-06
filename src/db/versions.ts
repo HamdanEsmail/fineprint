@@ -21,6 +21,8 @@ export type NewVersion = Pick<
       | "facts_status"
       | "summary"
       | "summary_source"
+      | "delta_json"
+      | "thumb_key"
     >
   >;
 
@@ -35,6 +37,7 @@ export type CapturePatch = Partial<
     | "capture_attempts"
     | "agent_run_id"
     | "facts_status"
+    | "thumb_key"
   >
 >;
 
@@ -78,6 +81,8 @@ const SUMMARY_COLUMNS = [
   "facts_status",
   "summary",
   "summary_source",
+  "delta_json",
+  "thumb_key",
 ] as const satisfies readonly (keyof VersionSummary)[];
 
 function summaryColumns(prefix = ""): string {
@@ -94,6 +99,7 @@ const CAPTURE_PATCH_COLUMNS = [
   "capture_attempts",
   "agent_run_id",
   "facts_status",
+  "thumb_key",
 ] as const satisfies readonly (keyof CapturePatch)[];
 
 /**
@@ -120,8 +126,8 @@ export async function insertVersion(db: D1Database, v: NewVersion): Promise<void
       `INSERT INTO versions
          (id, page_id, run_id, is_baseline, captured_at, text, normalized_hash, judgment_summary,
           screenshot_key, html_key, facts_json, capture_status, capture_error, capture_attempts, agent_run_id, notes,
-          facts_status, summary, summary_source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          facts_status, summary, summary_source, delta_json, thumb_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       v.id,
@@ -143,6 +149,8 @@ export async function insertVersion(db: D1Database, v: NewVersion): Promise<void
       v.facts_status ?? (v.facts_json != null ? "ok" : "pending"),
       summary.summary,
       summary.summary_source,
+      v.delta_json ?? null,
+      v.thumb_key ?? null,
     )
     .run();
 }
@@ -309,14 +317,21 @@ export type SummaryCandidate = Pick<VersionRow, "id" | "page_id" | "captured_at"
   ignore_patterns: string;
 };
 
-const CANDIDATE_SELECT = `SELECT v.id, v.page_id, v.captured_at, v.judgment_summary, length(v.text) AS text_length,
-    COALESCE((SELECT length(w.text) FROM versions w
-              WHERE w.page_id = v.page_id AND w.id != v.id
-                AND (w.captured_at < v.captured_at OR (w.captured_at = v.captured_at AND w.rowid < v.rowid))
-              ORDER BY w.captured_at DESC, w.rowid DESC LIMIT 1), 0) AS previous_length,
+/** The version of the same page captured just before `v` (ties by insertion), as a correlated subquery's FROM and WHERE. */
+const PREVIOUS_OF_V = `FROM versions w
+  WHERE w.page_id = v.page_id AND w.id != v.id
+    AND (w.captured_at < v.captured_at OR (w.captured_at = v.captured_at AND w.rowid < v.rowid))
+  ORDER BY w.captured_at DESC, w.rowid DESC LIMIT 1`;
+
+// A NULL text counts as empty here, so one bad row cannot turn a call's text budget into NaN.
+const candidateSelect = (where: string): string => `SELECT v.id, v.page_id, v.captured_at, v.judgment_summary,
+    COALESCE(length(v.text), 0) AS text_length,
+    COALESCE((SELECT length(w.text) ${PREVIOUS_OF_V}), 0) AS previous_length,
     p.ignore_patterns
   FROM versions v JOIN pages p ON p.id = v.page_id
-  WHERE v.is_baseline = 0 AND v.summary IS NULL`;
+  WHERE v.is_baseline = 0 AND ${where}`;
+
+const CANDIDATE_SELECT = candidateSelect("v.summary IS NULL");
 
 /** The oldest non-baseline versions without a summary (by `captured_at`, then insertion), at most `limit`. */
 export async function versionsMissingSummary(db: D1Database, limit: number): Promise<SummaryCandidate[]> {
@@ -370,21 +385,26 @@ export async function countMissingSummaries(db: D1Database): Promise<number> {
   return row?.n ?? 0;
 }
 
-/** The text of the version of the same page captured just before this one (ties by insertion), or null. */
-export async function previousVersionText(
-  db: D1Database,
-  v: Pick<VersionRow, "id" | "page_id" | "captured_at">,
-): Promise<string | null> {
-  const row = await db
+/**
+ * One version with its text, and the id, text and stored facts of the version of the same page captured
+ * just before it (ties by insertion), in one query: what a diff of the version needs. The previous_*
+ * fields are null when there is no earlier version. Null for an unknown id.
+ */
+export type VersionWithPrevious = VersionRow & {
+  previous_id: string | null;
+  previous_text: string | null;
+  previous_facts_json: string | null;
+};
+
+export function versionWithPrevious(db: D1Database, id: string): Promise<VersionWithPrevious | null> {
+  return db
     .prepare(
-      `SELECT text FROM versions
-       WHERE page_id = ?1 AND id != ?2
-         AND (captured_at < ?3 OR (captured_at = ?3 AND rowid < (SELECT rowid FROM versions WHERE id = ?2)))
-       ORDER BY captured_at DESC, rowid DESC LIMIT 1`,
+      `SELECT v.*, p.id AS previous_id, p.text AS previous_text, p.facts_json AS previous_facts_json
+       FROM versions v LEFT JOIN versions p ON p.id = (SELECT w.id ${PREVIOUS_OF_V})
+       WHERE v.id = ?`,
     )
-    .bind(v.page_id, v.id, v.captured_at)
-    .first<{ text: string }>();
-  return row?.text ?? null;
+    .bind(id)
+    .first<VersionWithPrevious>();
 }
 
 /** Stores a version's summary unless it already has one; true when it was written. */
@@ -393,6 +413,145 @@ export async function setSummaryIfMissing(db: D1Database, id: string, summary: s
     .prepare("UPDATE versions SET summary = ?, summary_source = ? WHERE id = ? AND summary IS NULL")
     .bind(summary, source, id)
     .run();
+  return result.meta.changes === 1;
+}
+
+/**
+ * Stores a version's diff summary and, unless it has one, its delta, in one statement, only while the
+ * version still has no summary (a stored summary is never replaced). True when it was written.
+ */
+export async function setDiffSummaryAndDelta(db: D1Database, id: string, summary: string, deltaJson: string): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE versions SET summary = ?1, summary_source = 'diff', delta_json = COALESCE(delta_json, ?2)
+       WHERE id = ?3 AND summary IS NULL`,
+    )
+    .bind(summary, deltaJson, id)
+    .run();
+  return result.meta.changes === 1;
+}
+
+// --- Deltas ----------------------------------------------------------------------
+//
+// A non-baseline version's delta (src/core/diff.ts Delta) is computed out of band with its diff summary
+// (src/summary.ts). The delta fill takes the versions that already have a summary; a version without one
+// is the summary fill's, which writes both.
+
+/**
+ * Stores a version's delta while it has none; true when it was written. With `rebuiltSummary`, a diff
+ * summary is rewritten in the same statement (the one-off rebuild under the summary line rule: each
+ * version gets its delta once, so each diff summary is rebuilt once); a TinyFish summary is never
+ * touched. A rewritten summary drops the cached diffs that end at the version, in the same batch: they
+ * carry the old line.
+ */
+export async function setDeltaOnce(db: D1Database, id: string, deltaJson: string, rebuiltSummary: string | null): Promise<boolean> {
+  const update = db
+    .prepare(
+      `UPDATE versions
+       SET delta_json = ?1,
+           summary = CASE WHEN summary_source = 'diff' AND ?2 IS NOT NULL THEN ?2 ELSE summary END
+       WHERE id = ?3 AND delta_json IS NULL`,
+    )
+    .bind(deltaJson, rebuiltSummary, id);
+  if (rebuiltSummary === null) return (await update.run()).meta.changes === 1;
+  const [written] = await db.batch([update, db.prepare("DELETE FROM diff_cache WHERE to_version_id = ?").bind(id)]);
+  return written!.meta.changes === 1;
+}
+
+const DELTA_CANDIDATE_SELECT = candidateSelect("v.delta_json IS NULL AND v.summary IS NOT NULL");
+
+/** The oldest non-baseline versions with a summary and no delta, at most `limit`, listed as summary candidates are. */
+export async function versionsMissingDelta(db: D1Database, limit: number): Promise<SummaryCandidate[]> {
+  const { results } = await db
+    .prepare(`${DELTA_CANDIDATE_SELECT} ORDER BY v.captured_at, v.rowid LIMIT ?`)
+    .bind(Math.max(0, Math.trunc(limit)) || 0)
+    .all<SummaryCandidate>();
+  return results;
+}
+
+/** One version, if it is a non-baseline version without a delta (with or without a summary); else null. */
+export function versionMissingDelta(db: D1Database, id: string): Promise<SummaryCandidate | null> {
+  return db.prepare(`${candidateSelect("v.delta_json IS NULL")} AND v.id = ?`).bind(id).first<SummaryCandidate>();
+}
+
+/** How many non-baseline versions have no delta yet (with or without a summary). */
+export async function countMissingDeltas(db: D1Database): Promise<number> {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS n FROM versions WHERE is_baseline = 0 AND delta_json IS NULL")
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+// A delta whose facts part is still null while this version and the one before it both have stored facts
+// now (facts land minutes after the version). No text is read.
+const FACTS_DELTA_FROM = `FROM versions v JOIN versions p ON p.id = (SELECT w.id ${PREVIOUS_OF_V})`;
+const FACTS_DELTA_WHERE = `v.is_baseline = 0 AND v.delta_json IS NOT NULL AND json_valid(v.delta_json)
+    AND json_type(v.delta_json, '$.facts') = 'null'
+    AND v.facts_json IS NOT NULL AND p.facts_json IS NOT NULL`;
+
+export type FactsDeltaCandidate = { id: string; delta_json: string; facts_json: string; previous_facts_json: string };
+
+/** The oldest deltas whose facts part can be filled now, at most `limit`. */
+export async function factsDeltaCandidates(db: D1Database, limit: number): Promise<FactsDeltaCandidate[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT v.id, v.delta_json, v.facts_json, p.facts_json AS previous_facts_json ${FACTS_DELTA_FROM}
+       WHERE ${FACTS_DELTA_WHERE} ORDER BY v.captured_at, v.rowid LIMIT ?`,
+    )
+    .bind(Math.max(0, Math.trunc(limit)) || 0)
+    .all<FactsDeltaCandidate>();
+  return results;
+}
+
+/** How many deltas have a facts part that can be filled now. */
+export async function countFactsDeltas(db: D1Database): Promise<number> {
+  const row = await db.prepare(`SELECT COUNT(*) AS n ${FACTS_DELTA_FROM} WHERE ${FACTS_DELTA_WHERE}`).first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/**
+ * Rewrites many deltas in one statement (the free plan allows 50 D1 queries an invocation), each only
+ * while its stored delta is still the one it was computed from. Returns how many were written.
+ */
+export async function replaceDeltas(db: D1Database, rows: { id: string; from: string; to: string }[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  const result = await db
+    .prepare(
+      `UPDATE versions
+       SET delta_json = (SELECT json_extract(j.value, '$.to') FROM json_each(?1) j WHERE json_extract(j.value, '$.id') = versions.id)
+       WHERE EXISTS (SELECT 1 FROM json_each(?1) j
+                     WHERE json_extract(j.value, '$.id') = versions.id AND json_extract(j.value, '$.from') = versions.delta_json)`,
+    )
+    .bind(JSON.stringify(rows))
+    .run();
+  return result.meta.changes;
+}
+
+// --- Thumbnails --------------------------------------------------------------------
+
+/** Versions with a stored screenshot and no thumbnail, newest first (the feed shows those first), ids only. */
+export async function versionsWithoutThumb(db: D1Database, limit: number): Promise<string[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT id FROM versions WHERE screenshot_key IS NOT NULL AND thumb_key IS NULL
+       ORDER BY captured_at DESC, rowid DESC LIMIT ?`,
+    )
+    .bind(Math.max(0, Math.trunc(limit)) || 0)
+    .all<{ id: string }>();
+  return results.map((r) => r.id);
+}
+
+/** How many versions have a stored screenshot and no thumbnail. */
+export async function countVersionsWithoutThumb(db: D1Database): Promise<number> {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS n FROM versions WHERE screenshot_key IS NOT NULL AND thumb_key IS NULL")
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/** Records a version's thumbnail key unless it has one; true when it was written. */
+export async function setThumbKey(db: D1Database, id: string, key: string): Promise<boolean> {
+  const result = await db.prepare("UPDATE versions SET thumb_key = ? WHERE id = ? AND thumb_key IS NULL").bind(key, id).run();
   return result.meta.changes === 1;
 }
 
@@ -636,7 +795,8 @@ export type FactsCandidate = VersionSummary & { url: string };
 
 /**
  * The oldest version (by `captured_at`) that is waiting for a facts run: its page is
- * `pricing` or `fees` and not expired or retired, it has no facts and no run, it is not `failed`, its
+ * `pricing` or `fees`, not added by a public visitor (src/capture.ts needsFacts) and not expired or
+ * retired, it has no facts and no run, it is not `failed`, its
  * facts are not settled as `unavailable` (a facts run that completed with an empty list is final), it
  * has attempts left, and it is a baseline or its run was not judged irrelevant (a judgment
  * of NULL, or no run at all, counts as relevant). Null when the queue is empty.
@@ -652,6 +812,7 @@ export function nextFactsCandidate(
        JOIN pages p ON p.id = v.page_id
        LEFT JOIN runs r ON r.id = v.run_id
        WHERE p.kind IN ('pricing', 'fees')
+         AND COALESCE(p.added_by, '') != 'public'
          AND p.status NOT IN ('expired', 'retired')
          AND v.facts_json IS NULL
          AND v.agent_run_id IS NULL

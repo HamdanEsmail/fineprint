@@ -3,10 +3,13 @@
 // again with the same ones, so they can never disagree about what counts as "the same page".
 import { getVersion, hasVersionWithHashSince, latestVersionHash } from "../db/versions";
 import type { PageRow } from "../db/types";
-import { structuredDiff } from "./diff";
+import { blockSetDifference, structuredDiff } from "./diff";
 import {
   CONFIRM_WINDOW_MS,
   FLAP_WINDOW_MS,
+  LAYOUT_HOLD_MAX_ADDED_SHARE,
+  LAYOUT_HOLD_MIN_REMOVED,
+  LAYOUT_HOLD_RATIO,
   PARTIAL_RENDER_LARGE_CHARS,
   PARTIAL_RENDER_RATIO,
   PARTIAL_RENDER_SMALL_CHARS,
@@ -52,6 +55,8 @@ export type Verdict =
     }
   /** A read that looks like a partial render: no version, the run is noise, and the page awaits a confirm read. */
   | { kind: "partial_suspect"; hash: string }
+  /** A read that looks like a shrinking restructure (see looksLikeLayoutHold): held for a confirm read the same way. */
+  | { kind: "layout_hold"; hash: string }
   /**
    * `baseline` is set only for the first version of a page that has none. `notes` is the new
    * version's note (a confirmed suspect read); `clearPending` says the page's pending confirm read
@@ -71,6 +76,21 @@ function looksPartial(latestNormalized: string, newNormalized: string): boolean 
   if (after < PARTIAL_RENDER_SMALL_CHARS && before > PARTIAL_RENDER_LARGE_CHARS) return true;
   if (after >= before * PARTIAL_RENDER_RATIO) return false;
   return structuredDiff(latestNormalized, newNormalized).added.length === 0;
+}
+
+/**
+ * Whether a read that differs from the latest version is a shrinking restructure, held for a confirm read
+ * like a partial render (GitHub pricing on 5 Nov: 18,823 normalized characters became 17,061, 228 blocks
+ * removed and 1 added): under LAYOUT_HOLD_RATIO of the latest's length, at least LAYOUT_HOLD_MIN_REMOVED
+ * blocks removed, and added blocks at most LAYOUT_HOLD_MAX_ADDED_SHARE of the removed ones. This runs on
+ * the webhook path, so the length test comes first and decides almost every read; only a read under the
+ * ratio counts blocks, and it counts them with blockSetDifference (two splits and a map, linear in the
+ * text) rather than the aligned structuredDiff.
+ */
+export function looksLikeLayoutHold(latestNormalized: string, newNormalized: string): boolean {
+  if (newNormalized.length >= latestNormalized.length * LAYOUT_HOLD_RATIO) return false;
+  const { added, removed } = blockSetDifference(latestNormalized, newNormalized);
+  return removed >= LAYOUT_HOLD_MIN_REMOVED && added <= removed * LAYOUT_HOLD_MAX_ADDED_SHARE;
 }
 
 /**
@@ -101,9 +121,10 @@ type JudgedPage = Pick<PageRow, "id" | "ignore_patterns"> &
  * rewrite the stored hash so later runs take the cheap path again.
  *
  * A read that really differs from the latest version then meets, in this order:
- * - The partial-render guard (looksPartial), unless this read is the confirm of a pending suspect:
- *   the page has a pending read (pending_at within 24 hours) with the same hash, so two consecutive
- *   reads agree. A suspect read makes no version; the caller marks the page for a confirm read.
+ * - The partial-render guard (looksPartial), then the layout hold (looksLikeLayoutHold), unless this read
+ *   is the confirm of a pending suspect: the page has a pending read (pending_at within 24 hours) with the
+ *   same hash, so two consecutive reads agree. A suspect read makes no version; the caller marks the page
+ *   for a confirm read. The confirm's version notes which of the two held the first read.
  * - Flap suppression: a hash equal to any version of the page captured in the last 72 hours is a
  *   flap, a confirm read included. (The latest-equal case above is checked first.)
  * - Otherwise a new version; a confirm read's carries a note naming the suspect run.
@@ -139,9 +160,10 @@ export async function judgeChange(
     return { kind: "suppressed", reason: "normalized_identical", heal: { versionId: latest.id, hash }, ...clear };
   }
 
-  if (!confirming && previousNormalized !== null && looksPartial(previousNormalized, newNormalized)) {
-    return { kind: "partial_suspect", hash };
-  }
+  const partial = previousNormalized !== null && looksPartial(previousNormalized, newNormalized);
+  if (!confirming && partial) return { kind: "partial_suspect", hash };
+  const held = !partial && previousNormalized !== null && looksLikeLayoutHold(previousNormalized, newNormalized);
+  if (!confirming && held) return { kind: "layout_hold", hash };
   const bounds = opts.replay ? { untilIso: new Date(nowMs).toISOString(), exceptVersionId: opts.replay.exceptVersionId } : {};
   if (await hasVersionWithHashSince(db, page.id, hash, new Date(nowMs - FLAP_WINDOW_MS).toISOString(), bounds)) {
     return { kind: "suppressed", reason: "flap", heal: null, ...clear };
@@ -150,7 +172,7 @@ export async function judgeChange(
     kind: "new_version",
     hash,
     baseline: false,
-    ...(confirming ? { notes: `confirmed after partial-render suspect run ${page.pending_run_id}` } : {}),
+    ...(confirming ? { notes: `confirmed after ${held ? "layout-hold" : "partial-render"} suspect run ${page.pending_run_id}` } : {}),
     ...clear,
   };
 }

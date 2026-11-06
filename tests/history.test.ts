@@ -188,6 +188,8 @@ describe("GET /api/pages/:id/versions/:vid", () => {
       facts: facts2,
       screenshot_url: `${BASE}/shots/ver-2.jpg`,
       source_url: `${BASE}/sources/ver-2.html`,
+      thumb_url: null,
+      delta: null,
       live_url: URL1,
       summary: SUMMARY2, // the run carried TinyFish's summary, so the version was stored with it
       summary_source: "tinyfish",
@@ -666,6 +668,9 @@ describe("GET /api/changes", () => {
       screenshot_url: null,
       trigger: "webhook",
       facts_status: "ok",
+      kind: "pricing",
+      delta: null,
+      thumb_url: null,
     });
     expect(all.body.changes[1]).toEqual({
       version_id: "n-2",
@@ -678,6 +683,9 @@ describe("GET /api/changes", () => {
       screenshot_url: `${BASE}/shots/n-2.jpg`,
       trigger: null, // seeded without a run
       facts_status: "pending",
+      kind: "pricing",
+      delta: null,
+      thumb_url: null,
     });
 
     const limited = await getJson("/api/changes?limit=2");
@@ -756,7 +764,9 @@ describe("GET /api/export.json", () => {
         judgment_summary: SUMMARY3,
         screenshot_url: null,
         source_url: `${BASE}/sources/ver-3.html`,
+        thumb_url: null,
         facts: facts3,
+        delta: null,
         capture_status: "failed",
         facts_status: "ok",
         trigger: "webhook",
@@ -772,7 +782,9 @@ describe("GET /api/export.json", () => {
         judgment_summary: SUMMARY2,
         screenshot_url: `${BASE}/shots/ver-2.jpg`,
         source_url: `${BASE}/sources/ver-2.html`,
+        thumb_url: null,
         facts: facts2,
+        delta: null,
         capture_status: "complete",
         facts_status: "ok",
         trigger: "webhook",
@@ -788,7 +800,9 @@ describe("GET /api/export.json", () => {
         judgment_summary: null,
         screenshot_url: `${BASE}/shots/ver-1.jpg`,
         source_url: `${BASE}/sources/ver-1.html`,
+        thumb_url: null,
         facts: facts1,
+        delta: null,
         capture_status: "complete",
         facts_status: "ok",
         trigger: "create",
@@ -858,7 +872,7 @@ describe("GET /api/stats", () => {
       noise_suppressed: NOISE_RUNS,
       facts_unavailable: 0,
       // The seeded noise runs carry the reason "last updated": a reason the code does not know has its own key.
-      noise_by_reason: { normalized_identical: 0, partial_render: 0, flap: 0, "last updated": NOISE_RUNS },
+      noise_by_reason: { normalized_identical: 0, partial_render: 0, flap: 0, layout_hold: 0, "last updated": NOISE_RUNS },
       spend_usd: 0.051,
       spend_paused: false,
       facts_paused: false,
@@ -868,6 +882,11 @@ describe("GET /api/stats", () => {
       cost_per_catch_usd: 0.0255,
       // run-1 is the create baseline; the other nine arrived by webhook.
       runs_by_trigger: { create: 1, webhook: 9, pull: 0 },
+      changes: 2,
+      layout_only: 0,
+      // The earliest page's insert time.
+      recording_since: (await db.prepare("SELECT MIN(created_at) AS t FROM pages").first<{ t: string }>())!.t,
+      public_slots: { total: 4, used: 0, next_free_at: null },
     });
   });
 
@@ -880,7 +899,7 @@ describe("GET /api/stats", () => {
       versions: 0,
       noise_suppressed: 0,
       facts_unavailable: 0,
-      noise_by_reason: { normalized_identical: 0, partial_render: 0, flap: 0 },
+      noise_by_reason: { normalized_identical: 0, partial_render: 0, flap: 0, layout_hold: 0 },
       spend_usd: 0,
       spend_paused: false,
       facts_paused: false,
@@ -888,6 +907,10 @@ describe("GET /api/stats", () => {
       monitors: { active: 0, paused: 0, failed: 0, expired: 0, retired: 0 },
       cost_per_catch_usd: null,
       runs_by_trigger: { create: 0, webhook: 0, pull: 0 },
+      changes: 0,
+      layout_only: 0,
+      recording_since: null,
+      public_slots: { total: 4, used: 0, next_free_at: null },
     });
   });
 

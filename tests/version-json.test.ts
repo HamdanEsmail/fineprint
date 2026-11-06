@@ -76,13 +76,15 @@ describe("the version shape", () => {
         id: "v-1", page_id: PAGE, captured_at: T1, is_baseline: false,
         summary: '1 block changed: "$25 per month"', summary_source: "diff", judgment_summary: null,
         facts: FACTS, screenshot_url: `${BASE}/shots/v-1.jpg`, source_url: `${BASE}/sources/v-1.html`,
+        delta: null, thumb_url: null,
         capture_status: "complete", facts_status: "ok", trigger: "pull",
         notes: "created by replay on 2026-11-05T00:00:00.000Z",
       },
       {
         id: "v-0", page_id: PAGE, captured_at: T0, is_baseline: true, summary: null, summary_source: null, judgment_summary: null,
         facts: [{ name: "Pro", price: "$20", unit: "month", notes: null }], screenshot_url: `${BASE}/shots/v-0.jpg`,
-        source_url: `${BASE}/sources/v-0.html`, capture_status: "complete", facts_status: "ok", trigger: "create", notes: null,
+        source_url: `${BASE}/sources/v-0.html`, delta: null, thumb_url: null, capture_status: "complete", facts_status: "ok",
+        trigger: "create", notes: null,
       },
     ]);
 

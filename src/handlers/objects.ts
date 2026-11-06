@@ -1,5 +1,6 @@
-// The stored copies of a version: `/shots/<version id>.jpg` serves R2 `shots/<id>.jpg`
-// and `/sources/<version id>.html` serves R2 `html/<id>.html`. A version's objects are
+// The stored copies of a version: `/shots/<version id>.jpg` serves R2 `shots/<id>.jpg`,
+// `/thumbs/<version id>.jpg` its thumbnail, R2 `thumbs/<id>.jpg`, and `/sources/<version
+// id>.html` serves R2 `html/<id>.html`. A version's objects are
 // written once and never change, so they are cached for a year. A source is a third
 // party's HTML: it is served sandboxed (no scripts, no same-origin access) and never
 // sniffed into another type, so it can be read but never runs on our origin.
@@ -31,4 +32,5 @@ async function serve(c: Context<{ Bindings: Env }>, prefix: string, extension: "
 }
 
 objectsRouter.get("/shots/:name", (c) => serve(c, "shots/", "jpg"));
+objectsRouter.get("/thumbs/:name", (c) => serve(c, "thumbs/", "jpg"));
 objectsRouter.get("/sources/:name", (c) => serve(c, "html/", "html"));

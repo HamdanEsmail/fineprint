@@ -259,7 +259,8 @@ describe("partial-render guard", () => {
     const latest = build(26);
     expect(len(latest)).toBeLessThan(2000);
     await seedVersion(pageId, latest, 5, true);
-    const withAdded = `${build(4)}\n\nAn extra notice that was not on the page before.`;
+    // Two new blocks: with only one, 22 removed and 1 added would be held as a layout restructure (site Task 2).
+    const withAdded = `${build(4)}\n\nAn extra notice that was not on the page before.\n\nA second new notice.`;
     expect(len(withAdded)).toBeLessThan(500);
 
     // (a): under 70%, but a block was added: a real change.
@@ -543,14 +544,14 @@ describe("exposure", () => {
 
   it("/api/stats has noise_by_reason with its keys always present", async () => {
     const empty: Json = await (await callWorker("/api/stats")).json();
-    expect(empty.noise_by_reason).toEqual({ normalized_identical: 0, partial_render: 0, flap: 0 });
+    expect(empty.noise_by_reason).toEqual({ normalized_identical: 0, partial_render: 0, flap: 0, layout_hold: 0 });
 
     const pageId = await seedPage();
     await seedVersion(pageId, build(32), 5, true);
     await pullText(pageId, "tf-suspect", build(10));
     await pullText(pageId, "tf-whole", build(32));
     const stats: Json = await (await callWorker("/api/stats")).json();
-    expect(stats.noise_by_reason).toEqual({ normalized_identical: 1, partial_render: 1, flap: 0 });
+    expect(stats.noise_by_reason).toEqual({ normalized_identical: 1, partial_render: 1, flap: 0, layout_hold: 0 });
     expect(stats.noise_suppressed).toBe(2);
   });
 

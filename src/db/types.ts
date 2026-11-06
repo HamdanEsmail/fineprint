@@ -114,6 +114,13 @@ export interface VersionRow {
   summary: string | null;
   /** Where `summary` came from; null when it is. */
   summary_source: SummarySource | null;
+  /**
+   * The change's counts against the version before it (a `Delta` from src/core/diff.ts, as JSON,
+   * migrations/0007_site_fields.sql); null for a baseline, and until the out-of-band fill computes it.
+   */
+  delta_json: string | null;
+  /** The R2 key of the version's thumbnail (`thumbs/<id>.jpg`), or null when it has none. */
+  thumb_key: string | null;
 }
 
 export interface SpendRow {

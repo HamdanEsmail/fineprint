@@ -351,7 +351,7 @@ The clock has started when `pages` is 20 and the first hourly and twice-daily Mo
 
 ## 12. Updating the live Worker
 
-A change that adds a migration needs it applied before the deploy. **Never deploy before the migration: the new code reads columns 0006 adds, and without them webhooks fail and read endpoints answer 500.** Migrations are additive (new columns with defaults), so the code still running reads the database fine in between.
+A change that adds a migration needs it applied before the deploy. **Never deploy before the migration: the new code reads the columns the migration adds (0006: the summaries and the pull backoff; 0007: `versions.delta_json` and `versions.thumb_key`), and without them webhooks fail and read endpoints answer 500.** Migrations are additive (new columns with defaults), so the code still running reads the database fine in between.
 
 ```bash
 cd "/c/Tinyfish Bounties/fineprint" || exit 1
@@ -381,12 +381,56 @@ for i in $(seq 1 40); do
   OUT=$(curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$BASE/api/admin/backfill-summaries"); echo "$OUT"
   echo "$OUT" | grep -q '"filled":0,' && break
 done
+echo "$OUT" | grep -q '"filled":0,' || { echo "STOP: the summary fill still filled something after 40 calls (or did not answer); report the last line and do not go on"; exit 1; }
 for ID in $(echo "$OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const id of JSON.parse(s).oversized??[])if(/^[0-9a-f-]{36}$/.test(id))console.log(id)}catch{}})'); do
   curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$BASE/api/admin/backfill-summaries?version=$ID"; echo
 done
 ```
 
-Success: the loop ends on a line with `"filled":0`, and each `?version=` call answers `"filled":1`. If one of those answers 500 (that page is too large for the free plan's CPU even alone), note its id and report it; it holds nothing else back. The hourly job asks for one fill whenever a summary is missing, plus one `?version=` request a tick for the oldest oversized version, so anything left is filled over the next ticks.
+Success: the loop ends on a line with `"filled":0`, and each `?version=` call answers `"filled":1`. If the loop prints the STOP line instead, it ran out of calls or got an answer that is not the fill's JSON: report the last line. If a `?version=` call answers 500 (that page is too large for the free plan's CPU even alone), note its id and report it; it holds nothing else back. The hourly job asks for one fill whenever a summary is missing, plus one `?version=` request a tick for one oversized version, taken in turn by the hour of day, so anything left is filled over the next ticks.
+
+### After the deploy that brings migration 0007 (site fields)
+
+Migration 0007 adds `versions.delta_json` (a change's counts against the version before it, with the layout-only label) and `versions.thumb_key` (the version's 640 by 400 thumbnail). Both start NULL for every existing version. Nothing in history is deleted or judged again: existing versions get their delta, and their thumbnail, only through the two backfills below. Run the 0007 migration before the deploy, as above; the deploy keeps `SITE_ENABLED` at `"0"`.
+
+First the deltas. A call answers `{"filled":<n>,"rebuilt":<n>,"facts_filled":<n>,"remaining":<m>,"oversized":[<version ids>]}`. Computing a version's delta also rebuilds its summary under the line rule when that summary came from the diff (`rebuilt`): each version gets its delta once, so each diff summary is rebuilt once, and a TinyFish summary is never touched. The block calls it until it fills nothing, then once with `?version=<id>` for each id in `oversized`, then lists the changes labelled layout only:
+
+```bash
+cd "/c/Tinyfish Bounties/fineprint" || exit 1
+BASE=$(grep -o '"PUBLIC_BASE_URL": *"[^"]*"' wrangler.jsonc | cut -d'"' -f4)
+[[ $BASE =~ ^https://[^/]+$ ]] || { echo "STOP: PUBLIC_BASE_URL in wrangler.jsonc is not the workers.dev URL (step 6)"; exit 1; }
+ADMIN_TOKEN=$(grep -m1 '^ADMIN_TOKEN=' ../.fineprint-prod.env | cut -d= -f2- | tr -d '\r\n')
+[ "${#ADMIN_TOKEN}" = 48 ] || { echo "STOP: ADMIN_TOKEN is missing or not 48 characters in ../.fineprint-prod.env"; exit 1; }
+for i in $(seq 1 40); do
+  OUT=$(curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$BASE/api/admin/backfill-deltas"); echo "$OUT"
+  echo "$OUT" | grep -q '"filled":0,' && break
+done
+echo "$OUT" | grep -q '"filled":0,' || { echo "STOP: the delta fill still filled something after 40 calls (or did not answer); report the last line and do not go on"; exit 1; }
+for ID in $(echo "$OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const id of JSON.parse(s).oversized??[])if(/^[0-9a-f-]{36}$/.test(id))console.log(id)}catch{}})'); do
+  curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$BASE/api/admin/backfill-deltas?version=$ID"; echo
+done
+curl -s "$BASE/api/changes?limit=200" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const c=JSON.parse(s).changes;for(const x of c)if(x.delta&&x.delta.layout_only)console.log("layout only:",x.page_label,x.captured_at);console.log(c.filter(x=>x.delta===null).length,"changes still without a delta")})'
+```
+
+Success: the loop ends on a line with `"filled":0`, each `?version=` call answers `"filled":1`, and the last command lists exactly two layout-only changes, GitHub pricing on 5 Nov at 14:38 and the OpenAI privacy policy on 3 Nov at 18:06, then `0 changes still without a delta`. **If it lists any other layout-only change, stop and report it before the site is switched on.** A `?version=` call that answers 500 is reported as for the summaries; the hourly job asks for the missing deltas each tick (and adds a delta's facts part once both of its versions have facts).
+
+Then the thumbnails. Each call opens one TinyBrowser session (one $0.002 screenshot unit) and photographs up to `limit` stored screenshots. The trial is one call with `limit=1`; the block then calls it until nothing is left, and stops early if a call made none:
+
+```bash
+cd "/c/Tinyfish Bounties/fineprint" || exit 1
+BASE=$(grep -o '"PUBLIC_BASE_URL": *"[^"]*"' wrangler.jsonc | cut -d'"' -f4)
+ADMIN_TOKEN=$(grep -m1 '^ADMIN_TOKEN=' ../.fineprint-prod.env | cut -d= -f2- | tr -d '\r\n')
+[ "${#ADMIN_TOKEN}" = 48 ] || { echo "STOP: ADMIN_TOKEN is missing or not 48 characters in ../.fineprint-prod.env"; exit 1; }
+OUT=$(curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$BASE/api/admin/thumbs?limit=1"); echo "$OUT"
+echo "$OUT" | grep -q '"made":1,' || { echo "STOP: the trial made no thumbnail; report the line above"; exit 1; }
+for i in $(seq 1 10); do
+  OUT=$(curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$BASE/api/admin/thumbs?limit=10"); echo "$OUT"
+  echo "$OUT" | grep -q '"remaining":0' && break
+  echo "$OUT" | grep -q '"made":0,' && { echo "STOP: a call made no thumbnail; report the line above"; break; }
+done
+```
+
+Success: the trial answers `"made":1`, open `$BASE/thumbs/<that version id>.jpg` and check it shows the top of the page; the loop ends on `"remaining":0`. A version whose stored screenshot would not load stays without a thumbnail and simply shows its screenshot.
 
 ## If something goes wrong
 
