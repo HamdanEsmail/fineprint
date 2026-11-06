@@ -39,6 +39,6 @@ Skipped: item 5, the US visa bulletin (`target_http_error` from TinyFetch); item
 
 ## Swap on 6 Nov 2026: OpenAI API pricing out, DEWA slab tariff in
 
-- 18:42 UTC: OpenAI API pricing (item 9, page `a534dcbb-b5a1-41e3-9f23-d241e0f5d544`) retired through `POST /api/admin/pages/:id/retire`. Its Monitor `b2423da3-93f3-4c22-9a02-4b92394263e8` was deleted; the page stays listed with status `retired`, and its 4 versions, runs and stored files are kept. The page rendered differently on most reads (a short table one time, the full table the next), which produced false versions.
+- 18:42 UTC: OpenAI API pricing (item 9, page `a534dcbb-b5a1-41e3-9f23-d241e0f5d544`) retired through `POST /api/admin/pages/:id/retire`. Its Monitor `b2423da3-93f3-4c22-9a02-4b92394263e8` was deleted; the page stays listed with status `retired`, and its 4 versions, runs and stored files are kept. The page rendered differently from one read to the next (a short table one time, the full table another), which produced false versions.
 - 18:43 UTC: DEWA slab tariff (`https://www.dewa.gov.ae/en/consumer/billing/slab-tariff`, kind `fees`) added through the normal admin add, `POST /api/pages`: page `1fc7580e-9df9-40f5-8f8e-7f29b89babaa`, Monitor `690215c8-7f83-43fc-bd19-314cb32c028b`, schedule `13 7,19 * * *`, baseline version `5c6f7b4d-a984-4ff5-b0d7-dbd576c2653c` with screenshot and source; its facts run went through the single facts queue.
 - The watch list is still 20 active pages on 20 Monitors.
