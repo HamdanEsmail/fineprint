@@ -1,6 +1,6 @@
 // The admin replay reads the raw bodies of pulled runs as well as webhook payloads, decides every run with the
 // shared gate (partial-render guard and flap rule included), and reports a decision per run.
-import { applyD1Migrations, reset } from "cloudflare:test";
+import { applyD1Migrations, createExecutionContext, reset, waitOnExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashText, normalize } from "../src/core/normalize";
@@ -9,6 +9,8 @@ import { insertPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { RunRow, VersionRow } from "../src/db/types";
 import { insertVersion } from "../src/db/versions";
+import type { Env } from "../src/env";
+import worker from "../src/index";
 import { callWorker } from "./helpers/app";
 import { fetchMock } from "./helpers/fetch-mock";
 import monitorCreate from "./fixtures/tinyfish/monitor-create.json";
@@ -29,7 +31,27 @@ const T3 = "2026-11-02T03:00:00.000Z";
 const para = (i: number) => `Item ${String(i).padStart(3, "0")}: the price is $${i}.50 per 1M tokens, billed monthly in arrears.`;
 const build = (n: number) => Array.from({ length: n }, (_, k) => para(k)).join("\n\n");
 
-const replay = () => callWorker(`/api/pages/${PAGE}/replay`, { method: "POST", headers: ADMIN });
+const replay = (query = "") => callWorker(`/api/pages/${PAGE}/replay${query}`, { method: "POST", headers: ADMIN });
+
+/** The replay with an env whose R2 bucket records every key read from it. */
+async function replayRecordingReads(query = ""): Promise<{ body: Json; reads: string[] }> {
+  const reads: string[] = [];
+  const store = new Proxy(env.STORE, {
+    get(target, prop) {
+      if (prop === "get") return (key: string, ...rest: unknown[]) => (reads.push(key), (target.get as (...a: unknown[]) => unknown)(key, ...rest));
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const ctx = createExecutionContext();
+  const res = await worker.fetch(
+    new Request(`https://fineprint.test/api/pages/${PAGE}/replay${query}`, { method: "POST", headers: ADMIN }),
+    { ...env, STORE: store } as unknown as Env,
+    ctx,
+  );
+  await waitOnExecutionContext(ctx);
+  return { body: await res.json(), reads };
+}
 const all = async <T>(sql: string, ...b: unknown[]): Promise<T[]> => (await env.DB.prepare(sql).bind(...b).all<T>()).results;
 const versions = () => all<VersionRow>("SELECT * FROM versions WHERE page_id = ? ORDER BY captured_at, rowid", PAGE);
 const runRow = async (id: string) => (await all<RunRow>("SELECT * FROM runs WHERE id = ?", id))[0]!;
@@ -166,7 +188,7 @@ describe("replay of pulled runs", () => {
     expect(body.decisions[0]).toMatchObject({ run_id: "run-1", decision: "created" });
   });
 
-  it("lists a run that already has a version as existing_version, with what the gate would decide now, and changes nothing", async () => {
+  it("with ?would_now_be=1, lists a run that already has a version as existing_version, with what the gate would decide now, and changes nothing", async () => {
     await seedPage();
     await seedBaseline(BASE_TEXT);
     const r1 = await seedRun(1, T1, webhookBody("mrun-1", REAL_TEXT));
@@ -187,7 +209,7 @@ describe("replay of pulled runs", () => {
     const before = await versions();
     const runsBefore = await all("SELECT * FROM runs ORDER BY id");
 
-    const body = (await (await replay()).json()) as Json;
+    const body = (await (await replay("?would_now_be=1")).json()) as Json;
     expect(body.created).toBe(0);
     expect(body.decisions).toEqual([
       { run_id: "run-1", monitor_run_id: "mrun-1", received_at: T1, decision: "existing_version", would_now_be: "created" },
@@ -198,6 +220,54 @@ describe("replay of pulled runs", () => {
     expect(await versions()).toEqual(before);
     expect(await all("SELECT * FROM runs ORDER BY id")).toEqual(runsBefore);
     expect(await all("SELECT * FROM diff_cache")).toHaveLength(1);
+  });
+
+  it("without ?would_now_be=1, a run that already has a version is skipped without reading its raw body", async () => {
+    await seedPage();
+    await seedBaseline(BASE_TEXT);
+    const r1 = await seedRun(1, T1, webhookBody("mrun-1", REAL_TEXT));
+    await insertVersion(env.DB, {
+      id: "v-1", page_id: PAGE, run_id: r1, is_baseline: 0, captured_at: T1, text: REAL_TEXT,
+      normalized_hash: await hashText(normalize(REAL_TEXT, []).text), judgment_summary: null, capture_status: "complete",
+    });
+    // A later run without a version is still read and judged, against the existing version.
+    await seedRun(2, T3, pullBody("mrun-2", `${REAL_TEXT}\n\nA real new paragraph about fees.\n`));
+
+    const plain = await replayRecordingReads();
+    expect(plain.reads).toEqual(["raw/mrun-2.json"]);
+    expect(plain.body.decisions).toEqual([
+      { run_id: "run-1", monitor_run_id: "mrun-1", received_at: T1, decision: "existing_version" },
+      { run_id: "run-2", monitor_run_id: "mrun-2", received_at: T3, decision: "created" },
+    ]);
+
+    const asked = await replayRecordingReads("?would_now_be=1");
+    expect(asked.reads).toEqual(["raw/mrun-1.json", "raw/mrun-2.json"]);
+    expect(asked.body.decisions.map((d: Json) => [d.decision, d.would_now_be])).toEqual([
+      ["existing_version", "created"],
+      ["existing_version", "created"],
+    ]);
+  });
+
+  it("marks every version it creates with a durable note, shown in the version JSON, and its summary is filled", async () => {
+    await seedPage();
+    await seedBaseline(BASE_TEXT);
+    await seedRun(1, T1, pullBody("mrun-1", REAL_TEXT));
+    const before = Date.now();
+
+    await replay();
+
+    const [, created] = await versions();
+    const note = created!.notes!;
+    expect(note).toMatch(/^created by replay on \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+    const at = Date.parse(note.slice("created by replay on ".length));
+    expect(at).toBeGreaterThanOrEqual(before);
+    expect(at).toBeLessThanOrEqual(Date.now());
+    const json: Json = await (await callWorker(`/api/pages/${PAGE}/versions/${created!.id}`)).json();
+    expect(json.notes).toBe(note);
+    expect((await (await callWorker(`/api/pages/${PAGE}`)).json() as Json).versions[0].notes).toBe(note);
+    // A pulled run has no TinyFish summary: the diff line is asked for after the replay.
+    expect(created!.summary_source ?? json.summary_source).toBe("diff");
+    expect(json.summary).toMatch(/changed|added/);
   });
 
   it("drops the page's cached diffs at the first write", async () => {

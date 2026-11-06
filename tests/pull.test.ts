@@ -1,12 +1,12 @@
 // The overdue-check fallback: when a page's scheduled Monitor run has not arrived 15 minutes after
 // its tick, the hourly cron asks TinyFish to run that Monitor now (POST /api/admin/pull/:pageId, one
 // Worker invocation per pull) and records the run under TinyFish's run id, marked `pull`.
-import { applyD1Migrations, reset } from "cloudflare:test";
+import { applyD1Migrations, createExecutionContext, reset, waitOnExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { captureDeps } from "../src/capture";
 import { lastTickAtOrBefore } from "../src/core/cronTick";
-import { FACTS_PAUSE_USD, PULLS_PER_TICK, SPEND_PAUSE_USD } from "../src/core/limits";
+import { FACTS_PAUSE_USD, PULL_BACKOFF_AFTER_FAILURES, PULL_BACKOFF_MS, PULLS_PER_TICK, SPEND_PAUSE_USD } from "../src/core/limits";
 import { hashText, normalize } from "../src/core/normalize";
 import { PRICES, recordSpend } from "../src/core/spend";
 import { cronDeps, runCron } from "../src/cron";
@@ -15,6 +15,7 @@ import { insertRun } from "../src/db/runs";
 import type { PageRow, RunRow, SpendRow, VersionRow } from "../src/db/types";
 import { insertVersion } from "../src/db/versions";
 import type { Env } from "../src/env";
+import worker from "../src/index";
 import { callWorker } from "./helpers/app";
 import { fetchMock } from "./helpers/fetch-mock";
 import runNowFixture from "./fixtures/tinyfish/monitor-runnow.json";
@@ -642,7 +643,8 @@ describe("POST /api/admin/pull/:pageId", () => {
     const res = await pull(pageId);
 
     const [run] = await pullRunsOf(pageId);
-    expect(await res.json()).toEqual({ ok: true, pulled: true, run_id: run!.id, outcome: "unchanged" });
+    // Fineprint's row id and, beside it, TinyFish's run id.
+    expect(await res.json()).toEqual({ ok: true, pulled: true, run_id: run!.id, monitor_run_id: "tf-same", outcome: "unchanged" });
     expect(run).toMatchObject({ outcome: "unchanged", noise_suppressed: 0, noise_reason: null });
     const versions = await versionsOf(pageId);
     expect(versions.map((v) => v.id)).toEqual([baseline]);
@@ -658,7 +660,7 @@ describe("POST /api/admin/pull/:pageId", () => {
     const res = await pull(pageId);
 
     const [run] = await pullRunsOf(pageId);
-    expect(await res.json()).toEqual({ ok: true, pulled: true, run_id: run!.id, outcome: "changed", suppressed: true });
+    expect(await res.json()).toEqual({ ok: true, pulled: true, run_id: run!.id, monitor_run_id: "tf-stamp", outcome: "changed", suppressed: true });
     expect(run).toMatchObject({ outcome: "changed", noise_suppressed: 1, noise_reason: "normalized_identical" });
     expect(await versionsOf(pageId)).toHaveLength(1);
     expect(shot).not.toHaveBeenCalled();
@@ -675,7 +677,7 @@ describe("POST /api/admin/pull/:pageId", () => {
 
     const [run] = await pullRunsOf(pageId);
     const [version] = await versionsOf(pageId);
-    expect(await res.json()).toEqual({ ok: true, pulled: true, run_id: run!.id, outcome: "baseline", version_id: version!.id });
+    expect(await res.json()).toEqual({ ok: true, pulled: true, run_id: run!.id, monitor_run_id: "tf-first", outcome: "baseline", version_id: version!.id });
     expect(run).toMatchObject({ outcome: "baseline", is_baseline: 1, trigger_kind: "pull" });
     expect(version).toMatchObject({
       run_id: run!.id,
@@ -696,7 +698,139 @@ describe("POST /api/admin/pull/:pageId", () => {
 
     const [run] = await pullRunsOf(pageId);
     const versions = await versionsOf(pageId);
-    expect(await res.json()).toEqual({ ok: true, pulled: true, run_id: run!.id, outcome: "changed", version_id: versions[1]!.id });
+    expect(await res.json()).toEqual({ ok: true, pulled: true, run_id: run!.id, monitor_run_id: "tf-real", outcome: "changed", version_id: versions[1]!.id });
+  });
+});
+
+// --- The ledger and the backoff (Task 15) ---------------------------------------------------------
+
+/** The pull route called with an env whose R2 put fails: the run-now call succeeded, the recording does not. */
+async function pullWithBrokenStore(pageId: string): Promise<Response> {
+  const brokenStore = new Proxy(env.STORE, {
+    get(target, prop) {
+      if (prop === "put") return async () => {
+        throw new Error("R2 put failed");
+      };
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const ctx = createExecutionContext();
+  const res = await worker.fetch(
+    new Request(`${BASE}/api/admin/pull/${pageId}`, { method: "POST", headers: ADMIN }),
+    { ...env, STORE: brokenStore } as unknown as Env,
+    ctx,
+  );
+  await waitOnExecutionContext(ctx);
+  return res;
+}
+
+const backoffOf = async (pageId: string) => {
+  const page = await pageRow(pageId);
+  return { pull_failures: page.pull_failures, pull_retry_after: page.pull_retry_after };
+};
+
+describe("the pull ledger", () => {
+  it("a pulled check is on the ledger as soon as run-now returns usable text, even when recording it then fails; the retry adds no second row", async () => {
+    const pageId = await seedOverdue();
+    mockRunNow(monitorOf(pageId), runNowBody("tf-ledger", BASE_TEXT), 201, 2);
+
+    const broken = await pullWithBrokenStore(pageId);
+    expect(broken.status).toBe(500);
+    expect(await pullRunsOf(pageId)).toEqual([]);
+    expect(await spendRows()).toMatchObject([{ kind: "monitor_check", amount_usd: PRICES.monitor_check, ref: "tf-ledger" }]);
+
+    // The next pull is answered with the same run id (TinyFish billed it once): it is recorded, not billed again.
+    expect(await (await pull(pageId)).json()).toMatchObject({ ok: true, pulled: true, monitor_run_id: "tf-ledger" });
+    expect(await pullRunsOf(pageId)).toHaveLength(1);
+    expect((await spendRows()).map((r) => r.ref)).toEqual(["tf-ledger"]);
+  });
+
+  it("a check with no text or errors is not billed and never reaches the ledger", async () => {
+    const pageId = await seedOverdue();
+    mockRunNow(monitorOf(pageId), runNowBody("tf-empty", null));
+    mockRunNow(monitorOf(pageId), runNowBody("tf-err", "text", [{ error: "timeout" }]));
+    await pull(pageId);
+    await pull(pageId);
+    expect(await spendRows()).toEqual([]);
+  });
+});
+
+describe("the pull backoff", () => {
+  it(`after ${PULL_BACKOFF_AFTER_FAILURES} failed pulls in a row the page is pulled at most every 6 hours, until a pull returns text`, async () => {
+    expect(PULL_BACKOFF_AFTER_FAILURES).toBe(3);
+    expect(PULL_BACKOFF_MS).toBe(6 * 60 * 60 * 1000);
+    mockMonitorList();
+    const pageId = await seedOverdue();
+    // run-now failing (5xx), then no text, then a fetch error: three kinds of failed pull.
+    fetchMock.intercept({ method: "POST", url: runNowUrl(monitorOf(pageId)), reply: { status: 503, json: { error: { code: "UNAVAILABLE" } } } });
+    mockRunNow(monitorOf(pageId), runNowBody("tf-b1", null));
+    mockRunNow(monitorOf(pageId), runNowBody("tf-b2", "text", [{ error: "timeout" }]));
+
+    expect((await pull(pageId)).status).toBe(502);
+    expect(await backoffOf(pageId)).toEqual({ pull_failures: 1, pull_retry_after: null });
+    await pull(pageId);
+    expect(await backoffOf(pageId)).toEqual({ pull_failures: 2, pull_retry_after: null });
+    const before = Date.now();
+    await pull(pageId);
+    const third = await backoffOf(pageId);
+    expect(third.pull_failures).toBe(3);
+    const retryAt = Date.parse(third.pull_retry_after!);
+    expect(retryAt).toBeGreaterThanOrEqual(before + PULL_BACKOFF_MS);
+    expect(retryAt).toBeLessThanOrEqual(Date.now() + PULL_BACKOFF_MS);
+
+    // The cron leaves the page alone until then, though it is still overdue.
+    const seam = vi.fn((_env: Env, id: string) => pull(id));
+    cronDeps.pull = seam;
+    cronDeps.now = () => new Date(retryAt - 60_000);
+    expect((await runCron(env)).pulled).toBe(0);
+    expect(seam).not.toHaveBeenCalled();
+
+    // Six hours on, one more pull. It fails again: the next try is six hours after that one.
+    cronDeps.now = () => new Date(retryAt + 60_000);
+    mockRunNow(monitorOf(pageId), runNowBody("tf-b3", null));
+    await runCron(env);
+    expect(seam.mock.calls.map(([, id]) => id)).toEqual([pageId]);
+    const fourth = await backoffOf(pageId);
+    expect(fourth.pull_failures).toBe(4);
+    expect(Date.parse(fourth.pull_retry_after!)).toBeGreaterThan(retryAt);
+
+    // A pull that returns text ends the backoff.
+    mockRunNow(monitorOf(pageId), runNowBody("tf-b4", BASE_TEXT));
+    expect(await (await pull(pageId)).json()).toMatchObject({ pulled: true });
+    expect(await backoffOf(pageId)).toEqual({ pull_failures: 0, pull_retry_after: null });
+  });
+
+  it("a webhook run for the page ends the backoff as well", async () => {
+    const pageId = await seedOverdue();
+    await env.DB.prepare("UPDATE pages SET pull_failures = 5, pull_retry_after = '2999-01-01T00:00:00.000Z' WHERE id = ?").bind(pageId).run();
+    const webhook = structuredClone(unchangedWebhook) as Json;
+    webhook.id = "tf-hook-backoff";
+    webhook.fetch_monitor_id = monitorOf(pageId);
+    expect((await postWebhook(webhook)).status).toBe(200);
+    expect(await backoffOf(pageId)).toEqual({ pull_failures: 0, pull_retry_after: null });
+  });
+
+  it("a page in backoff is not pulled for a confirm read either, and refusals (409, the spend pause) are not failures", async () => {
+    mockMonitorList();
+    const pending = await seedOverdue();
+    await env.DB.prepare(
+      "UPDATE pages SET pending_hash = 'h', pending_run_id = 'r', pending_at = ?, pull_failures = 3, pull_retry_after = '2999-01-01T00:00:00.000Z' WHERE id = ?",
+    )
+      .bind(new Date(NOW.getTime() - 60_000).toISOString(), pending)
+      .run();
+    const seam = vi.fn((_env: Env, id: string) => pull(id));
+    cronDeps.pull = seam;
+    await runCron(env);
+    expect(seam).not.toHaveBeenCalled();
+
+    const paused = await seedOverdue({ status: "paused" });
+    expect((await pull(paused)).status).toBe(409);
+    const spent = await seedOverdue();
+    await recordSpend(env.DB, "monitor_check", SPEND_PAUSE_USD, "earlier");
+    expect(await (await pull(spent)).json()).toMatchObject({ pulled: false, reason: "spend_paused" });
+    expect(await backoffOf(paused)).toEqual({ pull_failures: 0, pull_retry_after: null });
+    expect(await backoffOf(spent)).toEqual({ pull_failures: 0, pull_retry_after: null });
   });
 });
 

@@ -188,8 +188,9 @@ describe("a retired page", () => {
     }
     await setStatus(gone, "retired");
 
-    expect((await pullCandidates(env.DB)).map((p) => p.id)).toEqual([live]);
-    expect(await pendingConfirmPages(env.DB, PAST)).toEqual([live]);
+    const now = new Date().toISOString();
+    expect((await pullCandidates(env.DB, now)).map((p) => p.id)).toEqual([live]);
+    expect(await pendingConfirmPages(env.DB, PAST, now)).toEqual([live]);
     expect((await monitoredPages(env.DB)).map((p) => p.id)).toEqual([live]);
     expect((await expiredPublicPages(env.DB, new Date().toISOString())).map((p) => p.id)).toEqual([live]);
     expect((await pendingCaptures(env.DB, new Date().toISOString(), CAPTURE_MAX_ATTEMPTS)).map((v) => v.page_id)).toEqual([live]);

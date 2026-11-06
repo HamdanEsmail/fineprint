@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { adminOnly, isAdmin } from "../auth";
 import { captureVersion, needsFacts } from "../capture";
-import { MAX_MONITORS, PUBLIC_ADDS_PER_IP_PER_DAY, PUBLIC_SLOTS, PUBLIC_TTL_DAYS } from "../core/limits";
+import { MAX_MONITORS, MAX_URL_LENGTH, PUBLIC_ADDS_PER_IP_PER_DAY, PUBLIC_SLOTS, PUBLIC_TTL_DAYS } from "../core/limits";
 import { hashText, normalize } from "../core/normalize";
 import { cronForIndex, PURPOSE } from "../core/schedule";
 import { deleteCachedDiffsOfPage } from "../db/diffCache";
@@ -29,6 +29,7 @@ import type { Env } from "../env";
 import { TinyFishError } from "../tinyfish/client";
 import { fetchPage } from "../tinyfish/fetch";
 import { createMonitor, deleteMonitor, updateMonitor } from "../tinyfish/monitor";
+import { versionSummaryJson } from "./versionJson";
 
 type AppContext = Context<{ Bindings: Env }>;
 
@@ -290,7 +291,8 @@ pagesRouter.get("/:id", async (c) => {
   const [versions, runs] = await Promise.all([listVersions(c.env.DB, page.id), listRunsOfPage(c.env.DB, page.id, MAX_RUNS_SHOWN)]);
   return c.json({
     page: pageToJson(page),
-    versions,
+    // Newest first, without text, in the shape every endpoint gives a version (versionSummaryJson).
+    versions: versions.map((v) => versionSummaryJson(c.env, v)),
     // Newest first. `noise_reason` says why a suppressed run made no version (normalized_identical,
     // partial_render, flap), or why a fetch failed (fetch_error, not counted as suppressed).
     runs: runs.map((r) => ({
@@ -311,8 +313,12 @@ pagesRouter.post("/", async (c) => {
   // 1. Shape of the request. Nothing here costs anything.
   const body = await readBody(c);
   if (!body) return c.json({ error: "invalid_body" }, 400);
+  // Long urls are refused as sent (before any parsing) and in the form that would be stored.
+  const tooLong = () => c.json({ error: "invalid_url", reason: "url_too_long" }, 400);
+  if (typeof body.url === "string" && body.url.length > MAX_URL_LENGTH) return tooLong();
   const url = parseWatchUrl(body.url);
   if (!url) return c.json({ error: "invalid_url" }, 400);
+  if (url.length > MAX_URL_LENGTH) return tooLong();
   const fields = readFields(body);
   if ("error" in fields) return c.json({ error: fields.error }, 400);
 

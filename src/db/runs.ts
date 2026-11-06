@@ -45,18 +45,20 @@ export type PullCandidate = {
  * Every active or failed page that holds a Monitor, with the newest `received_at` among its runs, in
  * creation order: the pages the cron's overdue check looks at. A page health marked failed is still
  * pulled: run-now works whatever state the Monitor's schedule is in, and when the Monitor is gone the
- * pull just fails (unbilled). Paused, expired and retired pages are left alone. One query, however many pages
- * there are.
+ * pull just fails (unbilled). Paused, expired and retired pages are left alone, and so is a page in its
+ * pull backoff (`pull_retry_after` after `nowIso`). One query, however many pages there are.
  */
-export async function pullCandidates(db: D1Database): Promise<PullCandidate[]> {
+export async function pullCandidates(db: D1Database, nowIso: string): Promise<PullCandidate[]> {
   const { results } = await db
     .prepare(
       `SELECT p.id, p.schedule_cron,
          (SELECT MAX(r.received_at) FROM runs r WHERE r.page_id = p.id) AS last_received_at
        FROM pages p
        WHERE p.status IN ('active', 'failed') AND p.monitor_id IS NOT NULL
+         AND (p.pull_retry_after IS NULL OR p.pull_retry_after <= ?)
        ORDER BY p.created_at, p.rowid`,
     )
+    .bind(nowIso)
     .all<PullCandidate>();
   return results;
 }

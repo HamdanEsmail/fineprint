@@ -32,7 +32,7 @@ Approval criteria the build must meet, verbatim from the bounty: Monitor does th
 
 **Anti-goals (a build that does these fails even if it works)**
 - Our own polling of pages. Monitor is the only trigger. If every Monitor is deleted, no versions are ever created.
-- Simulated or hand-made changes. Every version comes from a scheduled Monitor run.
+- Simulated or hand-made changes. Fineprint never reads a page itself; every version comes from a TinyFish Monitor run, delivered by webhook or, when a scheduled run is overdue, pulled with run-now and recorded under that run's id.
 - Raw unified-diff text shown as "the diff".
 - A version created by a timestamp or a rotating banner.
 - A hardcoded page list that cannot be extended at runtime.
@@ -45,7 +45,7 @@ All of these were verified on 2026-11-03 with real calls (see `spikes/` in the p
 **TinyFish Monitor**
 - `POST https://agent.tinyfish.ai/v1/monitors` with `type: "fetch"`, `config: {url, format: "markdown"}`, `schedule_cron` (5 fields, UTC), `name`, `purpose`, `webhook_url`. Creation runs a baseline immediately and returns it in the 201 body (`run.results[0].text`). That baseline is **not** sent to the webhook, so the add-page handler stores it directly.
 - Webhooks fire on **every scheduled run**, including unchanged ones. Payload fields: `fetch_monitor_id`, `id`, `is_baseline`, `outcome` (`baseline` | `changed` | `unchanged`), `diff` (unified diff vs previous run, null unless changed), `diff_truncated`, `judgment` (`{purpose, is_relevant, summary, error}`, only when changed and a purpose is set), `results[]` (full page text every run), `errors[]`.
-- Manual "run now" (`POST /v1/monitors/{id}/runs`) does **not** fire the webhook. Use it only for testing the baseline path, never to manufacture a version.
+- Manual "run now" (`POST /v1/monitors/{id}/runs`) does **not** fire the webhook. Fineprint never reads a page itself; every version comes from a TinyFish Monitor run, delivered by webhook or, when a scheduled run is overdue, pulled with run-now and recorded under that run's id.
 - There is no REST endpoint to list run history. History lives in TinyFish's dashboard only. Fineprint's database is therefore the only durable history, which is the point of the product.
 - Webhook delivery is best-effort, retried 3 times, and carries no signature. The webhook URL contains a random secret path segment and the handler checks `fetch_monitor_id` against known monitors.
 - Each completed check costs $0.005. Failed checks are free. Max 50 monitors per account.

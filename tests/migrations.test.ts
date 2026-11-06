@@ -1,5 +1,6 @@
-// Migrations 0004 (facts_status) and 0005 (the pages table rebuilt so status can be 'retired'),
-// applied to a database that already holds rows written under 0001-0003, as production does.
+// Migrations 0004 (facts_status), 0005 (the pages table rebuilt so status can be 'retired') and 0006
+// (summaries and the pull backoff), applied to a database that already holds rows written under the
+// earlier ones, as production does.
 import { applyD1Migrations, reset } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -89,7 +90,7 @@ describe("migration 0005: the pages table rebuild", () => {
     expect(sql).not.toContain("retired");
     await expect(page("p-r", "pricing", { status: "retired" })).rejects.toThrow();
 
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+    await applyD1Migrations(env.DB, upTo("0006"));
 
     expect(await all("PRAGMA table_info(pages)")).toEqual(columns); // name, type, notnull, default and pk of every column
     expect((columns as { name: string }[]).map((c) => c.name)).toEqual([
@@ -120,8 +121,53 @@ describe("migration 0005: the pages table rebuild", () => {
     await runRow("r1", "p1", 1);
     await version("v1", "p1", "r1", { is_baseline: 0 });
     const before = [await all("SELECT * FROM runs"), await all("SELECT id, page_id, run_id FROM versions")];
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+    await applyD1Migrations(env.DB, upTo("0006"));
     expect([await all("SELECT * FROM runs"), await all("SELECT id, page_id, run_id FROM versions")]).toEqual(before);
+  });
+});
+
+describe("migration 0006: summaries and the pull backoff", () => {
+  it("only adds columns (with their defaults) and empties the diff cache; every existing value is kept", async () => {
+    await applyD1Migrations(env.DB, upTo("0006"));
+    await page("p1", "pricing");
+    await page("p2", "policy", { status: "retired" });
+    await runRow("r1", "p1", 1);
+    await version("v1", "p1", null);
+    await version("v2", "p1", "r1", { is_baseline: 0, captured_at: "2026-11-02T00:00:00.000Z", judgment_summary: "Pro rose" });
+    await run("INSERT INTO diff_cache (from_version_id, to_version_id, json, created_at) VALUES ('v1', 'v2', '{}', 'x')");
+    const before = {
+      pages: await all("SELECT rowid AS rid, * FROM pages ORDER BY rowid"),
+      versions: await all("SELECT rowid AS rid, * FROM versions ORDER BY rowid"),
+      runs: await all("SELECT * FROM runs"),
+      pageColumns: await all<{ name: string }>("PRAGMA table_info(pages)"),
+      versionColumns: await all<{ name: string }>("PRAGMA table_info(versions)"),
+    };
+
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+
+    const pageColumns = await all<{ name: string; type: string; notnull: number; dflt_value: string | null }>("PRAGMA table_info(pages)");
+    const versionColumns = await all<{ name: string; type: string; notnull: number; dflt_value: string | null }>("PRAGMA table_info(versions)");
+    // The old columns are untouched and in place; the new ones come after them.
+    expect(pageColumns.slice(0, before.pageColumns.length)).toEqual(before.pageColumns);
+    expect(versionColumns.slice(0, before.versionColumns.length)).toEqual(before.versionColumns);
+    expect(pageColumns.slice(before.pageColumns.length).map((c) => [c.name, c.type, c.notnull, c.dflt_value])).toEqual([
+      ["pull_failures", "INTEGER", 1, "0"],
+      ["pull_retry_after", "TEXT", 0, null],
+    ]);
+    expect(versionColumns.slice(before.versionColumns.length).map((c) => [c.name, c.type, c.notnull, c.dflt_value])).toEqual([
+      ["summary", "TEXT", 0, null],
+      ["summary_source", "TEXT", 0, null],
+    ]);
+    // Every row keeps every value; the new columns start at their defaults (the admin backfill fills summaries).
+    expect(await all("SELECT rowid AS rid, * FROM pages ORDER BY rowid")).toEqual(
+      before.pages.map((p) => ({ ...p, pull_failures: 0, pull_retry_after: null })),
+    );
+    expect(await all("SELECT rowid AS rid, * FROM versions ORDER BY rowid")).toEqual(
+      before.versions.map((v) => ({ ...v, summary: null, summary_source: null })),
+    );
+    expect(await all("SELECT * FROM runs")).toEqual(before.runs);
+    // A diff stored under the old finality rule may hold an end whose facts run was still in flight.
+    expect(await all("SELECT * FROM diff_cache")).toEqual([]);
   });
 });
 
@@ -157,7 +203,7 @@ describe("migration 0004: facts_status backfill", () => {
     await run("INSERT INTO diff_cache (from_version_id, to_version_id, json, created_at) VALUES ('a', 'b', '{}', 'x')");
     const before = await all("SELECT * FROM versions ORDER BY rowid");
 
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+    await applyD1Migrations(env.DB, upTo("0006"));
 
     const after = await all<{ id: string; facts_status: string; capture_status: string }>("SELECT * FROM versions ORDER BY rowid");
     expect(after.map((v) => [v.id, v.facts_status, v.capture_status])).toEqual([

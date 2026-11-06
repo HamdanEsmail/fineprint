@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Fineprint: a version history for the terms, fees and rules of web pages, recorded from TinyFish Monitor webhooks.",
+  "description": "Fineprint: a version history for the terms, fees and rules of web pages, recorded from TinyFish Monitor runs (webhooks, and run-now pulls when a scheduled run is overdue).",
   "license": "MIT",
   "engines": {
     "node": ">=24"

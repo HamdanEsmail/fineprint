@@ -6,53 +6,58 @@ Live: https://fineprint.hamdanesmail12-7a9.workers.dev (one Cloudflare Worker wi
 
 ## Status
 
-The Worker is deployed. Recording of the curated pages has not started: the list is `pages.json` (30 candidates in priority order), and the first 20 that pass validation are registered by the steps in [docs/runbook.md](docs/runbook.md). Pages that cannot be read are skipped with their reason in `docs/registration-log.md`, which the registration script writes.
+Recording since 3 November 2026: 20 curated pages on 20 TinyFish Monitors (the list and the pages that were skipped, with their reasons, are in [docs/registration-log.md](docs/registration-log.md)). Every endpoint in the table below is built and deployed.
 
 ## How it works
 
-- **Monitor is the only trigger.** Fineprint never polls a page on its own schedule. Delete the Monitors and no new version is ever created.
+- **Every version comes from a TinyFish Monitor run.** Fineprint never reads a page itself to find a change. A scheduled run arrives by webhook; when a scheduled run is overdue (none 15 minutes after its time), the hourly job asks TinyFish to run that Monitor now (run-now) and records the result under TinyFish's run id. Each version says which way its run came in `trigger`: `create` (the baseline taken when the page was added), `webhook` or `pull`. Delete the Monitors and no new version is ever created.
+- **Pulls back off.** After 3 failed pulls of a page in a row (no text, a fetch error, or run-now failing), the hourly job pulls it at most once every 6 hours, until a pull returns text or a webhook arrives. A pulled check is put on the spend ledger as soon as run-now returns text, once per run id.
 - **Two checks before a version exists.** TinyFish says a page changed; Fineprint then normalizes the old and new text (timestamps, "last updated" lines, cookie banners, tracking parameters) and creates a version only if something real differs. Suppressed noise is counted.
 - **A page that rendered only in part is not a change.** If a new read is much shorter than the last version and only loses content (nothing new appears), Fineprint treats it as a half-loaded page: it records no version, marks the run as suppressed (`partial_render`) and reads the page again within the hour. If the second read agrees, the version is created, with a note naming the suspect read; if it does not, nothing was lost.
 - **A page that flips back is not a change either.** A text that is identical, after normalization, to a version recorded in the last 72 hours is suppressed (`flap`): a page alternating between two renderings gets no new version each time.
-- **Facts are labelled honestly.** Each version has a `facts_status`: `ok` (plans and prices stored), `pending` (still being extracted), `unavailable` (extraction failed or found no price table, after its attempts) or `not_needed` (not a pricing or fee page, or a change judged not relevant). A version whose screenshot and source are stored is `complete` whatever happens to its facts; `failed` is only for a screenshot or source that could not be stored. `/api/stats` counts the versions with `facts_unavailable`.
+- **Every change has a one-line summary.** `summary` is TinyFish's own summary of the change when the run carried one (`summary_source: "tinyfish"`); otherwise Fineprint builds it from its own structured diff against the previous version (`summary_source: "diff"`), for example `3 blocks added, 1 changed: "Claude Code is now included in the Pro plan"`. A pulled check never carries TinyFish's summary, so its summary always comes from the diff. Baselines have none.
+- **Facts are labelled honestly.** Each version has a `facts_status`: `ok` (plans and prices stored), `pending` (still being extracted), `unavailable` (the extraction found no price table, which is final after one run, or failed on every attempt) or `not_needed` (not a pricing or fee page, or a change judged not relevant). A version whose screenshot and source are stored is `complete` whatever happens to its facts; `failed` is only for a screenshot or source that could not be stored. `/api/stats` counts the versions with `facts_unavailable`.
 - **A page can be retired.** `POST /api/admin/pages/:id/retire` (admin) deletes the page's Monitor and sets its status to `retired`. Its versions, runs and stored files stay and it still appears in the list, the export and the history, but it is no longer checked, pulled or repaired, and its Monitor slot is free again.
-- **Every version is kept with evidence:** the extracted text, a full-page screenshot, the HTML source, TinyFish's summary of the change, and, for pricing and fee pages, the plans and prices as structured facts.
-- **Any page can be added at run time** with `POST /api/pages`. The URL is validated first, so a page that cannot be fetched is refused with a reason instead of failing silently later.
-
-Monitor webhooks are the primary trigger. When a scheduled check is overdue (no run 15 minutes after its scheduled time), the hourly job asks TinyFish to run that Monitor now and records the result under TinyFish's run id, marked `pull`. Fineprint never fetches a page to detect changes itself.
+- **Every version is kept with evidence:** the extracted text, a full-page screenshot, the HTML source, its summary, and, for pricing and fee pages, the plans and prices as structured facts.
+- **Any page can be added at run time** with `POST /api/pages` (a URL of at most 2,048 characters). The URL is validated first, so a page that cannot be fetched is refused with a reason instead of failing silently later.
+- **Open to other sites.** The JSON API and the stored screenshots and sources answer any origin (CORS). The stored sources are served sandboxed: their scripts never run on Fineprint's origin.
 
 ## How TinyFish is used
 
 | Product | What Fineprint uses it for | Where in the code |
 |---|---|---|
-| Monitor | The only trigger. One Monitor per page, on a staggered twice-daily schedule. Its webhooks create the runs and the versions. | `src/tinyfish/monitor.ts`, `src/handlers/webhooks.ts` |
+| Monitor | Every version comes from a Monitor run. One Monitor per page, on a staggered twice-daily schedule; its webhook delivers each run, and run-now pulls a run that is overdue. | `src/tinyfish/monitor.ts`, `src/handlers/webhooks.ts`, `src/handlers/admin.ts` |
 | Fetch | Validates a URL before a Monitor is created, and stores each version's HTML source. | `src/tinyfish/fetch.ts` |
 | Browser | Full-page screenshot of every version, over raw Chrome DevTools Protocol from the Worker. | `src/tinyfish/browser.ts` |
 | Agent | Extracts plan, fee and price facts for pricing and fee pages, one run at a time. | `src/tinyfish/agent.ts`, `src/capture.ts` |
-| Search | Finds a site's pricing, terms, privacy and fee pages by domain. Planned: the client exists, the `/api/discover` endpoint does not yet. | `src/tinyfish/search.ts` |
+| Search | Finds a site's pricing, terms, privacy and fee pages by domain (`POST /api/discover`). | `src/tinyfish/search.ts`, `src/handlers/discover.ts` |
 
 ## API
 
-Read endpoints are public JSON. Endpoints marked admin need `Authorization: Bearer <ADMIN_TOKEN>`. Status is what exists in the code today.
+Read endpoints are public JSON. Endpoints marked admin need `Authorization: Bearer <ADMIN_TOKEN>`.
 
-| Method | Path | Returns | Status |
-|---|---|---|---|
-| GET | `/api/pages` | All pages with latest version time, version count and noise count | built |
-| GET | `/api/pages/:id` | One page and its version list (no text) | built |
-| POST | `/api/pages` | Add a page. Without the admin token: 4 public slots, 1 add per visitor per day, removed after 7 days | built |
-| PATCH | `/api/pages/:id` | Admin: label, kind, ignore patterns, schedule, purpose, promote to curated | built |
-| DELETE | `/api/pages/:id` | Admin: deletes the Monitor, keeps the history | built |
-| GET | `/api/stats` | Counts of pages, runs, versions, noise suppressed, and spend (more fields in progress) | built, being extended |
-| GET | `/shots/:name`, `/sources/:name` | The stored screenshot and HTML source of a version | built |
-| GET | `/api/pages/:id/versions/:vid` | One version: text, facts, screenshot and source URLs, judgment | in progress |
-| GET | `/api/pages/:id/as-of?at=ISO` | The version in force at that time | in progress |
-| GET | `/api/pages/:id/diff?from=ISO&to=ISO` | Structured diff: added, removed and changed blocks, and facts | in progress |
-| GET | `/api/changes?since=ISO&limit=` | Feed of real versions across all pages, newest first | in progress |
-| GET | `/api/export.json` | Everything except raw text bodies, with absolute screenshot and source URLs | in progress |
-| POST | `/api/discover` | `{domain}`: find that site's pricing, terms, privacy and fee pages | planned |
-| POST | `/api/pages/:id/replay` | Admin: re-run the noise gate over stored webhook payloads | planned |
-| POST | `/api/admin/rotate-webhook` | Admin: re-point every Monitor at the current host | planned |
-| POST | `/api/admin/pull/:pageId` | Admin: run the page's Monitor now and record the run, marked `pull` (what the hourly job does for an overdue check) | built |
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/api/pages` | All pages with latest version time, version count and noise count |
+| GET | `/api/pages/:id` | One page, its versions (no text) and its newest 100 runs |
+| GET | `/api/pages/:id/versions/:vid` | One version with its text and live URL |
+| GET | `/api/pages/:id/as-of?at=ISO` | The version in force at that time |
+| GET | `/api/pages/:id/diff?from=ISO&to=ISO` | Structured diff: added, removed and changed blocks, facts, the latest hop's summary |
+| GET | `/api/changes?since=ISO&limit=` | Feed of real changes across all pages, newest first, each with its summary |
+| GET | `/api/export.json` | Everything except the page texts, with absolute screenshot and source URLs |
+| GET | `/api/stats` | Counts of pages, runs by trigger, versions, noise by reason, spend by kind, monitor health, the two spend pauses |
+| GET | `/shots/:name`, `/sources/:name` | The stored screenshot and HTML source of a version |
+| POST | `/api/pages` | Add a page. Without the admin token: 4 public slots, 1 add per visitor per day, removed after 7 days |
+| POST | `/api/discover` | `{domain}`: find that site's pricing, terms, privacy and fee pages |
+| PATCH | `/api/pages/:id` | Admin: label, kind, ignore patterns, schedule, purpose, promote to curated |
+| DELETE | `/api/pages/:id` | Admin: deletes the Monitor, keeps the history |
+| POST | `/api/admin/pages/:id/retire` | Admin: deletes the Monitor, marks the page `retired`, keeps the history |
+| POST | `/api/admin/pull/:pageId` | Admin: run the page's Monitor now and record the run, marked `pull` (what the hourly job does for an overdue check) |
+| POST | `/api/pages/:id/replay` | Admin: run the change gate again over the stored raw runs; `?would_now_be=1` also judges runs that already have a version |
+| POST | `/api/admin/rotate-webhook` | Admin: re-point every live Monitor at `{base_url}` |
+| POST | `/api/admin/backfill-summaries` | Admin: fill missing summaries, `{filled, remaining}`; call until `remaining` is 0 |
+
+Every version has the same fields wherever it appears (`/api/pages/:id`, the export, versions/:vid and as-of, which add `text` and `live_url`): `id`, `page_id`, `captured_at`, `is_baseline`, `summary`, `summary_source`, `judgment_summary` (TinyFish's text as it came), `facts`, `screenshot_url`, `source_url`, `capture_status`, `facts_status`, `trigger` and `notes` (why a version exists when it is not the plain result of one read: a confirmed suspect read, or a replay).
 
 TinyFish calls `POST /hooks/monitor/<secret>` on every scheduled run. That path is not part of the public API.
 
@@ -76,7 +81,7 @@ Tests never call TinyFish. Adding a page under `npm run dev` does: it creates a 
 
 ## Deploy
 
-Follow [docs/runbook.md](docs/runbook.md). It covers the D1 database, the R2 bucket, the three secrets, the first deploy, the webhook rehearsal and registering the pages.
+Follow [docs/runbook.md](docs/runbook.md). It covers the D1 database, the R2 bucket, the three secrets, the first deploy, the webhook rehearsal, registering the pages, and updating the live Worker (migrations first, then the deploy).
 
 ## Design
 

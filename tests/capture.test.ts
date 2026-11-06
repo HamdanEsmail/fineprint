@@ -626,6 +626,9 @@ describe("the facts queue", () => {
   it.each([
     ["the request fails with no answer", () => Promise.reject(new TypeError("Network connection lost.")), "request_failed"],
     ["TinyAgent answers 200 without a run id", () => Response.json({ status: "PENDING" }), "no_run_id"],
+    // A server error says nothing about whether the run was created (Task 15).
+    ["TinyAgent answers 503 with a code", () => Response.json({ error: { code: "UNAVAILABLE" } }, { status: 503 }), "UNAVAILABLE"],
+    ["TinyAgent answers a bare 500", () => new Response("upstream exploded", { status: 500 }), "http_500"],
   ])("when %s a run may exist: the claim is kept for the sweep, an attempt is used, and nothing else starts", async (_name, reply, code) => {
     fetchMock.intercept({ method: "POST", url: RUN_ASYNC_API, times: Infinity, reply });
     const id = await seedVersion(await seedPage("pricing"), STORED);
@@ -727,23 +730,70 @@ describe("the facts queue", () => {
     });
   });
 
-  it("an empty facts list is a failure, and a later success clears the facts error", async () => {
+  it("a COMPLETED run with an empty list is final: facts unavailable after that one run, the version complete, and no second run", async () => {
     mockFetchHtml();
     mockRunAsync();
     const id = await seedVersion(await seedPage("pricing"));
-    await captureVersion(env, id);
+    await captureVersion(env, id); // attempt 1: screenshot and source stored, facts run agent-run-1
 
     await recordFactsResult(env, "agent-run-1", "COMPLETED", { items: [] }, 2);
-    expect(await version(id)).toMatchObject({ capture_error: "facts: empty", agent_run_id: "agent-run-2", capture_attempts: 2 });
-
-    await recordFactsResult(env, "agent-run-2", "COMPLETED", { items: ITEMS }, 3);
     expect(await version(id)).toMatchObject({
-      facts_json: JSON.stringify(FACTS),
-      agent_run_id: "agent-run-2",
+      facts_json: null,
+      facts_status: "unavailable",
       capture_status: "complete",
-      capture_error: null,
+      capture_error: "facts: empty",
+      agent_run_id: null,
       capture_attempts: 2,
     });
+    expect(await nextFactsCandidate(env.DB)).toBeNull();
+
+    // Nothing starts it again: not the queue, not a capture, not the cron's waiting start.
+    expect(await startNextFacts(env)).toBe(false);
+    expect(await startNextFacts(env, { waitOnRateLimit: true })).toBe(false);
+    await captureVersion(env, id);
+    expect(runAsyncCalls()).toHaveLength(1);
+    expect(await version(id)).toMatchObject({ facts_status: "unavailable", capture_status: "complete", capture_error: "facts: empty" });
+  });
+
+  it("an empty list on a version still missing its screenshot: facts unavailable at once, and the screenshot is still retried", async () => {
+    mockFetchHtml();
+    mockRunAsync();
+    shot.mockRejectedValueOnce(new Error("CDP timeout"));
+    const id = await seedVersion(await seedPage("pricing"));
+    await captureVersion(env, id); // attempt 1: source stored, screenshot failed; the facts run starts anyway
+
+    await recordFactsResult(env, "agent-run-1", "COMPLETED", { items: [] }, 1);
+    expect(await version(id)).toMatchObject({ facts_status: "unavailable", capture_status: "partial", agent_run_id: null });
+
+    await captureVersion(env, id); // the repair's attempt: the screenshot this time
+    expect(await version(id)).toMatchObject({
+      screenshot_key: `shots/${id}.jpg`,
+      facts_status: "unavailable",
+      capture_status: "complete",
+      capture_error: "facts: empty",
+    });
+    expect(runAsyncCalls()).toHaveLength(1);
+  });
+
+  it.each([
+    ["FAILED", "FAILED", null, "FAILED"],
+    ["a timeout (the cron's STALE)", "STALE", null, "STALE"],
+    ["an unparseable result", "COMPLETED", { plans: [] }, "unparseable"],
+  ])("a run that ends with %s is still retried within the attempt cap", async (_name, status, result, reason) => {
+    mockRunAsync();
+    const id = await seedVersion(await seedPage("pricing"), STORED);
+    expect(await startNextFacts(env)).toBe(true); // agent-run-1
+
+    await recordFactsResult(env, "agent-run-1", status, result, 1);
+
+    expect(await version(id)).toMatchObject({
+      agent_run_id: "agent-run-2", // started again at once
+      facts_status: "pending",
+      capture_status: "awaiting_facts",
+      capture_error: `facts: ${reason}`,
+      capture_attempts: 2,
+    });
+    expect(runAsyncCalls()).toHaveLength(2);
   });
 
   it("nextFactsCandidate takes the oldest version that still needs facts", async () => {
@@ -1091,6 +1141,31 @@ describe("stored objects", () => {
       expect(res.headers.get("content-security-policy")).toBe("sandbox");
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     }
+  });
+
+  it("answers other origins (CORS, preflight included) and keeps the sandbox, nosniff and cache headers", async () => {
+    await env.STORE.put("shots/abc-123.jpg", JPEG, { httpMetadata: { contentType: "image/jpeg" } });
+    await env.STORE.put("html/abc-123.html", "<p>x</p>", { httpMetadata: { contentType: "text/html; charset=utf-8" } });
+    const origin = { Origin: "https://viewer.example" };
+
+    for (const path of ["/sources/abc-123.html", "/shots/abc-123.jpg"]) {
+      const res = await callWorker(path, { headers: origin });
+      expect(res.status, path).toBe(200);
+      expect(res.headers.get("access-control-allow-origin"), path).toBe("*");
+      expect(res.headers.get("content-security-policy"), path).toBe("sandbox");
+      expect(res.headers.get("x-content-type-options"), path).toBe("nosniff");
+      expect(res.headers.get("cache-control"), path).toBe("public, max-age=31536000, immutable");
+
+      const preflight = await callWorker(path, {
+        method: "OPTIONS",
+        headers: { ...origin, "Access-Control-Request-Method": "GET" },
+      });
+      expect(preflight.status, path).toBe(204);
+      expect(preflight.headers.get("access-control-allow-origin"), path).toBe("*");
+    }
+    const missing = await callWorker("/shots/missing.jpg", { headers: origin });
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get("access-control-allow-origin")).toBe("*");
   });
 
   it.each([

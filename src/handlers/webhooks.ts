@@ -224,8 +224,9 @@ webhooksRouter.post("/agent/:secret", async (c) => {
       result: data.result,
       numSteps: typeof data.num_of_steps === "number" ? data.num_of_steps : null,
     };
-    // Recording the result may start the next queued facts run, whose 429 retries can
-    // take minutes, so it runs after the response.
+    // Recording the result may start the next queued facts run: one more TinyAgent request, so it runs
+    // after the response. That start never waits out a rate limit (a 429 gives its claim back at once,
+    // src/capture.ts); only the hourly cron's start waits and retries.
     c.executionCtx.waitUntil(
       settleAgentRun(c.env, runId, status.toUpperCase(), given).catch((err: unknown) =>
         logError(`agent callback for ${runId.slice(0, 100)} failed`, err),

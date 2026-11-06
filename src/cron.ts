@@ -1,8 +1,8 @@
 // The hourly cron (spec 4.4): the safety net behind the webhook's waitUntil work. It keeps
 // the serial facts queue moving (stale claims, runs whose callback was lost, rate-limited
-// starts), pulls Monitor checks whose scheduled run never arrived, retires public pages at the
-// end of their week, flags pages whose Monitor TinyFish no longer runs, and retries captures
-// that did not finish.
+// starts), pulls Monitor checks whose scheduled run never arrived (with a backoff for pages whose
+// pulls keep failing), retires public pages at the end of their week, flags pages whose Monitor
+// TinyFish no longer runs, retries captures that did not finish, and asks for any missing summaries.
 //
 // Repair comes last and is capped (REPAIR_PER_TICK): each capture makes several outbound
 // requests, the free plan allows 50 per invocation, and a backlog must never starve the
@@ -21,8 +21,9 @@ import {
 } from "./core/limits";
 import { clearStalePending, expiredPublicPages, monitoredPages, pendingConfirmPages, setPageStatusIf } from "./db/pages";
 import { pullCandidates } from "./db/runs";
-import { inFlightFactsRuns, listFactsClaims, pendingCaptures, updateIfFactsHolder } from "./db/versions";
+import { countMissingSummaries, inFlightFactsRuns, listFactsClaims, pendingCaptures, updateIfFactsHolder } from "./db/versions";
 import type { Env } from "./env";
+import { requestSummary } from "./summary";
 import { getRun } from "./tinyfish/agent";
 import { TinyFishError } from "./tinyfish/client";
 import { deleteMonitor, getMonitor, listMonitors, UNKNOWN_STATUS } from "./tinyfish/monitor";
@@ -77,6 +78,7 @@ export async function runCron(env: Env): Promise<CronResult> {
   await step("expiry", () => expire(env, result));
   await step("health", () => health(env, result));
   await step("repair", () => repair(env, result));
+  await step("summaries", () => fillMissingSummaries(env));
   console.log("cron", {
     repaired: result.repaired,
     expired: result.expired,
@@ -204,6 +206,10 @@ function codeIn(body: unknown): string {
  * First come the confirm reads: a page whose last read was held as a suspected partial render
  * (pending_at within 24 hours, see src/core/gate.ts) is pulled whatever its tick, before the overdue
  * pages and under the same cap. A pending read older than 24 hours is cleared, with no pull.
+ *
+ * A page in its pull backoff is skipped either way: after PULL_BACKOFF_AFTER_FAILURES failed pulls in a
+ * row (no text, a fetch error, run-now failing) the pull route sets `pull_retry_after` PULL_BACKOFF_MS
+ * ahead, so such a page is pulled at most that often until a pull returns text or a webhook run arrives.
  */
 async function pullOverdue(env: Env, result: CronResult): Promise<void> {
   const now = cronDeps.now();
@@ -213,10 +219,10 @@ async function pullOverdue(env: Env, result: CronResult): Promise<void> {
     console.warn("cron overdue pulls skipped: the spend pause is reached");
     return;
   }
-  const confirms = await pendingConfirmPages(env.DB, confirmSince);
+  const confirms = await pendingConfirmPages(env.DB, confirmSince, now.toISOString());
   const cutoff = new Date(now.getTime() - OVERDUE_AFTER_MS);
   const due: { id: string; tick: number }[] = [];
-  for (const page of await pullCandidates(env.DB)) {
+  for (const page of await pullCandidates(env.DB, now.toISOString())) {
     const tick = page.schedule_cron === null ? null : lastTickAtOrBefore(page.schedule_cron, cutoff);
     if (tick === null) continue;
     if (page.last_received_at !== null && page.last_received_at >= tick.toISOString()) continue;
@@ -333,4 +339,15 @@ async function repair(env: Env, result: CronResult): Promise<void> {
     result.repaired += 1;
     await captureVersion(env, version.id); // never throws
   }
+}
+
+// --- 6. Summaries ---------------------------------------------------------------------
+
+/**
+ * The safety net behind each new version's own summary request (src/summary.ts): when any non-baseline
+ * version still has no summary (its request failed, or a replay created it), one fill is asked for, in
+ * its own invocation through the SELF binding, within that route's per-call budget.
+ */
+async function fillMissingSummaries(env: Env): Promise<void> {
+  if ((await countMissingSummaries(env.DB)) > 0) await requestSummary(env);
 }

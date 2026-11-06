@@ -5,12 +5,14 @@
 // spend, and starts the new version's capture in the caller's own invocation.
 import { captureVersion, needsFacts } from "./capture";
 import type { Verdict } from "./core/gate";
-import { PRICES, recordSpend } from "./core/spend";
-import { updatePage } from "./db/pages";
+import { PRICES, recordSpendOnce } from "./core/spend";
+import { oneLine } from "./core/summary";
+import { clearPullFailures, updatePage } from "./db/pages";
 import { deleteRun, insertRun, markNoise, setRunNote } from "./db/runs";
 import type { PageRow, TriggerKind } from "./db/types";
 import { insertVersion, setVersionHash } from "./db/versions";
 import type { Env } from "./env";
+import { requestSummary } from "./summary";
 
 /** What the recording path needs of a Monitor run, whichever way it arrived. */
 export interface MonitorRun {
@@ -139,14 +141,25 @@ export async function recordMonitorRun(
   await bestEffort("page timestamps", () =>
     updatePage(db, page.id, { last_run_at: receivedAt, last_change_at: versionId === null ? undefined : receivedAt }),
   );
-  // TinyFish does not bill a failed check, so a fetch error is not put on the ledger.
+  // A webhook run shows the Monitor is running: whatever the pulls went through, the pull backoff ends.
+  if (input.trigger === "webhook" && (page.pull_failures !== 0 || page.pull_retry_after !== null)) {
+    await bestEffort("pull backoff", () => clearPullFailures(db, page.id));
+  }
+  // TinyFish does not bill a failed check, so a fetch error is not put on the ledger. Once per run id: a
+  // pulled check was already put on it when run-now answered (src/handlers/admin.ts).
   if (verdict?.kind !== "fetch_error") {
-    await bestEffort("spend", () => recordSpend(db, "monitor_check", PRICES.monitor_check, run.id));
+    await bestEffort("spend", () => recordSpendOnce(db, "monitor_check", PRICES.monitor_check, run.id));
   }
 
   if (versionId !== null) {
     const newId = versionId;
-    ctx.waitUntil(captureVersion(env, newId).catch((err: unknown) => logError(`capture failed for ${newId}`, err)));
+    const work: Promise<unknown>[] = [captureVersion(env, newId).catch((err: unknown) => logError(`capture failed for ${newId}`, err))];
+    // A change without TinyFish's summary gets a line from Fineprint's own diff, built in an invocation of
+    // its own (src/summary.ts): never here, where a CPU kill after the claim would cost the version.
+    if (verdict?.kind === "new_version" && !verdict.baseline && oneLine(run.judgmentSummary) === null) {
+      work.push(requestSummary(env, newId));
+    }
+    ctx.waitUntil(Promise.all(work));
   }
   return { kind: "recorded", runId, versionId, suppressed };
 }

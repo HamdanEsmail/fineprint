@@ -5,21 +5,23 @@
 // The free plan allows 10 ms of CPU a request, so nothing here loops over pages with a query
 // each, and no list reads a version's `text`. The one expensive answer, a diff, is stored in
 // `diff_cache` under the two version ids so later requests only read it. It is stored only once
-// both versions are final (`complete` or `failed`): a version's text never changes, but its
-// screenshot, source and facts are filled in after it is inserted (a capture takes minutes, the
-// facts queue up to an hour), so the diff of a version still being captured is computed again
-// on every request and a stored one would freeze it without them. What a stored diff also
-// depends on (the page's ignore patterns and label) is dropped from the cache when it is edited.
+// both versions are final (`complete` or `failed`, with no facts run in flight) and the `to`
+// version's summary is filled: a version's text never changes, but its screenshot, source, facts
+// and summary are filled in after it is inserted (a capture takes minutes, the facts queue up to an
+// hour), so the diff of a version still being captured is computed again on every request and a
+// stored one would freeze it without them. What a stored diff also depends on (the page's ignore
+// patterns and label) is dropped from the cache when it is edited. Every version is shown through
+// the one mapper in ./versionJson.ts.
 import { Hono } from "hono";
 import type { Context } from "hono";
-import { factsDiff, structuredDiff, type Fact, type FactsDiff, type StructuredDiff } from "../core/diff";
+import { factsDiff, structuredDiff, type FactsDiff, type StructuredDiff } from "../core/diff";
 import { FACTS_PAUSE_USD, SPEND_PAUSE_USD } from "../core/limits";
 import { normalize } from "../core/normalize";
 import { PRICES, type SpendKind } from "../core/spend";
 import { getCachedDiff, putCachedDiff } from "../db/diffCache";
 import { getPage, listPages } from "../db/pages";
 import { countNoiseBetween, countNoiseByReason, countRunsByTrigger } from "../db/runs";
-import type { FactsStatus, PageRow, PageStatus, TriggerKind, VersionRow } from "../db/types";
+import type { FactsStatus, PageRow, PageStatus, SummarySource, TriggerKind } from "../db/types";
 import {
   baselineVersion,
   countVersionsBetween,
@@ -34,6 +36,7 @@ import {
 } from "../db/versions";
 import type { Env } from "../env";
 import { pageToJson } from "./pages";
+import { objectUrls, parseFacts, versionJson, versionSummaryJson } from "./versionJson";
 
 type AppContext = Context<{ Bindings: Env }>;
 
@@ -64,36 +67,14 @@ function parseTime(raw: string | undefined): string | null {
   return /^\d{4}-/.test(iso) ? iso : null;
 }
 
-/** The public urls of a version's stored copies (R18): null for a capture the version does not have. */
-function objectUrls(
-  env: Env,
-  v: Pick<VersionSummary, "id" | "screenshot_key" | "html_key">,
-): { screenshot_url: string | null; source_url: string | null } {
-  const base = env.PUBLIC_BASE_URL.replace(/\/+$/, "");
-  return {
-    screenshot_url: v.screenshot_key ? `${base}/shots/${v.id}.jpg` : null,
-    source_url: v.html_key ? `${base}/sources/${v.id}.html` : null,
-  };
-}
-
-/** A version's stored facts, or null when it has none or what is stored is not a JSON array. */
-function parseFacts(stored: string | null): Fact[] | null {
-  if (stored === null) return null;
-  try {
-    const value: unknown = JSON.parse(stored);
-    return Array.isArray(value) ? (value as Fact[]) : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
- * True when nothing about a version's captures will change any more: `complete` or `failed` (the
- * two terminal statuses). A `pending`, `partial` or `awaiting_facts` version is still gaining its
- * screenshot, source or facts.
+ * True when nothing a stored diff shows of a version will change any more: its capture is terminal
+ * (`complete` or `failed`) and no facts run is in flight for it (`agent_run_id` set, a run id or a claim,
+ * with no facts yet: a version can hold the facts slot while `failed`, or `complete` after its attempts).
+ * A `pending`, `partial` or `awaiting_facts` version is still gaining its screenshot, source or facts.
  */
-const isFinal = (v: Pick<VersionSummary, "capture_status">): boolean =>
-  v.capture_status === "complete" || v.capture_status === "failed";
+const isFinal = (v: Pick<VersionSummary, "capture_status" | "agent_run_id" | "facts_json">): boolean =>
+  (v.capture_status === "complete" || v.capture_status === "failed") && !(v.agent_run_id !== null && v.facts_json === null);
 
 const notFound = (c: AppContext): Response => c.json({ error: "not_found" }, 404);
 
@@ -104,29 +85,6 @@ async function noVersionAt(c: AppContext, pageId: string, reason: "before_baseli
     if (baseline) return c.json({ error: "before_baseline", baseline_at: baseline.captured_at }, 404);
   }
   return c.json({ error: "no_versions" }, 404);
-}
-
-/**
- * A version with its text, as versions/:vid and as-of return it. `trigger` says which way the run
- * that made it arrived: `create` (the baseline), `webhook` (a scheduled run) or `pull` (an overdue
- * check run with run-now).
- */
-function versionJson(env: Env, page: PageRow, v: WithTrigger<VersionRow>) {
-  return {
-    id: v.id,
-    page_id: v.page_id,
-    captured_at: v.captured_at,
-    is_baseline: v.is_baseline === 1,
-    text: v.text,
-    facts: parseFacts(v.facts_json),
-    ...objectUrls(env, v),
-    live_url: page.url,
-    judgment_summary: v.judgment_summary,
-    capture_status: v.capture_status,
-    facts_status: v.facts_status,
-    trigger: v.trigger_kind,
-    notes: v.notes,
-  };
 }
 
 // --- One version and as-of --------------------------------------------------------------------
@@ -166,6 +124,7 @@ type DiffJson = {
   from: DiffEnd;
   to: DiffEnd;
   summary: string | null;
+  summary_source: SummarySource | null;
   blocks: StructuredDiff;
   facts: FactsDiff | null;
   hops: number;
@@ -218,7 +177,9 @@ async function buildDiff(
     page: { id: page.id, url: page.url, label: page.label },
     from: diffEnd(env, from),
     to: diffEnd(env, to),
-    summary: to.judgment_summary,
+    // The latest hop's summary: the `to` version's stored one-line summary (TinyFish's, else the diff line).
+    summary: to.summary,
+    summary_source: to.summary_source,
     blocks,
     facts: factsDiff(parseFacts(from.facts_json), parseFacts(to.facts_json)),
     hops,
@@ -245,8 +206,9 @@ historyRouter.get("/pages/:id/diff", async (c) => {
 
   // A diff is kept only once both versions are final, and only a kept one is read: a stored answer
   // is served as it was stored (the viewer never recomputes), and an answer for a version still
-  // being captured is computed fresh, so it shows the screenshots and facts that have arrived.
-  const final = isFinal(from) && isFinal(to);
+  // being captured is computed fresh, so it shows the screenshots and facts that have arrived. The
+  // `to` version's summary is part of the answer, so a change whose summary is not filled yet waits too.
+  const final = isFinal(from) && isFinal(to) && (to.is_baseline === 1 || to.summary !== null);
   if (final) {
     const cached = await getCachedDiff(db, from.id, to.id);
     if (cached !== null) return c.body(cached, 200, { "Content-Type": "application/json" });
@@ -292,7 +254,8 @@ historyRouter.get("/changes", async (c) => {
       page_label: row.page_label,
       url: row.url,
       captured_at: row.captured_at,
-      summary: row.judgment_summary,
+      summary: row.summary,
+      summary_source: row.summary_source,
       screenshot_url: objectUrls(c.env, row).screenshot_url,
       trigger: row.trigger_kind,
       facts_status: row.facts_status,
@@ -306,7 +269,7 @@ historyRouter.get("/export.json", async (c) => {
   // Two queries however many pages there are: the pages, then every version without its text,
   // grouped here. Versions are newest first, as in /api/pages/:id.
   const [pages, versions] = await Promise.all([listPages(c.env.DB), listAllVersionSummaries(c.env.DB)]);
-  const byPage = new Map<string, VersionSummary[]>();
+  const byPage = new Map<string, WithTrigger<VersionSummary>[]>();
   for (const version of versions) {
     const list = byPage.get(version.page_id);
     if (list) list.push(version);
@@ -317,16 +280,7 @@ historyRouter.get("/export.json", async (c) => {
     generated_at: new Date().toISOString(),
     pages: pages.map((page) => ({
       ...pageToJson(page),
-      versions: (byPage.get(page.id) ?? []).map((v) => ({
-        id: v.id,
-        captured_at: v.captured_at,
-        is_baseline: v.is_baseline === 1,
-        summary: v.judgment_summary,
-        ...objectUrls(c.env, v),
-        facts: parseFacts(v.facts_json),
-        capture_status: v.capture_status,
-        facts_status: v.facts_status,
-      })),
+      versions: (byPage.get(page.id) ?? []).map((v) => versionSummaryJson(c.env, v)),
     })),
   });
 });

@@ -9,6 +9,8 @@ export const PUBLIC_TTL_DAYS = 7;
 export const PUBLIC_ADDS_PER_IP_PER_DAY = 1;
 /** Discover-by-domain lookups a public caller gets per day (the admin has no limit). */
 export const DISCOVER_PER_IP_PER_DAY = 10;
+/** The longest url `POST /api/pages` accepts, as sent and in its stored (canonical) form. */
+export const MAX_URL_LENGTH = 2048;
 
 /** The facts run on a pricing page may take at most this many Agent steps... */
 export const AGENT_MAX_STEPS = 6;
@@ -31,6 +33,13 @@ export const MONITOR_LOOKUPS_PER_TICK = 3;
  * due an hour, so the cap only matters for catching up.
  */
 export const PULLS_PER_TICK = 20;
+/**
+ * The pull backoff (src/handlers/admin.ts, src/cron.ts): after this many consecutive failed pulls of a
+ * page (no text, a fetch error, or run-now failing), the hourly cron pulls it at most once every
+ * PULL_BACKOFF_MS, until a pull returns usable text or a webhook run arrives for the page.
+ */
+export const PULL_BACKOFF_AFTER_FAILURES = 3;
+export const PULL_BACKOFF_MS = 6 * 60 * 60 * 1000;
 /** Full-page screenshots are cut off at this height in pixels. */
 export const SCREENSHOT_MAX_HEIGHT = 8000;
 
@@ -56,3 +65,10 @@ export const PARTIAL_RENDER_LARGE_CHARS = 2000;
 export const CONFIRM_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** A read whose text equals any version captured this recently is a flap, not a new version. */
 export const FLAP_WINDOW_MS = 72 * 60 * 60 * 1000;
+
+/**
+ * One call of the summary fill (src/summary.ts) stops once the page texts it has normalized and diffed
+ * (each version's and the one before it) add up to this many characters, after at least one version.
+ * Normalizing is about 1 ms per 15 KB, so this keeps a call to a few ms of the 10 ms CPU budget.
+ */
+export const SUMMARY_TEXT_BUDGET_CHARS = 60_000;

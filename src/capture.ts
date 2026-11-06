@@ -12,7 +12,8 @@
 //   failed          out of attempts with the screenshot or the source still missing
 //
 // facts_status says what became of the price facts: ok (stored), pending (needed, queued or in
-// flight), unavailable (needed, the attempts used up, none stored) or not_needed.
+// flight), unavailable (needed and none stored: the attempts were used up, or a run completed with an
+// empty list, which is final for the version) or not_needed.
 //
 // One counter, capture_attempts, counts capture attempts and failed facts runs alike;
 // at CAPTURE_MAX_ATTEMPTS a version with a screenshot or source missing is failed, and one with
@@ -59,13 +60,23 @@ export const captureDeps = {
 
 // --- The status rule ------------------------------------------------------------
 
-type StatusInput = Pick<VersionRow, "screenshot_key" | "html_key" | "facts_json" | "capture_attempts">;
+type StatusInput = Pick<VersionRow, "screenshot_key" | "html_key" | "facts_json" | "capture_attempts"> &
+  Partial<Pick<VersionRow, "facts_status">>;
+
+/**
+ * Facts that are settled as unavailable for good: once a version's facts_status is `unavailable` (its
+ * attempts were used up, or a facts run completed with an empty list, which is final) it stays so until
+ * facts are stored, and no facts run is started for it again (src/db/versions.ts nextFactsCandidate).
+ */
+const factsGivenUp = (v: StatusInput): boolean => v.facts_json === null && v.facts_status === "unavailable";
 
 /** The one rule for capture_status, used after every capture and every facts result. */
 export function captureStatusFor(v: StatusInput, needsFacts: boolean): CaptureStatus {
   const stored = v.screenshot_key !== null && v.html_key !== null;
-  // Facts that are stored, not needed or out of attempts do not hold the version back.
-  if (stored && (!needsFacts || v.facts_json !== null || v.capture_attempts >= CAPTURE_MAX_ATTEMPTS)) return "complete";
+  // Facts that are stored, not needed, given up or out of attempts do not hold the version back.
+  if (stored && (!needsFacts || v.facts_json !== null || factsGivenUp(v) || v.capture_attempts >= CAPTURE_MAX_ATTEMPTS)) {
+    return "complete";
+  }
   if (v.capture_attempts >= CAPTURE_MAX_ATTEMPTS) return "failed";
   if (stored) return "awaiting_facts";
   return v.capture_attempts === 0 ? "pending" : "partial";
@@ -73,13 +84,15 @@ export function captureStatusFor(v: StatusInput, needsFacts: boolean): CaptureSt
 
 /**
  * The rule for facts_status, used with captureStatusFor wherever a status is written. Stored facts are
- * `ok`; otherwise `not_needed` when the version needs none; `unavailable` once the screenshot and the
- * source are stored and the attempts are used up; `pending` for anything else (a version that failed
- * for want of its screenshot or source never got its facts started, and is not called unavailable).
+ * `ok`; otherwise `not_needed` when the version needs none; `unavailable` once given up (see
+ * factsGivenUp), or once the screenshot and the source are stored and the attempts are used up; `pending`
+ * for anything else (a version that failed for want of its screenshot or source never got its facts
+ * started, and is not called unavailable).
  */
 export function factsStatusFor(v: StatusInput, needsFacts: boolean): FactsStatus {
   if (v.facts_json !== null) return "ok";
   if (!needsFacts) return "not_needed";
+  if (factsGivenUp(v)) return "unavailable";
   const stored = v.screenshot_key !== null && v.html_key !== null;
   return stored && v.capture_attempts >= CAPTURE_MAX_ATTEMPTS ? "unavailable" : "pending";
 }
@@ -384,14 +397,14 @@ async function startNext(env: Env, waitOnRateLimit: boolean): Promise<boolean> {
  * so a claim that was released and taken again in the meantime is left alone.
  * - Still rate-limited: the shared account is busy, not this version failing. The claim is
  *   given back with no attempt used, and the version stays queued.
- * - Refused by TinyAgent (an HTTP error): no run exists. The claim is given back and an
- *   attempt is used.
- * - No answer, or a 2xx without a run id: a run may exist, and two must never be in flight.
- *   The claim is kept for the cron's sweep to release, and an attempt is used.
+ * - Refused by TinyAgent (a 4xx): no run exists. The claim is given back and an attempt is used.
+ * - No answer, a 5xx, or a 2xx without a run id: a run may exist (a server error can come after the
+ *   run was created), and two must never be in flight. The claim is kept for the cron's sweep to
+ *   release, and an attempt is used.
  */
 async function settleFailedStart(db: D1Database, versionId: string, token: string, err: unknown): Promise<void> {
   const rateLimited = err instanceof TinyFishError && err.code === "RATE_LIMIT_EXCEEDED";
-  const refused = err instanceof TinyFishError && err.code !== "no_run_id";
+  const refused = err instanceof TinyFishError && err.code !== "no_run_id" && err.status < 500;
   if (!refused) logError(`facts start for version ${versionId} may have created a run; claim kept`, err);
   const code = rateLimited ? "rate_limited" : codeOf(err, "request_failed");
   const added = rateLimited ? 0 : 1;
@@ -455,13 +468,21 @@ export async function recordFactsResult(
       await settleStatus(db, row, factsNeeded);
     } else {
       const reason = label !== "COMPLETED" ? label : facts === null ? "unparseable" : "empty";
+      // A run that completed and found no plans or fees has answered: the page has no price table the
+      // Agent can read, and another run would only spend again (ruling, 6 Nov). The facts are
+      // unavailable for this version from now on. A run that failed, was cancelled, timed out or gave
+      // something unreadable is retried within the attempt cap, as before.
+      const final = reason === "empty";
       const row = await updateIfFactsHolder(
         db,
         version.id,
         runId,
         {
           agent_run_id: null,
-          ...statusPair({ ...version, capture_attempts: version.capture_attempts + 1 }, factsNeeded),
+          ...statusPair(
+            { ...version, capture_attempts: version.capture_attempts + 1, ...(final ? { facts_status: "unavailable" as const } : {}) },
+            factsNeeded,
+          ),
           capture_error: withErrors(version.capture_error, ["facts"], [`facts: ${reason}`]),
         },
         1,

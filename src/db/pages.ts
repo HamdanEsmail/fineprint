@@ -2,7 +2,14 @@ import type { AddedBy, PageRow, PageStatus } from "./types";
 
 export type NewPage = Omit<
   PageRow,
-  "created_at" | "last_run_at" | "last_change_at" | "pending_hash" | "pending_run_id" | "pending_at"
+  | "created_at"
+  | "last_run_at"
+  | "last_change_at"
+  | "pending_hash"
+  | "pending_run_id"
+  | "pending_at"
+  | "pull_failures"
+  | "pull_retry_after"
 >;
 
 export type PagePatch = Partial<
@@ -165,17 +172,48 @@ export async function monitoredPages(db: D1Database): Promise<(PageRow & { monit
   return results;
 }
 
-/** Pages with a confirm read pending that was marked at or after `sinceIso` and can be pulled, oldest first. */
-export async function pendingConfirmPages(db: D1Database, sinceIso: string): Promise<string[]> {
+/**
+ * Pages with a confirm read pending that was marked at or after `sinceIso` and can be pulled, oldest
+ * first; a page in its pull backoff (`pull_retry_after` after `nowIso`) is left out.
+ */
+export async function pendingConfirmPages(db: D1Database, sinceIso: string, nowIso: string): Promise<string[]> {
   const { results } = await db
     .prepare(
       `SELECT id FROM pages
        WHERE pending_at IS NOT NULL AND pending_at >= ? AND status IN ('active', 'failed') AND monitor_id IS NOT NULL
+         AND (pull_retry_after IS NULL OR pull_retry_after <= ?)
        ORDER BY pending_at, rowid`,
     )
-    .bind(sinceIso)
+    .bind(sinceIso, nowIso)
     .all<{ id: string }>();
   return results.map((r) => r.id);
+}
+
+/**
+ * Counts one more failed pull of a page (in SQL, so two at once both count). From the
+ * `afterFailures`-th in a row on, the page's `pull_retry_after` is set to `retryAfterIso`: the cron does
+ * not pull it again before then.
+ */
+export async function notePullFailure(db: D1Database, id: string, afterFailures: number, retryAfterIso: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE pages SET pull_failures = pull_failures + 1,
+         pull_retry_after = CASE WHEN pull_failures + 1 >= ?2 THEN ?3 ELSE pull_retry_after END
+       WHERE id = ?1`,
+    )
+    .bind(id, afterFailures, retryAfterIso)
+    .run();
+}
+
+/** Ends a page's pull backoff (a pull returned text, or a webhook run arrived); writes nothing when there is none. */
+export async function clearPullFailures(db: D1Database, id: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE pages SET pull_failures = 0, pull_retry_after = NULL
+       WHERE id = ? AND (pull_failures != 0 OR pull_retry_after IS NOT NULL)`,
+    )
+    .bind(id)
+    .run();
 }
 
 /** Clears the pending confirm read of every page marked before `beforeIso`; the number of pages cleared. */

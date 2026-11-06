@@ -189,6 +189,8 @@ describe("GET /api/pages/:id/versions/:vid", () => {
       screenshot_url: `${BASE}/shots/ver-2.jpg`,
       source_url: `${BASE}/sources/ver-2.html`,
       live_url: URL1,
+      summary: SUMMARY2, // the run carried TinyFish's summary, so the version was stored with it
+      summary_source: "tinyfish",
       judgment_summary: SUMMARY2,
       capture_status: "complete",
       facts_status: "ok",
@@ -360,6 +362,7 @@ describe("GET /api/pages/:id/diff", () => {
       from: { version_id: "ver-1", captured_at: T1, screenshot_url: `${BASE}/shots/ver-1.jpg`, source_url: `${BASE}/sources/ver-1.html`, trigger: "create", facts_status: "ok" },
       to: { version_id: "ver-3", captured_at: T3, screenshot_url: null, source_url: `${BASE}/sources/ver-3.html`, trigger: "webhook", facts_status: "ok" },
       summary: SUMMARY3,
+      summary_source: "tinyfish",
       blocks: {
         added: [
           { section: "Ultra", text: "## Ultra" },
@@ -466,7 +469,8 @@ describe("GET /api/pages/:id/diff", () => {
     await seed();
     const T5 = "2026-11-05T10:00:00.000Z";
     await insertVersion(db, freshCatch({ capture_status: "complete" }));
-    await insertVersion(db, versionInput("ver-5", { captured_at: T5, text: `${text4}\n\nNew line.`, capture_status: "complete" }));
+    // With a summary of its own, so only the capture status decides (a `to` without one is never stored).
+    await insertVersion(db, versionInput("ver-5", { captured_at: T5, text: `${text4}\n\nNew line.`, capture_status: "complete", judgment_summary: "A line was added." }));
 
     for (const status of ["pending", "partial", "awaiting_facts", "complete", "failed"] as const) {
       await db.prepare("DELETE FROM diff_cache").run();
@@ -500,7 +504,7 @@ describe("GET /api/pages/:id/diff", () => {
     await seed();
     await insertPage(db, pageInput({ id: "page-2", url: "https://notion.com/pricing", label: "Notion pricing", monitor_id: "mon-2" }));
     await insertVersion(db, versionInput("n-1", { page_id: "page-2", is_baseline: 1, captured_at: T1 }));
-    await insertVersion(db, versionInput("n-2", { page_id: "page-2", captured_at: T2 }));
+    await insertVersion(db, versionInput("n-2", { page_id: "page-2", captured_at: T2, judgment_summary: "Notion changed." }));
     const patch = (body: Json) =>
       get(`/api/pages/${PAGE}`, {
         method: "PATCH",
@@ -658,6 +662,7 @@ describe("GET /api/changes", () => {
       url: URL1,
       captured_at: T3,
       summary: SUMMARY3,
+      summary_source: "tinyfish",
       screenshot_url: null,
       trigger: "webhook",
       facts_status: "ok",
@@ -669,6 +674,7 @@ describe("GET /api/changes", () => {
       url: "https://notion.com/pricing",
       captured_at: "2026-11-02T10:00:00.000Z",
       summary: "Plus went up.",
+      summary_source: "tinyfish",
       screenshot_url: `${BASE}/shots/n-2.jpg`,
       trigger: null, // seeded without a run
       facts_status: "pending",
@@ -739,38 +745,54 @@ describe("GET /api/export.json", () => {
     const page = body.pages[0];
     expect(page).toMatchObject({ id: PAGE, url: URL1, label: "Vercel pricing", kind: "pricing", status: "active", ignore_patterns: [] });
     expect(page.versions).toEqual([
+      // The shared version shape (src/handlers/versionJson.ts), with the run's trigger.
       {
         id: "ver-3",
+        page_id: PAGE,
         captured_at: T3,
         is_baseline: false,
         summary: SUMMARY3,
+        summary_source: "tinyfish",
+        judgment_summary: SUMMARY3,
         screenshot_url: null,
         source_url: `${BASE}/sources/ver-3.html`,
         facts: facts3,
         capture_status: "failed",
         facts_status: "ok",
+        trigger: "webhook",
+        notes: null,
       },
       {
         id: "ver-2",
+        page_id: PAGE,
         captured_at: T2,
         is_baseline: false,
         summary: SUMMARY2,
+        summary_source: "tinyfish",
+        judgment_summary: SUMMARY2,
         screenshot_url: `${BASE}/shots/ver-2.jpg`,
         source_url: `${BASE}/sources/ver-2.html`,
         facts: facts2,
         capture_status: "complete",
         facts_status: "ok",
+        trigger: "webhook",
+        notes: null,
       },
       {
         id: "ver-1",
+        page_id: PAGE,
         captured_at: T1,
         is_baseline: true,
         summary: null,
+        summary_source: null,
+        judgment_summary: null,
         screenshot_url: `${BASE}/shots/ver-1.jpg`,
         source_url: `${BASE}/sources/ver-1.html`,
         facts: facts1,
         capture_status: "complete",
         facts_status: "ok",
+        trigger: "create",
+        notes: null,
       },
     ]);
     expect(body.pages[1].versions).toEqual([]);

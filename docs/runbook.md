@@ -2,6 +2,8 @@
 
 How to take Fineprint from the repo to a live Worker that is recording 20 pages. Written for Git Bash on Windows. Each step says what success looks like; if you do not see it, stop and read "If something goes wrong" at the end.
 
+Fineprint has been live and recording 20 pages since 3 Nov 2026. Steps 0 to 11 are how it was set up and stay as the record of that; to ship a change to the live Worker, use step 12.
+
 Do this only when the Cloudflare account is ready: R2 is enabled and the API token in `../.cloudflare.env` may use Workers, D1 and R2. The steps run in this order on purpose: the first deploy creates the Worker so that `secret put` has something to attach to, and the webhook rehearsal comes before any page is registered, so a payload shape surprise costs one test Monitor and not twenty.
 
 ## How the blocks work
@@ -347,6 +349,35 @@ The hourly cron is live and repairs captures: each tick it retries up to 3 versi
 
 The clock has started when `pages` is 20 and the first hourly and twice-daily Monitor checks begin to arrive. Record: the `/api/stats` output, `docs/registration-log.md`, the rehearsal payload's outcome and top-level keys.
 
+## 12. Updating the live Worker
+
+A change that adds a migration needs it applied before the deploy, because the new code reads the new columns. Migrations are additive (new columns with defaults), so the code still running reads the database fine in between.
+
+```bash
+cd "/c/Tinyfish Bounties/fineprint" || exit 1
+npm run check || { echo "STOP: npm run check failed"; exit 1; }
+CLOUDFLARE_API_TOKEN=$(grep -m1 '^CLOUDFLARE_API_TOKEN=' ../.cloudflare.env | cut -d= -f2- | tr -d '\r') npm run migrate:remote || { echo "STOP: the migration failed; do not deploy"; exit 1; }
+CLOUDFLARE_API_TOKEN=$(grep -m1 '^CLOUDFLARE_API_TOKEN=' ../.cloudflare.env | cut -d= -f2- | tr -d '\r') npm run deploy
+```
+
+Success: wrangler lists the migrations it applied (or says there are none to apply), then the deploy prints the bindings and the URL.
+
+After the deploy that brings migration 0006 (summaries), fill the summaries of the versions recorded before it. Each call fills what fits in its CPU budget and says how many remain, so the block calls it until none do:
+
+```bash
+cd "/c/Tinyfish Bounties/fineprint" || exit 1
+BASE=$(grep -o '"PUBLIC_BASE_URL": *"[^"]*"' wrangler.jsonc | cut -d'"' -f4)
+[[ $BASE =~ ^https://[^/]+$ ]] || { echo "STOP: PUBLIC_BASE_URL in wrangler.jsonc is not the workers.dev URL (step 6)"; exit 1; }
+ADMIN_TOKEN=$(grep -m1 '^ADMIN_TOKEN=' ../.fineprint-prod.env | cut -d= -f2- | tr -d '\r\n')
+[ "${#ADMIN_TOKEN}" = 48 ] || { echo "STOP: ADMIN_TOKEN is missing or not 48 characters in ../.fineprint-prod.env"; exit 1; }
+for i in $(seq 1 40); do
+  OUT=$(curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$BASE/api/admin/backfill-summaries"); echo "$OUT"
+  echo "$OUT" | grep -q '"remaining":0' && break
+done
+```
+
+Success: the last line is `{"filled":<n>,"remaining":0}`. A call that answers 500 or the same `remaining` several times in a row has hit a version too large to diff in one request; note its id (the oldest non-baseline version with no summary) and report it. The hourly job also asks for a fill whenever a summary is missing, so nothing else is needed afterwards.
+
 ## If something goes wrong
 
 - **You abandon the rehearsal, or anything in step 8 fails after 8c.** Pause the spike Monitor first, before anything else, and check that it is paused:
@@ -384,7 +415,8 @@ The clock has started when `pages` is 20 and the first hourly and twice-daily Mo
   ```
 
   Its Monitor is deleted and its history stays. **Deleting a page does not free its place in the 20, and running registration again does not replace it:** the deleted page keeps its url (the column is unique), so the script gets `409 already_watched` for it and counts it as registered. To put another page in its place, add that page by hand with `POST /api/pages` or run the script with a higher `--limit`.
-- **Rotating the webhook secret or host.** `POST /api/admin/rotate-webhook` arrives with Task 10. Until then, changing `WEBHOOK_SECRET` means re-pointing every Monitor by hand, so do not change it after step 9.
+- **Rotating the webhook secret or host.** Put the new `WEBHOOK_SECRET` with `wrangler secret put` (as in step 5, and update `../.fineprint-prod.env` to match), then call `POST /api/admin/rotate-webhook` with `{"base_url": "<the Worker URL>"}` and the admin token. It re-points every live Monitor and answers `{updated, failed}`; re-run it for any page listed in `failed`. This was done once, on 3 Nov at 16:28 UTC (`{updated: 20, failed: []}`).
+- **A page is not being pulled although it is overdue.** After 3 failed pulls in a row (no text, a fetch error, run-now failing) the hourly job pulls the page at most once every 6 hours, until a pull returns text or a webhook arrives. `GET /api/pages/<id>` shows `pull_failures` and `pull_retry_after`. `POST /api/admin/pull/<id>` with the admin token pulls it at once whatever the backoff says, and a pull that returns text ends it.
 - **Day-2 check: is any page producing a version on most pulls?** Pulls are what records the pages (the hourly cron asks TinyFish to run an overdue check and compares the text itself), and on a pricing or fees page every change that gets through buys a facts run of up to about $0.10. A page whose text moves on every pull (a rotating banner, reordered cards, a counter) would spend the budget in days. Compare the versions made since registration with the pulls made:
 
   ```bash

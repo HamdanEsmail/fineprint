@@ -27,6 +27,12 @@ export type CaptureStatus = "pending" | "partial" | "awaiting_facts" | "complete
  */
 export type FactsStatus = "ok" | "pending" | "unavailable" | "not_needed";
 
+/**
+ * Where a version's one-line summary came from (migrations/0006_summaries_pull_backoff.sql): tinyfish, the
+ * run's judgment summary; diff, built by Fineprint from its structured diff against the previous version.
+ */
+export type SummarySource = "tinyfish" | "diff";
+
 export interface PageRow {
   id: string;
   url: string;
@@ -49,6 +55,10 @@ export interface PageRow {
   pending_run_id: string | null;
   /** When the suspect run was received (ISO); the confirm read is pulled for 24 hours after it. */
   pending_at: string | null;
+  /** Consecutive failed pulls (no text, a fetch error, run-now failing); 0 after a usable pull or a webhook run (migrations/0006). */
+  pull_failures: number;
+  /** While set and in the future, the hourly cron does not pull the page (the pull backoff), ISO. */
+  pull_retry_after: string | null;
 }
 
 /**
@@ -98,8 +108,12 @@ export interface VersionRow {
   agent_run_id: string | null;
   /** What became of the version's price facts; see FactsStatus. */
   facts_status: FactsStatus;
-  /** Why the version exists when it is not the plain result of one read (a confirmed suspect read), or null. */
+  /** Why the version exists when it is not the plain result of one read (a confirmed suspect read, a replay), or null. */
   notes: string | null;
+  /** A plain one-line summary of the change; null for a baseline, and until it is filled. */
+  summary: string | null;
+  /** Where `summary` came from; null when it is. */
+  summary_source: SummarySource | null;
 }
 
 export interface SpendRow {

@@ -34,7 +34,10 @@ const T3 = "2026-11-04T09:30:00.000Z";
 const MINUTE = 60_000;
 const plusMinutes = (iso: string, minutes: number) => new Date(Date.parse(iso) + minutes * MINUTE).toISOString();
 
-type NewPage = Omit<PageRow, "created_at" | "last_run_at" | "last_change_at" | "pending_hash" | "pending_run_id" | "pending_at">;
+type NewPage = Omit<
+  PageRow,
+  "created_at" | "last_run_at" | "last_change_at" | "pending_hash" | "pending_run_id" | "pending_at" | "pull_failures" | "pull_retry_after"
+>;
 
 function pageInput(over: Partial<NewPage> = {}): NewPage {
   return {
@@ -91,6 +94,8 @@ function versionInput(over: Partial<VersionRow> = {}): VersionRow {
     agent_run_id: null,
     notes: null,
     facts_status: "pending",
+    summary: null,
+    summary_source: null,
     ...over,
   };
 }
@@ -120,6 +125,8 @@ describe("pages", () => {
       pending_hash: null,
       pending_run_id: null,
       pending_at: null,
+      pull_failures: 0,
+      pull_retry_after: null,
     });
     expect(await getPageByMonitorId(db, "mon-1")).toEqual(byId);
     expect(await getPageByUrl(db, "https://example.com/pricing")).toEqual(byId);
@@ -357,8 +364,26 @@ describe("versions", () => {
       capture_attempts: 0,
       agent_run_id: null,
       notes: null,
+      // A baseline has no change summary, whatever its run's judgment said.
+      summary: null,
+      summary_source: null,
     });
     expect(await getVersion(db, "missing")).toBeNull();
+  });
+
+  it("insertVersion stores TinyFish's judgment summary, on one line, as a change's summary; an explicit summary wins", async () => {
+    await insertPage(db, pageInput());
+    const base = { page_id: "page-1", run_id: null, is_baseline: 0, captured_at: T2, text: "t", normalized_hash: "h" };
+    await insertVersion(db, { ...base, id: "v-tf", judgment_summary: " Pro rose\n to $25. " });
+    await insertVersion(db, { ...base, id: "v-blank", judgment_summary: "  \n" });
+    await insertVersion(db, { ...base, id: "v-given", judgment_summary: "TinyFish text", summary: "given", summary_source: "diff" });
+    const summaryOf = async (id: string) => {
+      const v = await getVersion(db, id);
+      return [v?.summary, v?.summary_source];
+    };
+    expect(await summaryOf("v-tf")).toEqual(["Pro rose to $25.", "tinyfish"]);
+    expect(await summaryOf("v-blank")).toEqual([null, null]);
+    expect(await summaryOf("v-given")).toEqual(["given", "diff"]);
   });
 
   it("versionAsOf returns the latest version at or before the time, baseline included", async () => {

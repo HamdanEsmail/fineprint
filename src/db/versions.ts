@@ -1,5 +1,6 @@
 import { CAPTURE_MAX_ATTEMPTS } from "../core/limits";
-import type { CaptureStatus, FactsStatus, TriggerKind, VersionRow } from "./types";
+import { oneLine } from "../core/summary";
+import type { CaptureStatus, FactsStatus, SummarySource, TriggerKind, VersionRow } from "./types";
 
 /** What a caller supplies to insertVersion; the capture columns default to a fresh, uncaptured version. */
 export type NewVersion = Pick<
@@ -18,6 +19,8 @@ export type NewVersion = Pick<
       | "agent_run_id"
       | "notes"
       | "facts_status"
+      | "summary"
+      | "summary_source"
     >
   >;
 
@@ -73,6 +76,8 @@ const SUMMARY_COLUMNS = [
   "agent_run_id",
   "notes",
   "facts_status",
+  "summary",
+  "summary_source",
 ] as const satisfies readonly (keyof VersionSummary)[];
 
 function summaryColumns(prefix = ""): string {
@@ -92,18 +97,31 @@ const CAPTURE_PATCH_COLUMNS = [
 ] as const satisfies readonly (keyof CapturePatch)[];
 
 /**
+ * The summary a version is created with when the caller gives none: TinyFish's judgment summary on one
+ * line (`tinyfish`) for a change whose run carried one; nothing for a baseline, or for a change without
+ * one, whose diff line is filled afterwards out of band (src/summary.ts).
+ */
+function summaryAtInsert(v: NewVersion): { summary: string | null; summary_source: SummarySource | null } {
+  if (v.summary !== undefined) return { summary: v.summary, summary_source: v.summary_source ?? null };
+  const fromTinyFish = v.is_baseline === 1 ? null : oneLine(v.judgment_summary);
+  return fromTinyFish === null ? { summary: null, summary_source: null } : { summary: fromTinyFish, summary_source: "tinyfish" };
+}
+
+/**
  * Inserts a version. Omitted capture fields start as NULL, `pending` and 0 attempts. An omitted
  * `facts_status` is `ok` when facts are given and `pending` otherwise; a caller that knows the page
- * does not need facts (src/capture.ts needsFacts) says `not_needed`.
+ * does not need facts (src/capture.ts needsFacts) says `not_needed`. An omitted `summary` follows
+ * summaryAtInsert.
  */
 export async function insertVersion(db: D1Database, v: NewVersion): Promise<void> {
+  const summary = summaryAtInsert(v);
   await db
     .prepare(
       `INSERT INTO versions
          (id, page_id, run_id, is_baseline, captured_at, text, normalized_hash, judgment_summary,
           screenshot_key, html_key, facts_json, capture_status, capture_error, capture_attempts, agent_run_id, notes,
-          facts_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          facts_status, summary, summary_source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       v.id,
@@ -123,6 +141,8 @@ export async function insertVersion(db: D1Database, v: NewVersion): Promise<void
       v.agent_run_id ?? null,
       v.notes ?? null,
       v.facts_status ?? (v.facts_json != null ? "ok" : "pending"),
+      summary.summary,
+      summary.summary_source,
     )
     .run();
 }
@@ -190,14 +210,14 @@ export async function setVersionHash(db: D1Database, id: string, hash: string): 
   await db.prepare("UPDATE versions SET normalized_hash = ? WHERE id = ?").bind(hash, id).run();
 }
 
-/** Every version of a page, newest first (the baseline is last), without `text`. */
-export async function listVersions(db: D1Database, pageId: string): Promise<VersionSummary[]> {
+/** Every version of a page, newest first (the baseline is last), without `text`, with its run's trigger. */
+export async function listVersions(db: D1Database, pageId: string): Promise<WithTrigger<VersionSummary>[]> {
   const { results } = await db
     .prepare(
-      `SELECT ${summaryColumns()} FROM versions WHERE page_id = ? ORDER BY captured_at DESC, rowid DESC`,
+      `SELECT ${summaryColumns()}, ${triggerColumn("versions")} FROM versions WHERE page_id = ? ORDER BY captured_at DESC, rowid DESC`,
     )
     .bind(pageId)
-    .all<VersionSummary>();
+    .all<WithTrigger<VersionSummary>>();
   return results;
 }
 
@@ -264,12 +284,78 @@ export async function countVersionsBetween(
   return row?.n ?? 0;
 }
 
-/** Every version of every page, newest first, without `text`: the export reads them in one query. */
-export async function listAllVersionSummaries(db: D1Database): Promise<VersionSummary[]> {
+/** Every version of every page, newest first, without `text`, with its run's trigger: the export reads them in one query. */
+export async function listAllVersionSummaries(db: D1Database): Promise<WithTrigger<VersionSummary>[]> {
   const { results } = await db
-    .prepare(`SELECT ${summaryColumns()} FROM versions ORDER BY captured_at DESC, rowid DESC`)
-    .all<VersionSummary>();
+    .prepare(`SELECT ${summaryColumns()}, ${triggerColumn("versions")} FROM versions ORDER BY captured_at DESC, rowid DESC`)
+    .all<WithTrigger<VersionSummary>>();
   return results;
+}
+
+// --- Summaries -------------------------------------------------------------------
+//
+// A non-baseline version without a summary is filled out of band (src/summary.ts): TinyFish's judgment
+// summary when its run had one, else a line built from the diff against the version before it.
+
+/**
+ * A version still without a summary (never a baseline), with the length of its text (not the text: a
+ * TinyFish summary needs none) and its page's ignore patterns.
+ */
+export type SummaryCandidate = Pick<VersionRow, "id" | "page_id" | "captured_at" | "judgment_summary"> & {
+  text_length: number;
+  ignore_patterns: string;
+};
+
+const CANDIDATE_SELECT = `SELECT v.id, v.page_id, v.captured_at, v.judgment_summary, length(v.text) AS text_length, p.ignore_patterns
+  FROM versions v JOIN pages p ON p.id = v.page_id
+  WHERE v.is_baseline = 0 AND v.summary IS NULL`;
+
+/** The oldest non-baseline versions without a summary (by `captured_at`, then insertion), at most `limit`. */
+export async function versionsMissingSummary(db: D1Database, limit: number): Promise<SummaryCandidate[]> {
+  const { results } = await db
+    .prepare(`${CANDIDATE_SELECT} ORDER BY v.captured_at, v.rowid LIMIT ?`)
+    .bind(Math.max(0, Math.trunc(limit)) || 0)
+    .all<SummaryCandidate>();
+  return results;
+}
+
+/** One version, if it is a non-baseline version without a summary; else null. */
+export function versionMissingSummary(db: D1Database, id: string): Promise<SummaryCandidate | null> {
+  return db.prepare(`${CANDIDATE_SELECT} AND v.id = ?`).bind(id).first<SummaryCandidate>();
+}
+
+/** How many non-baseline versions have no summary yet. */
+export async function countMissingSummaries(db: D1Database): Promise<number> {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS n FROM versions WHERE is_baseline = 0 AND summary IS NULL")
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/** The text of the version of the same page captured just before this one (ties by insertion), or null. */
+export async function previousVersionText(
+  db: D1Database,
+  v: Pick<VersionRow, "id" | "page_id" | "captured_at">,
+): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT text FROM versions
+       WHERE page_id = ?1 AND id != ?2
+         AND (captured_at < ?3 OR (captured_at = ?3 AND rowid < (SELECT rowid FROM versions WHERE id = ?2)))
+       ORDER BY captured_at DESC, rowid DESC LIMIT 1`,
+    )
+    .bind(v.page_id, v.id, v.captured_at)
+    .first<{ text: string }>();
+  return row?.text ?? null;
+}
+
+/** Stores a version's summary unless it already has one; true when it was written. */
+export async function setSummaryIfMissing(db: D1Database, id: string, summary: string, source: SummarySource): Promise<boolean> {
+  const result = await db
+    .prepare("UPDATE versions SET summary = ?, summary_source = ? WHERE id = ? AND summary IS NULL")
+    .bind(summary, source, id)
+    .run();
+  return result.meta.changes === 1;
 }
 
 /**
@@ -475,7 +561,8 @@ export type FactsCandidate = VersionSummary & { url: string };
 
 /**
  * The oldest version (by `captured_at`) that is waiting for a facts run: its page is
- * `pricing` or `fees` and not expired or retired, it has no facts and no run, it is not `failed`, it
+ * `pricing` or `fees` and not expired or retired, it has no facts and no run, it is not `failed`, its
+ * facts are not settled as `unavailable` (a facts run that completed with an empty list is final), it
  * has attempts left, and it is a baseline or its run was not judged irrelevant (a judgment
  * of NULL, or no run at all, counts as relevant). Null when the queue is empty.
  */
@@ -494,6 +581,7 @@ export function nextFactsCandidate(
          AND v.facts_json IS NULL
          AND v.agent_run_id IS NULL
          AND v.capture_status != 'failed'
+         AND COALESCE(v.facts_status, '') != 'unavailable'
          AND v.capture_attempts < ?
          AND (v.is_baseline = 1 OR r.judgment_relevant IS NULL OR r.judgment_relevant != 0)
        ORDER BY v.captured_at, v.rowid

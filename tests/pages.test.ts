@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { safeEqual } from "../src/auth";
 import { captureDeps } from "../src/capture";
-import { MAX_MONITORS, PUBLIC_SLOTS, PUBLIC_TTL_DAYS } from "../src/core/limits";
+import { MAX_MONITORS, MAX_URL_LENGTH, PUBLIC_SLOTS, PUBLIC_TTL_DAYS } from "../src/core/limits";
 import { hashText, normalize } from "../src/core/normalize";
 import { PURPOSE } from "../src/core/schedule";
 import { countMonitors, getPage, getPageByUrl, insertPage, type NewPage } from "../src/db/pages";
@@ -525,6 +525,31 @@ describe("POST /api/pages validation", () => {
     expect(await count("pages")).toBe(0);
   });
 
+  it(`refuses a url over ${MAX_URL_LENGTH} characters, as sent or once made canonical, before any request leaves the Worker`, async () => {
+    expect(MAX_URL_LENGTH).toBe(2048);
+    const base = "https://example.com/";
+    const tooLong = base + "a".repeat(MAX_URL_LENGTH - base.length + 1);
+    // 700 spaces are 700 characters as sent and 2,100 once percent-encoded.
+    const growsTooLong = `${base}${" ".repeat(700)}x`;
+    expect(growsTooLong.length).toBeLessThan(MAX_URL_LENGTH);
+    for (const url of [tooLong, growsTooLong]) {
+      for (const headers of [ADMIN, {}]) {
+        const res = await addPage({ url }, headers);
+        expect(res.status).toBe(400);
+        expect(await json(res)).toEqual({ error: "invalid_url", reason: "url_too_long" });
+      }
+    }
+    expect(fetchMock.calls).toEqual([]);
+    expect(await count("pages")).toBe(0);
+  });
+
+  it(`accepts a url of exactly ${MAX_URL_LENGTH} characters`, async () => {
+    mockTinyFish();
+    const base = "https://example.com/";
+    const res = await addPage({ url: base + "a".repeat(MAX_URL_LENGTH - base.length), kind: "policy" }, ADMIN);
+    expect(res.status).toBe(201);
+  });
+
   it("rejects a body with no url", async () => {
     const res = await addPage({ label: "x" }, ADMIN);
     expect(res.status).toBe(400);
@@ -699,8 +724,10 @@ describe("GET /api/pages", () => {
     expect(body.page).toMatchObject({ id: added.page.id, url: PRICING_URL, ignore_patterns: [] });
     expect(body.versions).toHaveLength(1);
     // The add's waitUntil capture has run by now (screenshot stubbed, html from TinyFetch).
-    expect(body.versions[0]).toMatchObject({ id: added.baseline_version_id, is_baseline: 1, capture_status: "complete" });
+    // The shared version shape: a boolean, the trigger, no raw columns.
+    expect(body.versions[0]).toMatchObject({ id: added.baseline_version_id, is_baseline: true, capture_status: "complete", trigger: "create" });
     expect(body.versions[0]).not.toHaveProperty("text");
+    expect(body.versions[0]).not.toHaveProperty("normalized_hash");
   });
 
   it("answers 404 not_found for an unknown page", async () => {
@@ -1149,6 +1176,8 @@ describe("pageToJson", () => {
     pending_hash: null,
     pending_run_id: null,
     pending_at: null,
+    pull_failures: 0,
+    pull_retry_after: null,
   };
 
   it("parses ignore_patterns and keeps every other column, including extra list columns", () => {

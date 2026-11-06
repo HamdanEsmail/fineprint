@@ -5,13 +5,16 @@ import { Hono } from "hono";
 import { adminOnly } from "../auth";
 import { needsFacts, spendPaused } from "../capture";
 import { isFetchFailure, judgeChange, normalizedHash, readIgnorePatterns, type Verdict } from "../core/gate";
+import { PULL_BACKOFF_AFTER_FAILURES, PULL_BACKOFF_MS } from "../core/limits";
+import { PRICES, recordSpendOnce } from "../core/spend";
 import { changedRunsForReplay, clearNoise, markNoise } from "../db/runs";
 import { deleteCachedDiffsOfPage } from "../db/diffCache";
-import { getPage, listPages, setPageStatusIf, updatePage } from "../db/pages";
+import { clearPullFailures, getPage, listPages, notePullFailure, setPageStatusIf, updatePage } from "../db/pages";
 import type { VersionRow } from "../db/types";
 import { baselineVersion, getVersion, insertVersion, latestVersion } from "../db/versions";
 import type { Env } from "../env";
 import { recordMonitorRun, type MonitorRun } from "../record";
+import { fillSummaries, requestSummary } from "../summary";
 import { TinyFishError } from "../tinyfish/client";
 import { deleteMonitor, runMonitorNow, updateMonitor } from "../tinyfish/monitor";
 import { codeOf, pageToJson, readBody } from "./pages";
@@ -71,21 +74,31 @@ function decisionOf(verdict: Verdict): Exclude<ReplayDecision, "existing_version
  * normalization, the partial-render guard and flap suppression, as of the run's own receipt time). The
  * body may be a webhook payload or the 201 body of a run-now pull. A run that was a suspect read is
  * counted as suppressed (`partial_render`); the replay schedules no confirm reads.
- * - a run that already made a version is left alone and the chain moves to that version; the answer
- *   also says what the gate would decide for it now (`would_now_be`), and changes nothing;
+ * - a run that already made a version is left alone and the chain moves to that version, without its
+ *   raw body being read. With `?would_now_be=1` the body is read and the answer also says what the gate
+ *   would decide for it now (`would_now_be`); that is opt-in because it normalizes every such run, which
+ *   does not fit the 10 ms CPU budget for a page with a long history. Either way nothing is changed;
  * - a body that is missing, unreadable, empty or carries an error is skipped (counted nowhere);
  * - a read that normalizes to the chain's text, is a suspect partial render or repeats a text of the
  *   last 72 hours is suppressed (and marked as noise, with that reason, if it was not);
- * - any other read becomes a version, dated by the run's receipt time and left `pending` with
- *   `capture_error "replayed"` for the hourly repair, and its run stops counting as noise.
+ * - any other read becomes a version, dated by the run's receipt time, with the note
+ *   `created by replay on <iso>` (after any note of the gate's own), left `pending` with
+ *   `capture_error "replayed"` for the hourly repair, and its run stops counting as noise. Its summary
+ *   is TinyFish's when the body had one; otherwise the diff line is asked for after the answer.
  * Nothing is captured and TinyFish is never called. The replay only adds: it never deletes or changes
- * a version (R79). A replay that is cut off, or run again, picks up where the stored versions say it was.
+ * a version (R79). Each write is made as it is decided, so a replay that is cut off keeps what it wrote,
+ * and running it again creates nothing twice. It does not resume where it stopped, though: every run is
+ * walked again from the baseline; the runs it turned into versions are then skipped without a read, but
+ * each run without a version (the suppressed ones included) is read and normalized again, so a replay
+ * that ran out of CPU on such runs runs out at about the same place.
  * The page's cached diffs are dropped before the first write, so a cut-off replay leaves none stale.
  */
 adminRouter.post("/pages/:id/replay", adminOnly, async (c) => {
   const db = c.env.DB;
   const page = await getPage(db, c.req.param("id"));
   if (!page) return c.json({ error: "not_found" }, 404);
+  const wantWouldNowBe = c.req.query("would_now_be") === "1";
+  const replayNote = `created by replay on ${new Date().toISOString()}`;
 
   const chain: Chain = { versionId: (await baselineVersion(db, page.id))?.id ?? null, loaded: null };
   // The gate sees the page as the replay does: no confirm read pending, so a suspect is a suspect.
@@ -114,18 +127,23 @@ adminRouter.post("/pages/:id/replay", adminOnly, async (c) => {
 
   for (const run of await changedRunsForReplay(db, page.id)) {
     const entry = { run_id: run.id, monitor_run_id: run.monitor_run_id, received_at: run.received_at };
-    const stored = await readRaw(c.env.STORE, run.raw_key!);
 
     // A version that exists is history whether or not its body survived, and the next run is compared
-    // with it, as the live gate would have. Only the answer to "and now?" needs the body.
+    // with it, as the live gate would have. Only the answer to "and now?" needs the body, and only when asked.
     if (run.version_id !== null) {
-      const wouldNowBe = stored === null ? "skipped_unreadable" : decisionOf(await judge(stored, run.received_at, run.version_id));
-      decisions.push({ ...entry, decision: "existing_version", would_now_be: wouldNowBe });
+      if (wantWouldNowBe) {
+        const stored = await readRaw(c.env.STORE, run.raw_key!);
+        const wouldNowBe = stored === null ? "skipped_unreadable" : decisionOf(await judge(stored, run.received_at, run.version_id));
+        decisions.push({ ...entry, decision: "existing_version", would_now_be: wouldNowBe });
+      } else {
+        decisions.push({ ...entry, decision: "existing_version" });
+      }
       chain.versionId = run.version_id;
       chain.loaded = null;
       continue;
     }
 
+    const stored = await readRaw(c.env.STORE, run.raw_key!);
     if (stored === null || isFetchFailure(stored)) {
       decisions.push({ ...entry, decision: "skipped_unreadable" });
       continue;
@@ -164,6 +182,8 @@ adminRouter.post("/pages/:id/replay", adminOnly, async (c) => {
       capture_status: "pending",
       capture_error: "replayed",
       facts_status: needsFacts(page, { is_baseline: 0 }, run) ? "pending" : "not_needed",
+      // The durable marker: capture_error "replayed" is dropped by the first capture, this note stays.
+      notes: verdict.notes === undefined ? replayNote : `${verdict.notes}; ${replayNote}`,
     });
     created++;
     decisions.push({ ...entry, decision: "created" });
@@ -175,7 +195,23 @@ adminRouter.post("/pages/:id/replay", adminOnly, async (c) => {
     chain.loaded = null;
   }
 
+  // A created version without TinyFish's summary gets its diff line in an invocation of its own.
+  if (created > 0) c.executionCtx.waitUntil(requestSummary(c.env));
   return c.json({ created, suppressed, decisions });
+});
+
+// --- Summaries ----------------------------------------------------------------------------------
+
+/**
+ * Fills the one-line summary of non-baseline versions that have none (src/summary.ts), and answers
+ * `{filled, remaining}`. `?version=<id>` fills that one version only (a new version asks for its own this
+ * way, through the SELF binding). Without it, the oldest missing ones are filled within a per-call text
+ * budget, so the one-off backfill of older versions is this route called until `remaining` is 0. Baselines
+ * keep no summary, and a stored summary is never replaced, so calling it again changes nothing.
+ */
+adminRouter.post("/admin/backfill-summaries", adminOnly, async (c) => {
+  const versionId = c.req.query("version");
+  return c.json(await fillSummaries(c.env, versionId === undefined ? {} : { versionId }));
 });
 
 // --- Retire a page --------------------------------------------------------------------------------
@@ -277,10 +313,16 @@ adminRouter.post("/admin/rotate-webhook", adminOnly, async (c) => {
  *   the spend pause stops a pull: the lower facts pause (FACTS_PAUSE_USD) does not.
  * - A run with no text or with errors records nothing: TinyFish does not bill a failed check, and the
  *   page stays overdue for the next tick (200, `pulled: false` with the reason).
+ * - A run with text is put on the spend ledger at once, before anything else can fail, once per
+ *   TinyFish run id (the shared recording path's write of the same row then adds nothing).
  * - Otherwise the raw 201 body is stored at `raw/<run id>.json` and the outcome is Fineprint's own
  *   (R71): no version yet is the `baseline` and becomes one; text equal to the latest version's
  *   (plain string equality) is `unchanged` and is not normalized; anything else is `changed` and
  *   goes through the change gate. A run id already recorded is a duplicate and writes nothing.
+ * - The pull backoff: run-now failing, no text and a fetch error each count as a failed pull; from the
+ *   PULL_BACKOFF_AFTER_FAILURES-th in a row the page gets `pull_retry_after` PULL_BACKOFF_MS ahead,
+ *   which the cron respects. A pull with text ends it. The refusals above (409, the spend pause) are not
+ *   pulls and count for nothing.
  */
 adminRouter.post("/admin/pull/:pageId", adminOnly, async (c) => {
   const db = c.env.DB;
@@ -291,11 +333,17 @@ adminRouter.post("/admin/pull/:pageId", adminOnly, async (c) => {
   }
   if (await spendPaused(db)) return c.json({ ok: true, pulled: false, reason: "spend_paused" });
 
+  const failedPull = (): Promise<void> =>
+    notePullFailure(db, page.id, PULL_BACKOFF_AFTER_FAILURES, new Date(Date.now() + PULL_BACKOFF_MS).toISOString()).catch((err: unknown) =>
+      logFailure(`pull: could not count a failed pull of page ${page.id}`, err),
+    );
+
   let pulled: Awaited<ReturnType<typeof runMonitorNow>>;
   try {
     pulled = await runMonitorNow(c.env, page.monitor_id);
   } catch (err) {
     logFailure(`pull: run-now failed for page ${page.id}`, err);
+    await failedPull();
     return c.json({ error: "run_now_failed", reason: codeOf(err) }, 502);
   }
 
@@ -309,7 +357,21 @@ adminRouter.post("/admin/pull/:pageId", adminOnly, async (c) => {
     text: pulled.text ?? "",
     hasErrors: pulled.errors.length > 0,
   };
-  if (isFetchFailure(run)) return c.json({ ok: true, pulled: false, reason: run.hasErrors ? "fetch_error" : "no_text" });
+  if (isFetchFailure(run)) {
+    await failedPull();
+    return c.json({ ok: true, pulled: false, reason: run.hasErrors ? "fetch_error" : "no_text" });
+  }
+
+  // TinyFish billed this check. It goes on the ledger now, once per run id, so a failure anywhere below
+  // (or a CPU kill) never leaves a billed check off it.
+  try {
+    await recordSpendOnce(db, "monitor_check", PRICES.monitor_check, run.id);
+  } catch (err) {
+    logFailure(`pull: spend write failed for page ${page.id}`, err);
+  }
+  if (page.pull_failures !== 0 || page.pull_retry_after !== null) {
+    await clearPullFailures(db, page.id).catch((err: unknown) => logFailure(`pull: could not end the backoff of page ${page.id}`, err));
+  }
 
   const receivedAt = new Date().toISOString();
   const rawKey = `raw/${run.id}.json`;
@@ -336,7 +398,9 @@ adminRouter.post("/admin/pull/:pageId", adminOnly, async (c) => {
   return c.json({
     ok: true,
     pulled: true,
+    // Fineprint's row id, and TinyFish's own id for the same run.
     run_id: recorded.runId,
+    monitor_run_id: run.id,
     outcome: run.outcome,
     ...(recorded.versionId !== null ? { version_id: recorded.versionId } : {}),
     ...(recorded.suppressed ? { suppressed: true } : {}),

@@ -12,8 +12,11 @@ import { webhooksRouter } from "./handlers/webhooks";
 const app = new Hono<{ Bindings: Env }>();
 
 // The API is public and read by pages on other origins: any origin, and the preflight answered.
-// Registered first, so it wraps every /api route mounted below.
+// Registered first, so it wraps every /api route mounted below. The stored screenshots and sources
+// too, so a page elsewhere can fetch them; they keep their own sandbox and nosniff headers.
 app.use("/api/*", cors());
+app.use("/shots/*", cors());
+app.use("/sources/*", cors());
 
 app.route("/api/pages", pagesRouter);
 app.route("/api/discover", discoverRouter);
