@@ -28,8 +28,10 @@ time, .num { font-variant-numeric: tabular-nums; }
 .skip { position: absolute; left: 16px; top: -100px; z-index: 10; padding: 10px 14px; font: 500 14px/1 var(--font-body); color: var(--paper); background: var(--ink); border-radius: var(--r); text-decoration: none; }
 .skip:focus { top: 12px; }
 
-.label, .meta, .evidence, .origin, .notice, .meterline { font-family: var(--font-data); }
+.label, .meta, .evidence, .origin, .notice, .meterline, .delta, .tag { font-family: var(--font-data); }
 .label { font-size: 11.5px; line-height: 1.3; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+/* Read by a screen reader, not shown (the delta badge in words, table captions). */
+.vh { position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 
 /* --- Banner, header, nav --------------------------------------------------------------------- */
 .notice { background: var(--ink); color: var(--paper); font-size: 11.5px; line-height: 1.5; letter-spacing: .04em; padding: 8px 0; }
@@ -83,10 +85,24 @@ section > h2 { margin-bottom: 16px; }
 .btn { display: inline-block; padding: 11px 16px; text-decoration: none; }
 .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
 
+/* --- Delta badge and tags (DESIGN.md "Catch card": ink on paper) ------------------------------ */
+.delta, .tag { display: inline-block; padding: 5px 7px; font-size: 11.5px; font-weight: 500; line-height: 1; letter-spacing: .04em; font-variant-numeric: tabular-nums; white-space: nowrap; border: 1px solid var(--ink); border-radius: var(--r); background: var(--paper); }
+/* A label, not a change: the same box, quieter. */
+.tag { text-transform: uppercase; letter-spacing: .06em; color: var(--ink-muted); border-color: var(--ink-muted); }
+.layout-note { margin-top: 6px; font: var(--t-small); color: var(--ink-muted); }
+.meta.is-quiet { color: var(--ink-muted); }
+
 /* --- The change feed: catch cards (DESIGN.md "Catch card") ----------------------------------- */
 .feed { display: grid; gap: 16px; }
-.catch { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 14px; padding: 14px; }
-@media (min-width: 700px) { .catch { grid-template-columns: 92px minmax(0, 1fr); gap: 18px; padding: 16px; } }
+/* Thumbnail and body side by side. The foot (badge row, evidence line) spans the whole card below 700px,
+   so the evidence line is not squeezed into the narrow column beside the thumbnail. */
+.catch { display: grid; grid-template-columns: 72px minmax(0, 1fr); column-gap: 14px; padding: 14px; }
+.catch-foot { grid-column: 1 / -1; min-width: 0; }
+@media (min-width: 700px) {
+  .catch { grid-template-columns: 92px minmax(0, 1fr); column-gap: 18px; padding: 16px; }
+  .catch > .thumb { grid-row: 1 / span 2; }
+  .catch-foot { grid-column: 2; }
+}
 .catch:hover { transform: translate(-1px, -1px); box-shadow: var(--shadow-hover); }
 .thumb { display: block; align-self: start; text-decoration: none; aspect-ratio: 1; overflow: hidden; background: var(--paper-sunken); border: var(--hairline); border-radius: var(--r); }
 .thumb img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
@@ -102,6 +118,140 @@ section > h2 { margin-bottom: 16px; }
 .empty { padding: 20px; max-width: 68ch; color: var(--ink-soft); }
 .more { margin-top: 20px; }
 .retired-note { margin-top: 24px; font: var(--t-small); color: var(--ink-muted); }
+
+/* --- Page view: header ------------------------------------------------------------------------ */
+.page-head { padding-top: 36px; }
+@media (min-width: 900px) { .page-head { padding-top: 52px; } }
+.page-head h1 { max-width: 28ch; text-wrap: balance; overflow-wrap: anywhere; }
+.page-url { margin-top: 8px; font: var(--t-mono); overflow-wrap: anywhere; }
+.page-url a { color: var(--ink-soft); }
+.page-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; margin-top: 14px; font: var(--t-small); color: var(--ink-soft); }
+.page-kind { font: var(--t-label); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+.page-facts code { font-size: 12px; }
+.page-tally { margin-top: 10px; font: 500 12px/1.5 var(--font-data); letter-spacing: .02em; font-variant-numeric: tabular-nums; color: var(--ink-muted); }
+.state-line { width: fit-content; max-width: min(100%, 68ch); margin-top: 16px; padding: 10px 14px; font: var(--t-small); color: var(--ink); background: var(--paper-sunken); border: var(--border); border-radius: var(--r); }
+
+/* --- Page view: timeline and as-of scrubber (DESIGN.md "Timeline", "Page as-of scrubber") ------ */
+section.history { padding-top: 28px; }
+.tl { display: grid; padding: 0; }
+@media (min-width: 900px) { .tl { grid-template-columns: minmax(0, 1fr) 320px; } }
+.tl-strip, .asof { padding: 16px; }
+@media (min-width: 700px) { .tl-strip, .asof { padding: 18px 22px; } }
+.asof { border-top: var(--hairline); }
+@media (min-width: 900px) { .asof { border-top: 0; border-left: var(--hairline); } }
+.tl-note { max-width: 60ch; font: var(--t-small); color: var(--ink-muted); }
+/* The track: 2px ink. Its side margins are half a dot's target, so a dot at either end stays in the panel. */
+.tl-track { position: relative; height: 2px; margin: 30px 12px 16px; background: var(--ink); }
+.tl-track li { position: absolute; top: 1px; transform: translate(-50%, -50%); }
+/* A 24px target around the 12px paper dot with its 2px ink border; the selected version is the filled accent dot. */
+.dot { position: relative; display: block; width: 24px; height: 24px; border-radius: 50%; }
+.dot::before { content: ""; position: absolute; inset: 6px; border-radius: 50%; background: var(--paper); border: 2px solid var(--ink); transition: background-color var(--dur-fast) var(--ease); }
+.dot:hover::before { background: var(--accent-wash); }
+.dot.is-on::before { background: var(--accent); border-color: var(--accent); }
+.dot:focus-visible { outline-offset: 0; }
+.tl-ends { display: flex; justify-content: space-between; gap: 12px; font: 400 11.5px/1.3 var(--font-data); letter-spacing: .02em; color: var(--ink-muted); }
+.asof label { display: block; font: var(--t-h3); letter-spacing: -.01em; }
+.asof-hint { margin-top: 2px; font: var(--t-small); color: var(--ink-muted); }
+.asof-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.asof .input { flex: 1 1 180px; width: auto; min-width: 0; font: var(--t-mono); font-size: 14px; }
+.asof .btn { flex: 0 0 auto; }
+.asof-note { max-width: 48ch; margin-top: 10px; font: var(--t-small); color: var(--ink-soft); }
+.asof-note.field-error { color: var(--bad); }
+
+/* --- Page view: the version list and the version card ------------------------------------------ */
+.history-grid { display: grid; gap: 24px; margin-top: 24px; }
+@media (min-width: 900px) { .history-grid { grid-template-columns: 320px minmax(0, 1fr); gap: 28px; align-items: start; } }
+.versions h2 { margin-bottom: 10px; }
+.versions ol { background: var(--paper-raised); border: var(--border); border-radius: var(--r); box-shadow: var(--shadow); }
+.versions li + li { border-top: var(--hairline); }
+/* A row: the small screenshot beside its time and badge, the summary under both at full width. */
+.vrow { display: grid; grid-template-columns: 56px minmax(0, 1fr); column-gap: 12px; padding: 12px 14px; color: inherit; text-decoration: none; transition: background-color var(--dur-fast) var(--ease); }
+.vrow:hover { background: var(--paper); }
+.vrow.is-on { background: var(--accent-wash); }
+.vrow-shot { display: block; width: 56px; height: 56px; overflow: hidden; background: var(--paper-sunken); border: var(--hairline); border-radius: var(--r); }
+.vrow-shot img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.vrow-head { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; min-width: 0; padding-top: 2px; }
+.vrow-time, .vcard-time { font-variant-numeric: tabular-nums; color: var(--accent); }
+.vrow-time { font: 500 11.5px/1.3 var(--font-data); letter-spacing: .04em; }
+.vrow-time.is-quiet { color: var(--ink-muted); }
+.vrow-sum { grid-column: 1 / -1; margin-top: 8px; font: var(--t-small); color: var(--ink-soft); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.vrow-sum.is-pending { color: var(--ink-muted); }
+.vrow:hover .vrow-sum { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 3px; }
+
+.vcard { min-width: 0; padding: 18px; scroll-margin-top: 16px; }
+@media (min-width: 700px) { .vcard { padding: 24px 28px; } }
+.vcard-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px 20px; }
+.vcard-head h2 { font: var(--t-h2); }
+@media (max-width: 699.98px) { .vcard-head h2 { font-size: 22px; } }
+.vcard-time { white-space: nowrap; }
+.vcard-time.is-quiet { color: inherit; }
+/* The as-of stamp: the header stamp's treatment, at the smallest text size the site allows. */
+.stamp.is-asof { margin-top: 2px; padding: 6px 9px; font-size: 11.5px; white-space: nowrap; background: var(--paper-raised); }
+.vcard .row { margin-top: 12px; }
+.vcard-summary { max-width: 62ch; margin-top: 14px; font: 500 18px/1.4 var(--font-display); letter-spacing: -.01em; text-wrap: pretty; overflow-wrap: anywhere; }
+@media (min-width: 700px) { .vcard-summary { font-size: 20px; line-height: 1.35; } }
+.vcard-summary.is-pending { color: var(--ink-muted); }
+.vcard .origin { display: block; margin-top: 6px; }
+.vshot { margin-top: 22px; }
+.vshot-link { display: block; aspect-ratio: 16 / 10; overflow: hidden; background: var(--paper-sunken); border: var(--border); border-radius: var(--r); }
+.vshot-link img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+figcaption { margin-top: 8px; font: 400 11.5px/1.4 var(--font-data); letter-spacing: .02em; color: var(--ink-muted); }
+/* No screenshot: said in words, in the box the screenshot would fill, never a broken image. */
+.vshot-none { display: flex; flex-direction: column; justify-content: center; gap: 8px; min-height: 180px; margin-top: 22px; padding: 20px; font: var(--t-small); color: var(--ink-soft); background: var(--paper-sunken); border: var(--hairline); border-radius: var(--r); }
+@media (min-width: 700px) { .vshot-none { aspect-ratio: 16 / 10; min-height: 0; } }
+.vshot-state { font: 500 14px/1.4 var(--font-data); letter-spacing: .02em; color: var(--ink); }
+.vshot-links { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.vfacts { margin-top: 26px; }
+.vfacts h3 { margin-bottom: 10px; }
+.facts-note { padding: 12px 14px; font: var(--t-small); color: var(--ink-soft); background: var(--paper-sunken); border-radius: var(--r); }
+.facts { font: var(--t-small); }
+.facts .price { font: var(--t-mono); font-variant-numeric: tabular-nums; overflow-wrap: break-word; }
+.facts .unit { color: var(--ink-muted); }
+@media (max-width: 699.98px) { .facts .unit { display: block; } }
+/* Row headers name a fact; tokens.css styles every th as a column label, so these are set back to text. */
+.table tbody th { padding: 10px 12px; font: 600 13px/1.45 var(--font-body); letter-spacing: 0; text-transform: none; text-align: left; color: var(--ink); background: none; border-top: var(--hairline); overflow-wrap: break-word; }
+@media (max-width: 699.98px) { .table th, .table td { padding: 8px 9px; } }
+.vcard .actions { margin-top: 24px; }
+.vlinks { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 16px; font: var(--t-small); }
+.vtext { margin-top: 28px; padding-top: 20px; border-top: var(--hairline); }
+.vtext .origin { margin-top: 4px; }
+/* Up to a few hundred KB of recorded text: wrapped, never wider than the card, scrolled in its own box;
+   #text lands with the heading above it in view. */
+.vtext pre { max-height: 70vh; scroll-margin-top: 96px; margin: 12px 0 0; padding: 14px 16px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); background: var(--paper-sunken); border: var(--hairline); border-radius: var(--r); }
+
+/* --- Page view: compare form ---------------------------------------------------------------------- */
+.pick { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px 16px; max-width: 780px; padding: 16px; }
+.field { display: flex; flex: 1 1 220px; flex-direction: column; gap: 6px; min-width: 0; }
+.field label { font: var(--t-label); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+.field select { font: var(--t-mono); font-size: 14px; }
+.pick .btn { flex: 0 0 auto; }
+
+/* --- Page view: the check log --------------------------------------------------------------------- */
+.checks-line { font: 500 19px/1.35 var(--font-display); letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.checks .page-note { max-width: 68ch; margin: 6px 0 0; }
+/* As wide as its marks and key need, no wider: a tally, not a chart. */
+.marks-panel { width: fit-content; min-width: min(100%, 360px); max-width: 100%; margin-top: 16px; padding: 18px 20px 16px; }
+/* One mark a run, oldest first, on a common baseline: tall for a read that mattered (accent for a change,
+   ink for the baseline, hollow for noise), short for one that found the page as it was. */
+.marks { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px 5px; }
+.mark { position: relative; display: block; flex: none; width: 10px; height: 26px; border-radius: 1px; background: var(--ink-faint); }
+.mark-change { background: var(--accent); }
+.mark-baseline { background: var(--ink); }
+.mark-noise { background: transparent; border: 1.5px solid var(--ink-muted); }
+.mark-unchanged { height: 10px; }
+.mark-failed { height: 10px; background: transparent; border: 1.5px solid var(--ink-muted); }
+/* A pulled check: a small ink dot under its mark. */
+.mark.is-pulled::after { content: ""; position: absolute; left: 50%; bottom: -9px; width: 5px; height: 5px; margin-left: -2.5px; border-radius: 50%; background: var(--ink); }
+.marks-key { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-top: 22px; padding-top: 12px; font: 400 11.5px/1.3 var(--font-data); letter-spacing: .02em; color: var(--ink-muted); border-top: var(--hairline); }
+.marks-key li { display: inline-flex; align-items: center; gap: 8px; }
+.marks-key .mark { width: 8px; }
+.marks-key .mark-change, .marks-key .mark-noise, .marks-key .mark-baseline { height: 18px; }
+.marks-key .mark.is-pulled { margin-bottom: 9px; }
+.all-checks { margin-top: 18px; }
+.all-checks summary { display: list-item; width: max-content; padding: 6px 0; font: 500 14px/1.4 var(--font-body); cursor: pointer; }
+.all-checks summary:hover { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 3px; }
+.checks-table { max-width: 780px; margin-top: 10px; font: var(--t-small); }
+.checks-table .when { font: var(--t-mono); font-size: 12px; }
 
 /* --- Status chips (tokens.css has ok, warn, bad) --------------------------------------------- */
 .chip.muted { color: var(--ink-muted); }

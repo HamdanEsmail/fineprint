@@ -305,3 +305,58 @@ describe("GET /api/changes additions", () => {
     }
   });
 });
+
+describe("catch cards with deltas and thumbnails (site Task 3)", () => {
+  const delta = (blocks: [number, number, number], facts: [number, number, number] | null, layoutOnly: boolean): string =>
+    JSON.stringify({
+      blocks: { added: blocks[0], removed: blocks[1], changed: blocks[2] },
+      facts: facts === null ? null : { added: facts[0], removed: facts[1], changed: facts[2] },
+      layout_only: layoutOnly,
+    });
+
+  it("shows the delta badge, the thumbnail by path, and labels a layout-only change", async () => {
+    await seedBaselines();
+    await version("pricing-1", "pricing", ago(2 * HOUR), "webhook", {
+      summary: "Pro went from $20 to $25.",
+      summary_source: "tinyfish",
+      delta_json: delta([1, 1, 1], [0, 0, 1], false),
+      thumb_key: "thumbs/pricing-1.jpg",
+    });
+    await version("terms-1", "terms", ago(3 * HOUR), "webhook", {
+      summary: "The terms were rearranged.",
+      summary_source: "diff",
+      delta_json: delta([25, 1, 0], null, true),
+    });
+    const html = await get("/");
+
+    // The badge, and the thumbnail rather than the full screenshot when there is one.
+    expect(html).toContain("+1 −1 ~1 blocks · ~1 fact");
+    expect(html).toMatch(/<img[^>]+src="\/thumbs\/pricing-1\.jpg"/);
+    expect(html).not.toMatch(/<img[^>]+src="\/shots\/pricing-1\.jpg"/);
+    expect(html).toMatch(/<img[^>]+src="\/shots\/terms-1\.jpg"/);
+
+    // Layout only: the tag instead of the counts, the line after the summary, the time without the accent.
+    expect(html).toContain("Layout only");
+    expect(html).not.toContain("+25 −1 blocks");
+    expect(html).toMatch(/The terms were rearranged\.<\/p>\s*<p class="layout-note">Same words and figures, different structure\.<\/p>/);
+    expect(html).toMatch(/<p class="meta is-quiet"><time[^>]*>[^<]+<\/time><span>policy<\/span><\/p>/);
+    expect(html).toMatch(/<p class="meta"><time[^>]*>[^<]+<\/time><span>pricing<\/span><\/p>/);
+
+    // The hero and the real-changes block both leave the layout-only change out; the feed lists it.
+    expect(html).toContain('<h1 class="hero">The web changed its mind <em>once</em> this week.</h1>');
+    expect(html).toMatch(/<b>1<\/b>\s*<span[^>]*>Real changes<\/span>/);
+    expect((await getStats(env)).changes).toBe(1);
+    expect(await countChanges(env, { since: ago(7 * DAY), includeRetired: false, excludeLayoutOnly: true })).toBe(1);
+  });
+
+  it("puts the badge row and the evidence line in a footer that spans the card on a phone", async () => {
+    await seedBaselines();
+    await version("pricing-1", "pricing", ago(2 * HOUR), "webhook", {
+      summary: "Pro went from $20 to $25.",
+      summary_source: "tinyfish",
+      delta_json: delta([0, 0, 1], null, false),
+    });
+    const html = await get("/");
+    expect(html).toMatch(/<div class="catch-foot"><p class="row"><span class="delta"[^>]*>[\s\S]*?~1 block[\s\S]*?<\/span><span class="origin">TinyFish&#39;s summary<\/span><\/p><p class="evidence">/);
+  });
+});

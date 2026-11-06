@@ -24,17 +24,15 @@ import {
   baselineVersion,
   countVersionsBetween,
   getVersion,
-  getVersionWithTrigger,
   listAllVersionSummaries,
-  versionAsOf,
   versionSummaryAsOf,
   type VersionSummary,
   type WithTrigger,
 } from "../db/versions";
 import type { Env } from "../env";
-import { getStats, listChanges, parseTime } from "../readModel";
+import { getStats, getVersion as readVersion, getVersionAsOf, listChanges, parseTime } from "../readModel";
 import { pageToJson } from "./pages";
-import { objectUrls, parseFacts, versionJson, versionSummaryJson } from "./versionJson";
+import { objectUrls, parseFacts, versionSummaryJson } from "./versionJson";
 
 type AppContext = Context<{ Bindings: Env }>;
 
@@ -70,22 +68,21 @@ async function noVersionAt(c: AppContext, pageId: string, reason: "before_baseli
 // --- One version and as-of --------------------------------------------------------------------
 
 historyRouter.get("/pages/:id/versions/:vid", async (c) => {
-  const page = await getPage(c.env.DB, c.req.param("id"));
-  if (!page) return notFound(c);
-  const version = await getVersionWithTrigger(c.env.DB, c.req.param("vid"));
-  if (!version || version.page_id !== page.id) return notFound(c);
-  return c.json(versionJson(c.env, page, version));
+  // Unknown page, unknown version and a version of another page are all not_found.
+  const version = await readVersion(c.env, c.req.param("id"), c.req.param("vid"), { withText: true });
+  return version ? c.json(version) : notFound(c);
 });
 
 historyRouter.get("/pages/:id/as-of", async (c) => {
-  const page = await getPage(c.env.DB, c.req.param("id"));
-  if (!page) return notFound(c);
+  const pageId = c.req.param("id");
   const at = parseTime(c.req.query("at"));
-  if (at === null) return c.json({ error: "invalid_at" }, 400);
+  // An unknown page is not_found whatever the time says, as it was before the read model.
+  if (at === null) return (await getPage(c.env.DB, pageId)) ? c.json({ error: "invalid_at" }, 400) : notFound(c);
 
-  const version = await versionAsOf(c.env.DB, page.id, at);
-  if (typeof version === "string") return noVersionAt(c, page.id, version);
-  return c.json(versionJson(c.env, page, version));
+  const result = await getVersionAsOf(c.env, pageId, at);
+  if (result === null) return notFound(c);
+  if ("error" in result) return c.json(result, 404);
+  return c.json(result);
 });
 
 // --- Diff -------------------------------------------------------------------------------------

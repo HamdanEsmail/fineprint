@@ -2,21 +2,28 @@
 // the endpoint behind the same data can never disagree. The JSON handlers in src/handlers call these
 // and serialize what they return; the site's views render it.
 //
-// Nothing here reads a version's `text`: the free plan's 10 ms of CPU a request has no room for it.
+// Nothing here reads a version's `text` unless the caller asks for it by name (getVersion and
+// getVersionAsOf, for the JSON version endpoints and the page view's `text=1`): the free plan's 10 ms of
+// CPU a request has no room for it.
 import type { Delta } from "./core/diff";
 import { FACTS_PAUSE_USD, PUBLIC_SLOTS, SPEND_PAUSE_USD } from "./core/limits";
 import { PRICES, type SpendKind } from "./core/spend";
-import { publicSlotUsage } from "./db/pages";
-import { countNoiseByReason, countRunsByTrigger } from "./db/runs";
-import type { FactsStatus, PageKind, PageStatus, SummarySource, TriggerKind } from "./db/types";
+import { getPage, publicSlotUsage } from "./db/pages";
+import { countNoiseByReason, countRunsByTrigger, listRunsOfPage } from "./db/runs";
+import type { FactsStatus, PageKind, PageRow, PageStatus, SummarySource, TriggerKind } from "./db/types";
 import {
+  baselineVersion,
   countChanges as countChangeRows,
+  getVersionOfPage,
   LAYOUT_ONLY_SQL,
   listChanges as listChangeRows,
+  listVersions,
   NOT_RETIRED_SQL,
+  versionAsOf,
+  versionSummaryAsOf,
 } from "./db/versions";
 import type { Env } from "./env";
-import { objectUrls, parseDelta, thumbUrl } from "./handlers/versionJson";
+import { objectUrls, parseDelta, thumbUrl, versionJson, versionSummaryJson } from "./handlers/versionJson";
 
 // --- Times ------------------------------------------------------------------------------------
 
@@ -229,4 +236,145 @@ export async function getStats(env: Env): Promise<Stats> {
     recording_since: totals?.recording_since ?? null,
     public_slots: { total: PUBLIC_SLOTS, used: slots.used, next_free_at: slots.next_free_at },
   };
+}
+
+// --- Pages ------------------------------------------------------------------------------------
+
+/** A page row as the API returns it: `ignore_patterns` is an array, every other column as stored. */
+export type PageJson<T extends PageRow = PageRow> = Omit<T, "ignore_patterns"> & { ignore_patterns: string[] };
+
+function parsePatterns(stored: string): string[] {
+  try {
+    const value: unknown = JSON.parse(stored);
+    return Array.isArray(value) ? value.filter((p): p is string => typeof p === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The one mapping from a page row to API JSON (R33). Works for a plain row and for a `listPages` row
+ * (the extra count columns pass through). Exported again from src/handlers/pages.ts.
+ */
+export function pageToJson<T extends PageRow>(row: T): PageJson<T> {
+  return { ...row, ignore_patterns: parsePatterns(row.ignore_patterns) };
+}
+
+// --- One page, one version, as-of -------------------------------------------------------------
+
+/** The page detail answer carries at most this many of the page's runs. */
+export const MAX_RUNS_SHOWN = 100;
+
+/** A version without its text, in the shape every endpoint gives one (versionSummaryJson). */
+export type VersionItem = ReturnType<typeof versionSummaryJson>;
+
+/**
+ * One run of a page. `noise_reason` says why a suppressed run made no version (normalized_identical,
+ * partial_render, flap, layout_hold), or why a fetch failed (fetch_error, not counted as suppressed).
+ */
+export type RunItem = {
+  id: string;
+  monitor_run_id: string;
+  trigger: TriggerKind;
+  outcome: string;
+  received_at: string;
+  noise_suppressed: boolean;
+  noise_reason: string | null;
+};
+
+/**
+ * A page with its whole record, as `GET /api/pages/:id` returns it (`page`, `versions`, `runs`), plus
+ * `versionByRun`, which the JSON leaves out (a version's JSON never shows its run id): for each run that
+ * made a version, that version's id. The page view's check log tells a recorded change from the rest by it.
+ */
+export type PageDetail = {
+  page: PageJson;
+  /** Every version, newest first (the baseline last), without text. */
+  versions: VersionItem[];
+  /** The newest MAX_RUNS_SHOWN runs, newest first. */
+  runs: RunItem[];
+  versionByRun: Record<string, string>;
+};
+
+/** A version with its text (null when the caller did not ask for it) and the page's live url, as versions/:vid and as-of return it. */
+export type VersionDetail = ReturnType<typeof versionJson>;
+
+/** Why an as-of time has no version: every version is later (with the baseline's time), or the page has none. */
+export type AsOfMiss = { error: "before_baseline"; baseline_at: string } | { error: "no_versions" };
+
+/** The page, its versions and its newest runs, read together; null for an unknown page. Three queries, none reads a text. */
+export async function getPageDetail(env: Env, pageId: string): Promise<PageDetail | null> {
+  const db = env.DB;
+  const [page, versions, runs] = await Promise.all([
+    getPage(db, pageId),
+    listVersions(db, pageId),
+    listRunsOfPage(db, pageId, MAX_RUNS_SHOWN),
+  ]);
+  if (!page) return null;
+  const versionByRun: Record<string, string> = {};
+  for (const v of versions) if (v.run_id !== null) versionByRun[v.run_id] = v.id;
+  return {
+    page: pageToJson(page),
+    versions: versions.map((v) => versionSummaryJson(env, v)),
+    runs: runs.map((r) => ({
+      id: r.id,
+      monitor_run_id: r.monitor_run_id,
+      trigger: r.trigger_kind,
+      outcome: r.outcome,
+      received_at: r.received_at,
+      noise_suppressed: r.noise_suppressed === 1,
+      noise_reason: r.noise_reason,
+    })),
+    versionByRun,
+  };
+}
+
+/**
+ * One version of one page, as `GET /api/pages/:id/versions/:vid` returns it; null when the page or the
+ * version is unknown or the version belongs to another page. One query; the text only with `withText`.
+ */
+export async function getVersion(
+  env: Env,
+  pageId: string,
+  versionId: string,
+  opts: { withText: boolean },
+): Promise<VersionDetail | null> {
+  const row = await getVersionOfPage(env.DB, pageId, versionId, opts.withText);
+  if (!row) return null;
+  return versionJson(env, row.live_url, row, opts.withText ? (row.text ?? null) : null);
+}
+
+/**
+ * What a page said at `atIso` (ISO, as parseTime returns it), as `GET /api/pages/:id/as-of` returns it:
+ * the latest version captured at or before it, the baseline included, with its text unless `withText`
+ * is false. An AsOfMiss when there is none; null for an unknown page.
+ */
+export async function getVersionAsOf(
+  env: Env,
+  pageId: string,
+  atIso: string,
+  opts: { withText: boolean } = { withText: true },
+): Promise<VersionDetail | AsOfMiss | null> {
+  const db = env.DB;
+  const [page, hit] = await Promise.all([
+    getPage(db, pageId),
+    opts.withText ? versionAsOf(db, pageId, atIso) : versionSummaryAsOf(db, pageId, atIso),
+  ]);
+  if (!page) return null;
+  if (hit === "no_versions") return { error: "no_versions" };
+  if (hit === "before_baseline") {
+    const baseline = await baselineVersion(db, pageId);
+    return baseline ? { error: "before_baseline", baseline_at: baseline.captured_at } : { error: "no_versions" };
+  }
+  return versionJson(env, page.url, hit, "text" in hit && typeof hit.text === "string" ? hit.text : null);
+}
+
+/**
+ * The version in force at `atIso` among a page's versions listed newest first (as getPageDetail lists
+ * them: by captured_at, then by insertion, newest first): the first one captured at or before it, which is
+ * the one versionAsOf picks with the same order in SQL. Null when every version is later. The page view
+ * resolves `at=` with it from the versions it has already read, so an as-of costs no query of its own.
+ */
+export function versionInForce<T extends { captured_at: string }>(versionsNewestFirst: readonly T[], atIso: string): T | null {
+  return versionsNewestFirst.find((v) => v.captured_at <= atIso) ?? null;
 }

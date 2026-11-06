@@ -2,7 +2,6 @@
 // GET /api/pages/:id and the export list versions with it, versions/:vid and as-of add the text and the
 // live url, and the diff and the change feed take its urls and facts from the helpers here.
 import type { Delta, Fact } from "../core/diff";
-import type { PageRow, VersionRow } from "../db/types";
 import type { VersionSummary, WithTrigger } from "../db/versions";
 import type { Env } from "../env";
 
@@ -76,7 +75,10 @@ export function versionSummaryJson(env: Env, v: WithTrigger<VersionSummary>) {
   };
 }
 
-/** A version with its text and the page's live url, as versions/:vid and as-of return it. */
-export function versionJson(env: Env, page: Pick<PageRow, "url">, v: WithTrigger<VersionRow>) {
-  return { ...versionSummaryJson(env, v), text: v.text, live_url: page.url };
+/**
+ * A version with its text and the page's live url, as versions/:vid and as-of return it (src/readModel.ts
+ * getVersion and getVersionAsOf). `text` is null only for a caller that did not read it.
+ */
+export function versionJson(env: Env, liveUrl: string, v: WithTrigger<VersionSummary>, text: string | null) {
+  return { ...versionSummaryJson(env, v), text, live_url: liveUrl };
 }

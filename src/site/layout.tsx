@@ -17,9 +17,18 @@ const NAV: { key: Exclude<Current, null>; href: string; text: string }[] = [
 
 /**
  * A full page. `stats` is null on the 404 and error pages, which render without the database: the
- * stamp and the spend meter are left out there, and the footer keeps only its links.
+ * stamp and the spend meter are left out there, and the footer keeps only its links. `refreshSeconds`
+ * makes the document reload itself (the page view, while a new version's screenshot is being taken);
+ * it is a meta tag, so it works with JavaScript off.
  */
-export function Layout(props: { title: string; description: string; stats: Stats | null; current: Current; children: Child }) {
+export function Layout(props: {
+  title: string;
+  description: string;
+  stats: Stats | null;
+  current: Current;
+  refreshSeconds?: number;
+  children: Child;
+}) {
   const { stats } = props;
   const stamp = stats === null ? null : stampFor(stats);
   return (
@@ -29,6 +38,7 @@ export function Layout(props: { title: string; description: string; stats: Stats
         <head>
           <meta charset="utf-8" />
           <meta name="viewport" content="width=device-width, initial-scale=1" />
+          {props.refreshSeconds === undefined ? null : <meta http-equiv="refresh" content={String(props.refreshSeconds)} />}
           <title>{props.title}</title>
           <meta name="description" content={props.description} />
           <meta name="theme-color" content="#f3eee4" />

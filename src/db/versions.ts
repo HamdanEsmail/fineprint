@@ -190,6 +190,26 @@ export function getVersionWithTrigger(db: D1Database, id: string): Promise<WithT
     .first<WithTrigger<VersionRow>>();
 }
 
+/**
+ * One version of one page with its run's trigger and the page's live url, in one query: null when the
+ * page or the version is unknown, or the version belongs to another page. The text is read only when
+ * `withText` is set (a page view reads it only for `text=1`).
+ */
+export function getVersionOfPage(
+  db: D1Database,
+  pageId: string,
+  versionId: string,
+  withText: boolean,
+): Promise<(WithTrigger<VersionSummary> & { text?: string; live_url: string }) | null> {
+  return db
+    .prepare(
+      `SELECT ${summaryColumns("v.")}${withText ? ", v.text" : ""}, ${triggerColumn("v")}, p.url AS live_url
+       FROM versions v JOIN pages p ON p.id = v.page_id WHERE v.id = ? AND v.page_id = ?`,
+    )
+    .bind(versionId, pageId)
+    .first<WithTrigger<VersionSummary> & { text?: string; live_url: string }>();
+}
+
 /** The newest version of a page, with its text, or null when it has none. */
 export function latestVersion(db: D1Database, pageId: string): Promise<VersionRow | null> {
   return db

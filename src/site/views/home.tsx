@@ -3,14 +3,12 @@
 // unreliable reads are left out of the feed, the hero count and the stat blocks; one line under the
 // feed says they exist and links to their record.
 import type { ChangeItem, Stats } from "../../readModel";
-import { EvidenceLine, StatBlock, Thumb } from "../components";
-import { formatUtc, heroLine, heroParts, ownPath, plural } from "../format";
+import { DeltaBadge, EvidenceLine, hasDeltaBadge, LAYOUT_ONLY_LINE, StatBlock, Thumb } from "../components";
+import { formatUtc, heroLine, heroParts, ownPath, plural, SUMMARY_ORIGIN } from "../format";
 import { Layout } from "../layout";
 
 /** Changes on one screen of the feed. */
 export const FEED_SIZE = 20;
-
-const ORIGIN = { tinyfish: "TinyFish's summary", diff: "From the diff" } as const;
 
 export type HomeProps = {
   stats: Stats;
@@ -31,20 +29,29 @@ export function retiredLine(n: number): string {
     : `${n} pages were retired for unreliable reads. Their history is kept.`;
 }
 
+/**
+ * One change as a catch card (DESIGN.md "Catch card"): the thumbnail (the 640 by 400 one when there is
+ * one, else the screenshot, by path) beside the label row, the title and the summary; under them the
+ * delta badge, where the summary came from and the evidence line, which span the whole card on a phone.
+ * A layout-only change shows the "Layout only" tag, its time without the accent, and the line that says
+ * nothing in the words or figures moved.
+ */
 function CatchCard(props: { change: ChangeItem }) {
   const c = props.change;
   const time = formatUtc(c.captured_at);
   const pageHref = `/pages/${encodeURIComponent(c.page_id)}`;
+  const layoutOnly = c.delta?.layout_only === true;
+  const badge = hasDeltaBadge(c.delta);
   return (
     <li class="catch card">
       <Thumb
-        src={ownPath(c.screenshot_url)}
+        src={ownPath(c.thumb_url ?? c.screenshot_url)}
         href={`${pageHref}/compare?to=${encodeURIComponent(c.version_id)}`}
         alt={`Screenshot of ${c.page_label} as recorded ${time}`}
         label={`Compare this change to ${c.page_label}`}
       />
       <div class="catch-body">
-        <p class="meta">
+        <p class={layoutOnly ? "meta is-quiet" : "meta"}>
           <time datetime={c.captured_at}>{time}</time>
           {c.kind ? <span>{c.kind}</span> : null}
         </p>
@@ -52,9 +59,13 @@ function CatchCard(props: { change: ChangeItem }) {
           <a href={pageHref}>{c.page_label}</a>
         </h3>
         {c.summary === null ? <p class="summary is-pending">No summary yet.</p> : <p class="summary">{c.summary}</p>}
-        {c.summary_source === null ? null : (
+        {layoutOnly ? <p class="layout-note">{LAYOUT_ONLY_LINE}</p> : null}
+      </div>
+      <div class="catch-foot">
+        {!badge && c.summary_source === null ? null : (
           <p class="row">
-            <span class="origin">{ORIGIN[c.summary_source]}</span>
+            {badge ? <DeltaBadge delta={c.delta} /> : null}
+            {c.summary_source === null ? null : <span class="origin">{SUMMARY_ORIGIN[c.summary_source]}</span>}
           </p>
         )}
         <EvidenceLine url={c.url} readAt={c.captured_at} trigger={c.trigger} />

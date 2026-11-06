@@ -2,8 +2,9 @@
 // page as a JSX text child or attribute, so hono/jsx escapes it: nothing read from a watched page is
 // ever emitted as markup.
 import type { Child } from "hono/jsx";
+import type { Delta, Fact } from "../core/diff";
 import type { PageStatus, TriggerKind } from "../db/types";
-import { formatUtc, sourceLabel, triggerLabel, webHref } from "./format";
+import { deltaParts, formatUtc, sourceLabel, triggerLabel, webHref } from "./format";
 
 /**
  * The last line of every record: `Source: <host/path> · read 5 Nov 2026, 09:12 UTC · Monitor (webhook)`.
@@ -40,10 +41,76 @@ const CHIPS: Record<PageStatus, { tone: string; text: string }> = {
   retired: { tone: "muted", text: "Retired" },
 };
 
-/** A page's status as a coloured chip; colour is never the only signal, the word is always there. */
+/**
+ * A page's status as a coloured chip; colour is never the only signal, the word is always there. A
+ * status this code does not know (a page stored without one) shows no chip.
+ */
 export function StatusChip(props: { status: PageStatus }) {
-  const chip = CHIPS[props.status];
-  return <span class={`chip ${chip.tone}`}>{chip.text}</span>;
+  const chip = CHIPS[props.status] as (typeof CHIPS)[PageStatus] | undefined;
+  return chip ? <span class={`chip ${chip.tone}`}>{chip.text}</span> : null;
+}
+
+/** The line a layout-only change carries after its summary (the site plan's honest states). */
+export const LAYOUT_ONLY_LINE = "Same words and figures, different structure.";
+
+/**
+ * A change in counts, ink on paper: "+2 −1 ~3 blocks · +1 ~2 facts", with the same in words for a
+ * screen reader and as the tooltip. A layout-only change gets the tag "Layout only" instead (the card
+ * then takes the accent off its time and adds LAYOUT_ONLY_LINE). Nothing at all without a delta, or
+ * when nothing in it moved.
+ */
+export function DeltaBadge(props: { delta: Delta | null }) {
+  if (props.delta?.layout_only === true) {
+    return (
+      <span class="tag" title={LAYOUT_ONLY_LINE}>
+        Layout only
+      </span>
+    );
+  }
+  const parts = deltaParts(props.delta);
+  if (parts === null) return null;
+  return (
+    <span class="delta" title={parts.spoken}>
+      <span aria-hidden="true">{parts.text}</span>
+      <span class="vh">{parts.spoken}</span>
+    </span>
+  );
+}
+
+/** Whether DeltaBadge shows anything for this delta. */
+export const hasDeltaBadge = (delta: Delta | null): boolean => delta?.layout_only === true || deltaParts(delta) !== null;
+
+/**
+ * The prices read from one version, one row a fact: what it is, the price (mono, with its unit) and,
+ * when any fact has them, the notes. Every value is text from a watched page, escaped by JSX.
+ */
+export function FactsTable(props: { facts: Fact[] }) {
+  const text = (value: unknown): string => (typeof value === "string" ? value : value == null ? "" : String(value));
+  const withNotes = props.facts.some((f) => text(f.notes) !== "");
+  return (
+    <table class="table facts">
+      <caption class="vh">Prices read from this version</caption>
+      <thead>
+        <tr>
+          <th scope="col">Item</th>
+          <th scope="col">Price</th>
+          {withNotes ? <th scope="col">Notes</th> : null}
+        </tr>
+      </thead>
+      <tbody>
+        {props.facts.map((f) => (
+          <tr>
+            <th scope="row">{text(f.name)}</th>
+            <td class="price">
+              {text(f.price)}
+              {text(f.unit) === "" ? null : <span class="unit"> {text(f.unit)}</span>}
+            </td>
+            {withNotes ? <td>{text(f.notes)}</td> : null}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
 }
 
 /**

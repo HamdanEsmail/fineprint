@@ -1,7 +1,8 @@
 // Pure text formatters for the site. Every date in the UI is UTC and absolute ("5 Nov 2026, 09:12 UTC");
 // ISO 8601 stays in data and URLs. Nothing here touches the DOM, the database or the clock.
+import type { BlockCounts, Delta } from "../core/diff";
 import type { TriggerKind } from "../db/types";
-import type { Stats } from "../readModel";
+import { parseTime, type Stats } from "../readModel";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 const pad = (n: number): string => String(n).padStart(2, "0");
@@ -97,4 +98,119 @@ export function ownPath(url: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+// --- The page view ----------------------------------------------------------------------------
+
+const TIMES_A_DAY = ["", "once", "twice", "three times", "four times", "five times", "six times", "seven times", "eight times", "nine times", "ten times", "eleven times", "twelve times"];
+const timesADay = (n: number): string => `${TIMES_A_DAY[n] ?? `${n} times`} a day`;
+
+/** "a", "a and b", "a, b and c". */
+function listWords(items: string[]): string {
+  return items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/**
+ * A Monitor schedule in words. A fixed minute with a list of hours, every day: "14 2,14 * * *" gives
+ * "twice a day, at 02:14 and 14:14 UTC". A fixed minute with an hour step that divides the day (every
+ * 6 hours) gives "four times a day". Anything else comes back as it was.
+ */
+export function cronToWords(cron: string): string {
+  const fields = cron.trim().split(/\s+/);
+  if (fields.length !== 5) return cron;
+  const [minute, hour, day, month, weekday] = fields as [string, string, string, string, string];
+  if (day !== "*" || month !== "*" || weekday !== "*" || !/^\d{1,2}$/.test(minute) || Number(minute) > 59) return cron;
+  const step = /^\*\/(\d{1,2})$/.exec(hour);
+  if (step) {
+    const every = Number(step[1]);
+    return every >= 1 && 24 % every === 0 ? timesADay(24 / every) : cron;
+  }
+  if (!/^\d{1,2}(,\d{1,2})*$/.test(hour)) return cron;
+  const hours = [...new Set(hour.split(",").map(Number))].sort((a, b) => a - b);
+  if (hours.some((h) => h > 23)) return cron;
+  return `${timesADay(hours.length)}, at ${listWords(hours.map((h) => `${pad(h)}:${pad(Number(minute))}`))} UTC`;
+}
+
+/** The `datetime-local` form, "2026-11-05T09:12" (seconds and milliseconds allowed), read as UTC. */
+const PICKER_FORM = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/;
+/** ISO 8601 as the API takes it: a date, or a date and time with Z or an offset. */
+const ISO_FORM = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
+
+/**
+ * An as-of time typed or picked by a visitor, as the ISO string the database compares, or null when it
+ * cannot be read. The picker's form has no zone and is read as UTC (Date.parse would read it as the
+ * server's local time); a date that does not exist (30 February, 25:00) is refused, not rolled over.
+ * ISO 8601 with Z or an offset, or a bare date (midnight UTC), is read as the JSON API reads it.
+ */
+export function parseAsOfInput(raw: string): string | null {
+  const text = raw.trim();
+  const picked = PICKER_FORM.exec(text);
+  if (picked) {
+    const [y, mo, d, h, mi, s] = picked.slice(1, 7).map((part) => Number(part ?? "0")) as [number, number, number, number, number, number];
+    const ms = Number((picked[7] ?? "0").padEnd(3, "0"));
+    const date = new Date(Date.UTC(y, mo - 1, d, h, mi, s, ms));
+    // Date.UTC rolls 30 February into March and 25:00 into the next day, and reads years 0 to 99 as
+    // 1900 to 1999: each field must come back as it was typed.
+    const exact =
+      date.getUTCFullYear() === y &&
+      date.getUTCMonth() === mo - 1 &&
+      date.getUTCDate() === d &&
+      date.getUTCHours() === h &&
+      date.getUTCMinutes() === mi &&
+      date.getUTCSeconds() === s;
+    return exact ? date.toISOString() : null;
+  }
+  return ISO_FORM.test(text) ? parseTime(text) : null;
+}
+
+/** An ISO time in the picker's form, "2026-11-05T09:12" (UTC), rounded down or up to the minute. */
+export function toDatetimeLocal(iso: string, round: "floor" | "ceil"): string {
+  const ms = Date.parse(iso);
+  const minute = (round === "ceil" ? Math.ceil : Math.floor)(ms / 60_000) * 60_000;
+  return new Date(minute).toISOString().slice(0, 16);
+}
+
+const NOISE_WORDS: Record<string, string> = {
+  partial_render: "partial render",
+  flap: "flap",
+  normalized_identical: "same after cleaning",
+  layout_hold: "layout change held for a second read",
+};
+
+/** Why a read was filtered as noise, in words; a reason this code does not know is its own text with spaces. */
+export function noiseReasonWords(reason: string): string {
+  return NOISE_WORDS[reason] ?? reason.replaceAll("_", " ");
+}
+
+/** Where a change's one-line summary came from, as the cards say it. */
+export const SUMMARY_ORIGIN = { tinyfish: "TinyFish's summary", diff: "From the diff" } as const;
+
+const MINUS = "\u2212";
+const counted = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0);
+
+/** One side of a delta ("+2 −1 ~3 blocks", "2 blocks added, 1 removed, 3 changed"), or null when nothing moved. */
+function countParts(c: BlockCounts | null | undefined, noun: string): { text: string; spoken: string } | null {
+  if (!c) return null;
+  const parts = [
+    { n: counted(c.added), mark: "+", word: "added" },
+    { n: counted(c.removed), mark: MINUS, word: "removed" },
+    { n: counted(c.changed), mark: "~", word: "changed" },
+  ].filter((p) => p.n > 0);
+  if (parts.length === 0) return null;
+  const total = parts.reduce((sum, p) => sum + p.n, 0);
+  const text = `${parts.map((p) => `${p.mark}${p.n}`).join(" ")} ${total === 1 ? noun : `${noun}s`}`;
+  const spoken = parts.map((p, i) => (i === 0 ? `${plural(p.n, noun)} ${p.word}` : `${p.n} ${p.word}`)).join(", ");
+  return { text, spoken };
+}
+
+/**
+ * A change's delta as its badge says it: "+2 −1 ~3 blocks", zero parts left out, then " · +1 ~2 facts"
+ * when facts changed; `spoken` is the same in words, for a screen reader and the badge's tooltip. Null
+ * when there is no delta yet or nothing in it moved. The layout-only tag is the component's business.
+ */
+export function deltaParts(delta: Delta | null): { text: string; spoken: string } | null {
+  if (delta === null) return null;
+  const parts = [countParts(delta.blocks, "block"), countParts(delta.facts, "fact")].filter((p) => p !== null);
+  if (parts.length === 0) return null;
+  return { text: parts.map((p) => p.text).join(" · "), spoken: parts.map((p) => p.spoken).join("; ") };
 }
