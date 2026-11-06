@@ -49,7 +49,7 @@ export type VersionSummary = Omit<VersionRow, "text">;
 export type WithTrigger<T> = T & { trigger_kind: TriggerKind | null };
 
 /** A non-baseline version joined with its page, for the changes feed. */
-export type ChangeRow = WithTrigger<VersionSummary> & { page_label: string; url: string; kind: PageKind };
+export type ChangeRow = WithTrigger<VersionSummary> & { page_label: string; url: string; kind: PageKind | null };
 
 /** The `trigger_kind` column of WithTrigger, for a query over `versions` named `table`. */
 function triggerColumn(table: string): string {
@@ -396,6 +396,28 @@ export async function setSummaryIfMissing(db: D1Database, id: string, summary: s
   return result.meta.changes === 1;
 }
 
+/** Which real changes a feed query covers; see listChanges. */
+export type ChangeFilter = { sinceIso?: string | null; beforeIso?: string | null; includeRetired?: boolean };
+
+/**
+ * The WHERE clause shared by listChanges and countChanges, over `versions v JOIN pages p`. A page
+ * whose status is NULL is not retired, so it stays in when retired pages are left out.
+ */
+function changeWhere(filter: ChangeFilter): { where: string; binds: unknown[] } {
+  const where = ["v.is_baseline = 0"];
+  const binds: unknown[] = [];
+  if (filter.sinceIso != null) {
+    where.push("v.captured_at >= ?");
+    binds.push(filter.sinceIso);
+  }
+  if (filter.beforeIso != null) {
+    where.push("v.captured_at < ?");
+    binds.push(filter.beforeIso);
+  }
+  if (filter.includeRetired === false) where.push("(p.status IS NULL OR p.status != 'retired')");
+  return { where: where.join(" AND "), binds };
+}
+
 /**
  * Real changes across all pages: non-baseline versions, newest first,
  * captured at or after `sinceIso` when given and strictly before `beforeIso`
@@ -408,30 +430,30 @@ export async function listChanges(
   db: D1Database,
   sinceIso: string | null,
   limit: number,
-  opts: { beforeIso?: string | null; includeRetired?: boolean } = {},
+  opts: Omit<ChangeFilter, "sinceIso"> = {},
 ): Promise<ChangeRow[]> {
   const max = Math.max(0, Math.trunc(limit)) || 0;
-  const where = ["v.is_baseline = 0"];
-  const binds: unknown[] = [];
-  if (sinceIso !== null) {
-    where.push("v.captured_at >= ?");
-    binds.push(sinceIso);
-  }
-  if (opts.beforeIso != null) {
-    where.push("v.captured_at < ?");
-    binds.push(opts.beforeIso);
-  }
-  if (opts.includeRetired === false) where.push("p.status != 'retired'");
+  const { where, binds } = changeWhere({ ...opts, sinceIso });
   const { results } = await db
     .prepare(
       `SELECT ${summaryColumns("v.")}, ${triggerColumn("v")}, p.label AS page_label, p.url AS url, p.kind AS kind
        FROM versions v JOIN pages p ON p.id = v.page_id
-       WHERE ${where.join(" AND ")}
+       WHERE ${where}
        ORDER BY v.captured_at DESC, v.rowid DESC LIMIT ?`,
     )
     .bind(...binds, max)
     .all<ChangeRow>();
   return results;
+}
+
+/** How many real changes listChanges would find with no limit: one COUNT, no rows read out. */
+export async function countChanges(db: D1Database, filter: ChangeFilter): Promise<number> {
+  const { where, binds } = changeWhere(filter);
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM versions v JOIN pages p ON p.id = v.page_id WHERE ${where}`)
+    .bind(...binds)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
 }
 
 /**

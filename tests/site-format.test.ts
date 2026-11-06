@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { Stats } from "../src/readModel";
+import { EvidenceLine } from "../src/site/components";
 import {
   formatUsd,
   formatUtc,
   heroLine,
+  heroParts,
   plural,
   sourceLabel,
   spendMeter,
   stampFor,
   triggerLabel,
+  webHref,
 } from "../src/site/format";
 
 describe("site formatters", () => {
@@ -37,6 +40,29 @@ describe("site formatters", () => {
     expect(heroLine(0)).toBe("Nothing changed this week.");
     expect(heroLine(1)).toBe("The web changed its mind once this week.");
     expect(heroLine(14)).toBe("The web changed its mind 14 times this week.");
+    // For the heading, the count and its word are held together by a non-breaking space.
+    expect(heroParts(14)).toEqual({ before: "The web changed its mind ", count: "14 times", after: " this week." });
+    expect(heroParts(1)).toEqual({ before: "The web changed its mind ", count: "once", after: " this week." });
+    expect(heroParts(0)).toEqual({ before: "Nothing changed this week.", count: null, after: "" });
+  });
+
+  it("links only http and https sources, and shows anything else as text", async () => {
+    expect(webHref("https://example.com/pricing")).toBe("https://example.com/pricing");
+    expect(webHref("http://example.com/")).toBe("http://example.com/");
+    expect(webHref("javascript:alert(1)")).toBeNull();
+    expect(webHref("JavaScript:alert(1)")).toBeNull();
+    expect(webHref("data:text/html,<b>x</b>")).toBeNull();
+    expect(webHref("not a url")).toBeNull();
+    expect(sourceLabel("javascript:alert(1)")).toBe("javascript:alert(1)");
+
+    const render = async (url: string): Promise<string> =>
+      String(await EvidenceLine({ url, readAt: "2026-11-05T09:12:44.120Z", trigger: "webhook" }).toString());
+    expect(await render("javascript:alert(1)")).toBe(
+      '<p class="evidence">Source: javascript:alert(1) · read 5 Nov 2026, 09:12 UTC · Monitor (webhook)</p>',
+    );
+    expect(await render("https://example.com/pricing")).toBe(
+      '<p class="evidence">Source: <a href="https://example.com/pricing">example.com/pricing</a> · read 5 Nov 2026, 09:12 UTC · Monitor (webhook)</p>',
+    );
   });
 
   it("writes the spend meter, with a cost per catch only when there is a catch", () => {

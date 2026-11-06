@@ -46,7 +46,7 @@ function CatchCard(props: { change: ChangeItem }) {
       <div class="catch-body">
         <p class="meta">
           <time datetime={c.captured_at}>{time}</time>
-          <span>{c.kind}</span>
+          {c.kind ? <span>{c.kind}</span> : null}
         </p>
         <h3>
           <a href={pageHref}>{c.page_label}</a>
@@ -145,7 +145,7 @@ export function Home(props: HomeProps) {
           )}
           {older === undefined ? null : (
             <p class="more">
-              <a class="btn secondary" href={`/?before=${older.captured_at}#feed`}>
+              <a class="btn secondary" href={`/?before=${encodeURIComponent(older.captured_at)}#feed`}>
                 Older changes
               </a>
             </p>

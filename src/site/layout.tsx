@@ -16,8 +16,8 @@ const NAV: { key: Exclude<Current, null>; href: string; text: string }[] = [
 ];
 
 /**
- * A full page. `stats` is null only on the error page, which must render without the database:
- * the stamp and the spend meter are left out there.
+ * A full page. `stats` is null on the 404 and error pages, which render without the database: the
+ * stamp and the spend meter are left out there, and the footer keeps only its links.
  */
 export function Layout(props: { title: string; description: string; stats: Stats | null; current: Current; children: Child }) {
   const { stats } = props;

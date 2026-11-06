@@ -3,17 +3,20 @@
 // ever emitted as markup.
 import type { Child } from "hono/jsx";
 import type { PageStatus, TriggerKind } from "../db/types";
-import { formatUtc, sourceLabel, triggerLabel } from "./format";
+import { formatUtc, sourceLabel, triggerLabel, webHref } from "./format";
 
 /**
  * The last line of every record: `Source: <host/path> · read 5 Nov 2026, 09:12 UTC · Monitor (webhook)`.
- * A version made without a run row (none in production) says only "Monitor".
+ * The source is a link only when its url is http or https; anything else (a stored `javascript:` url,
+ * say) is plain text. A version made without a run row (none in production) says only "Monitor".
  */
 export function EvidenceLine(props: { url: string; readAt: string; trigger: TriggerKind | null }) {
   const method = props.trigger === null ? "Monitor" : triggerLabel(props.trigger);
+  const href = webHref(props.url);
+  const label = sourceLabel(props.url);
   return (
     <p class="evidence">
-      Source: <a href={props.url}>{sourceLabel(props.url)}</a>
+      Source: {href === null ? label : <a href={href}>{label}</a>}
       {` · read ${formatUtc(props.readAt)} · ${method}`}
     </p>
   );

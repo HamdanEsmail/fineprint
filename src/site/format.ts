@@ -23,19 +23,22 @@ export function plural(n: number, one: string, many: string = `${one}s`): string
   return `${n} ${n === 1 ? one : many}`;
 }
 
+const NBSP = "\u00a0";
+
 /**
  * The hero line in three parts, so the view can set the count in the accent and the plain line can
- * never read differently: `before + count + after`.
+ * never read differently: `before + count + after`. The count and its word are joined by a
+ * non-breaking space ("14 times"), so a narrow screen never leaves the number at the end of a line.
  */
 export function heroParts(changes7d: number): { before: string; count: string | null; after: string } {
   if (changes7d <= 0) return { before: "Nothing changed this week.", count: null, after: "" };
-  return { before: "The web changed its mind ", count: changes7d === 1 ? "once" : `${changes7d} times`, after: " this week." };
+  return { before: "The web changed its mind ", count: changes7d === 1 ? "once" : `${changes7d}${NBSP}times`, after: " this week." };
 }
 
-/** "The web changed its mind 14 times this week." */
+/** "The web changed its mind 14 times this week.", with plain spaces, for text that is not laid out. */
 export function heroLine(changes7d: number): string {
   const { before, count, after } = heroParts(changes7d);
-  return `${before}${count ?? ""}${after}`;
+  return `${before}${count ?? ""}${after}`.replaceAll(NBSP, " ");
 }
 
 /**
@@ -51,18 +54,23 @@ export function spendMeter(s: Stats): string {
 
 const LABEL_MAX = 48;
 
+/** The url itself when it is an absolute http or https url, the only kind the site puts in an href; else null. */
+export function webHref(url: string): string | null {
+  try {
+    const { protocol } = new URL(url);
+    return protocol === "http:" || protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * A source url as people read it: host and path, without the scheme, the query, the fragment or a
- * trailing slash; cut to 48 characters with an ellipsis.
+ * trailing slash; cut to 48 characters with an ellipsis. Anything but an http or https url is shown
+ * as it was stored (and cut the same way).
  */
 export function sourceLabel(url: string): string {
-  let label: string;
-  try {
-    const u = new URL(url);
-    label = (u.host + u.pathname).replace(/\/+$/, "");
-  } catch {
-    label = url;
-  }
+  const label = webHref(url) === null ? url : (({ host, pathname }) => (host + pathname).replace(/\/+$/, ""))(new URL(url));
   return label.length > LABEL_MAX ? `${label.slice(0, LABEL_MAX - 1)}…` : label;
 }
 

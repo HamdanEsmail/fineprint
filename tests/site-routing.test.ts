@@ -1,6 +1,6 @@
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
 import worker from "../src/index";
 
@@ -36,6 +36,11 @@ describe("site routing", () => {
     const hook = await SELF.fetch("https://x/hooks/monitor/wrong-secret", { method: "POST", body: "{}" });
     expect(hook.status).not.toBe(405);
     expect(hook.headers.get("content-type") ?? "").not.toContain("text/html");
+    // The webhook handler itself answered: a wrong secret gets its empty 404, not the JSON 404 of a
+    // path no route matched.
+    expect(hook.status).toBe(404);
+    expect(hook.headers.get("content-type") ?? "").not.toContain("application/json");
+    expect(await hook.text()).toBe("");
   });
 
   it("answers an unknown API or hooks path with a JSON 404, never the ledger page", async () => {
@@ -90,6 +95,30 @@ describe("site routing", () => {
     expect(miss.headers.get("x-content-type-options")).toBe("nosniff");
     expect(miss.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
     await miss.text();
+  });
+
+  it("renders the ledger 404 without a single database read, with the security headers", async () => {
+    const reads = [vi.spyOn(env.DB, "prepare"), vi.spyOn(env.DB, "batch"), vi.spyOn(env.DB, "exec")];
+    try {
+      for (const path of ["/wp-login.php", "/.env", "/apple-touch-icon.png", "/no/such/screen"]) {
+        const ctx = createExecutionContext();
+        const res = await worker.fetch(new Request(`https://x${path}`), env, ctx);
+        await waitOnExecutionContext(ctx);
+        expect(res.status, path).toBe(404);
+        expect(res.headers.get("content-type"), path).toContain("text/html");
+        expect(res.headers.get("content-security-policy"), path).toBe(CSP);
+        expect(res.headers.get("x-content-type-options"), path).toBe("nosniff");
+        const html = await res.text();
+        expect(html, path).toContain("No such page in the ledger.");
+        // No stats, so no stamp and no spend meter; the footer keeps its links.
+        expect(html, path).not.toContain("RECORDING");
+        expect(html, path).not.toContain("TinyFish spend");
+        expect(html, path).toContain('href="/api/export.json"');
+      }
+      for (const spy of reads) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of reads) spy.mockRestore();
+    }
   });
 
   it("answers as before when the site is switched off", async () => {

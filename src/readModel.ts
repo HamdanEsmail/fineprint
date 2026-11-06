@@ -7,7 +7,7 @@ import { FACTS_PAUSE_USD, SPEND_PAUSE_USD } from "./core/limits";
 import { PRICES, type SpendKind } from "./core/spend";
 import { countNoiseByReason, countRunsByTrigger } from "./db/runs";
 import type { FactsStatus, PageKind, PageStatus, SummarySource, TriggerKind } from "./db/types";
-import { listChanges as listChangeRows } from "./db/versions";
+import { countChanges as countChangeRows, listChanges as listChangeRows } from "./db/versions";
 import type { Env } from "./env";
 import { objectUrls } from "./handlers/versionJson";
 
@@ -48,7 +48,8 @@ export type ChangeItem = {
   screenshot_url: string | null;
   trigger: TriggerKind | null;
   facts_status: FactsStatus;
-  kind: PageKind;
+  /** The page's kind; null for a page stored without one. */
+  kind: PageKind | null;
 };
 
 /**
@@ -77,6 +78,14 @@ export async function listChanges(
     facts_status: row.facts_status,
     kind: row.kind,
   }));
+}
+
+/**
+ * How many real changes `listChanges` would list for `since` (inclusive) with no limit, in one COUNT.
+ * Retired pages are in unless `includeRetired` is false.
+ */
+export function countChanges(env: Env, opts: { since?: string; includeRetired?: boolean }): Promise<number> {
+  return countChangeRows(env.DB, { sinceIso: opts.since ?? null, includeRetired: opts.includeRetired ?? true });
 }
 
 /** How many retired pages hold at least one real change: their record is kept, out of the feed. */
@@ -131,7 +140,7 @@ export async function getStats(env: Env): Promise<Stats> {
            (SELECT COUNT(*) FROM versions) AS versions,
            (SELECT COUNT(*) FROM versions WHERE is_baseline = 0) AS catches,
            (SELECT COUNT(*) FROM versions v JOIN pages p ON p.id = v.page_id
-              WHERE v.is_baseline = 0 AND p.status != 'retired') AS changes,
+              WHERE v.is_baseline = 0 AND (p.status IS NULL OR p.status != 'retired')) AS changes,
            (SELECT COUNT(*) FROM runs WHERE noise_suppressed = 1) AS noise_suppressed,
            (SELECT COUNT(*) FROM versions WHERE facts_status = 'unavailable') AS facts_unavailable,
            (SELECT COALESCE(SUM(amount_usd), 0) FROM spend) AS spend_usd`,

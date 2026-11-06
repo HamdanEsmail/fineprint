@@ -5,7 +5,7 @@ import { insertPage, type NewPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { RunRow, TriggerKind } from "../src/db/types";
 import { insertVersion, type NewVersion } from "../src/db/versions";
-import { getStats, listChanges } from "../src/readModel";
+import { countChanges, getStats, listChanges } from "../src/readModel";
 
 // The home screen: the hero count, the change feed, its paging, the retired line and the empty state,
 // all read through src/readModel.ts, the same functions the JSON API answers with.
@@ -116,7 +116,8 @@ describe("home", () => {
     await seedWeek();
     const html = await get("/");
     expect(html).toContain("The web changed its mind 2 times this week.");
-    expect(html).toContain('<h1 class="hero">The web changed its mind <em>2 times</em> this week.</h1>'); // the count in the accent
+    // The count in the accent, held to its word by a non-breaking space so a phone never breaks after the number.
+    expect(html).toContain('<h1 class="hero">The web changed its mind <em>2 times</em> this week.</h1>');
     expect(html).toContain("RECORDING");
     expect(html).toContain("Fineprint watches the pages you agree to without reading");
     for (const step of ["Watch", "Catch", "Compare"]) expect(html).toContain(step);
@@ -174,10 +175,11 @@ describe("home", () => {
     const first = await get("/");
     expect(first).toContain("Change number 20.");
     expect(first).not.toContain("Change number 21.");
-    expect(first).toContain(`href="/?before=${times[19]}#feed"`); // straight to the feed, past the introduction
+    // Encoded, and straight to the feed, past the introduction.
+    expect(first).toContain(`href="/?before=${encodeURIComponent(times[19]!)}#feed"`);
     expect(first).toContain("Older changes");
 
-    const second = await get(`/?before=${times[19]}`);
+    const second = await get(`/?before=${encodeURIComponent(times[19]!)}`);
     expect(second).toContain("Change number 21.");
     expect(second).not.toContain("Change number 20.");
     expect(second).not.toContain("Older changes");
@@ -196,6 +198,40 @@ describe("home", () => {
     await insertPage(db, page("gone3", { url: "https://gone3.example/fees", label: "Third gone", status: "retired", monitor_id: null }));
     await version("gone3-0", "gone3", ago(3 * HOUR), "create");
     expect(await get("/")).toContain("2 pages were retired for unreliable reads. Their history is kept.");
+  });
+
+  it("says once in the accent for a single change", async () => {
+    await seedBaselines();
+    await version("pricing-1", "pricing", ago(HOUR), "webhook", { summary: "One change.", summary_source: "tinyfish" });
+    expect(await get("/")).toContain('<h1 class="hero">The web changed its mind <em>once</em> this week.</h1>');
+  });
+
+  it("links a source only when its url is http or https", async () => {
+    await seedBaselines();
+    await insertPage(db, page("odd", { url: "javascript:alert(1)", label: "Odd source" }));
+    await version("odd-1", "odd", ago(HOUR), "webhook", { summary: "Odd.", summary_source: "tinyfish" });
+    const html = await get("/");
+    expect(html).toContain("Odd source");
+    expect(html).not.toMatch(/href="javascript:/i);
+    expect(html).toMatch(/Source: javascript:alert\(1\) · read /);
+  });
+
+  it("keeps pages with no status or kind in the feed and the counts, without an empty label", async () => {
+    await seedBaselines();
+    await db
+      .prepare(
+        "INSERT INTO pages (id, url, label, kind, status, ignore_patterns, created_at) VALUES ('bare', 'https://bare.example/terms', 'Bare page', NULL, NULL, '[]', ?)",
+      )
+      .bind(ago(DAY))
+      .run();
+    await version("bare-1", "bare", ago(HOUR), "webhook", { summary: "Bare change.", summary_source: "tinyfish" });
+    expect((await listChanges(env, { limit: 10, includeRetired: false })).map((c) => c.version_id)).toEqual(["bare-1"]);
+    expect(await countChanges(env, { includeRetired: false })).toBe(1);
+    expect((await getStats(env)).changes).toBe(1);
+    const html = await get("/");
+    expect(html).toContain("Bare page");
+    expect(html).toContain("The web changed its mind <em>once</em> this week.");
+    expect(html).not.toContain("<span></span>");
   });
 
   it("stamps PAUSED and says so in a banner at the budget line", async () => {
@@ -219,6 +255,18 @@ describe("the read model behind the feed", () => {
 
     const stats = await getStats(env);
     expect(stats.changes).toBe(3);
+  });
+
+  it("counts changes in one query, as listChanges would list them", async () => {
+    await seedWeek();
+    expect(await countChanges(env, {})).toBe(4);
+    expect(await countChanges(env, { includeRetired: false })).toBe(3);
+    const weekAgo = ago(7 * DAY);
+    expect(await countChanges(env, { since: weekAgo, includeRetired: false })).toBe(2); // the hero's count
+    expect(await countChanges(env, { since: weekAgo })).toBe(3);
+    expect(await countChanges(env, { since: weekAgo, includeRetired: false })).toBe(
+      (await listChanges(env, { since: weekAgo, limit: 500, includeRetired: false })).length,
+    );
   });
 
   it("takes since (inclusive) and before (strictly older) together", async () => {
