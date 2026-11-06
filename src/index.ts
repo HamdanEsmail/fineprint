@@ -26,7 +26,8 @@ app.route("/hooks", webhooksRouter);
 app.route("/", objectsRouter);
 
 // The hourly cron (wrangler.jsonc `triggers.crons`): facts upkeep, overdue Monitor checks pulled
-// with run-now, public page expiry, Monitor health and capture repair. runCron never throws.
+// with run-now (with the pull backoff), public page expiry, Monitor health, capture repair, and
+// missing summaries asked for through the SELF binding. runCron never throws.
 async function scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
   ctx.waitUntil(runCron(env));
 }

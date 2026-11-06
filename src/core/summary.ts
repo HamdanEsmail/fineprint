@@ -55,12 +55,18 @@ function position(nextText: string, text: string): number {
   return at < 0 ? Number.MAX_SAFE_INTEGER : at;
 }
 
+/** The first `units` UTF-16 units of `text`, one fewer when the cut would split a surrogate pair (an emoji). */
+function sliceWhole(text: string, units: number): string {
+  const last = text.charCodeAt(units - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? units - 1 : units);
+}
+
 /** `"<quote>"` after `head: `, the quote cut (with an ellipsis) so the whole line fits SUMMARY_MAX_CHARS. */
 function withQuote(head: string, quote: string | null): string {
   if (quote === null) return head;
   const room = SUMMARY_MAX_CHARS - head.length - 4; // `: "` and the closing `"`
   if (room < 2) return head;
-  const cut = quote.length <= room ? quote : `${quote.slice(0, room - 1).trimEnd()}…`;
+  const cut = quote.length <= room ? quote : `${sliceWhole(quote, room - 1).trimEnd()}…`;
   return `${head}: "${cut}"`;
 }
 

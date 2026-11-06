@@ -204,10 +204,12 @@ adminRouter.post("/pages/:id/replay", adminOnly, async (c) => {
 
 /**
  * Fills the one-line summary of non-baseline versions that have none (src/summary.ts), and answers
- * `{filled, remaining}`. `?version=<id>` fills that one version only (a new version asks for its own this
- * way, through the SELF binding). Without it, the oldest missing ones are filled within a per-call text
- * budget, so the one-off backfill of older versions is this route called until `remaining` is 0. Baselines
- * keep no summary, and a stored summary is never replaced, so calling it again changes nothing.
+ * `{filled, remaining, oversized}`. `?version=<id>` fills that one version only, whatever its size (a new
+ * version asks for its own this way, through the SELF binding). Without it: every TinyFish summary, then
+ * the diff lines that fit a per-call text budget, oldest first; a version whose diff alone is over the
+ * budget is skipped and listed in `oversized`, to be filled with `?version=<id>`. So the one-off backfill
+ * is this route called until `filled` is 0, then once with `?version=` for each id in `oversized`.
+ * Baselines keep no summary, and a stored summary is never replaced, so calling it again changes nothing.
  */
 adminRouter.post("/admin/backfill-summaries", adminOnly, async (c) => {
   const versionId = c.req.query("version");

@@ -351,7 +351,7 @@ The clock has started when `pages` is 20 and the first hourly and twice-daily Mo
 
 ## 12. Updating the live Worker
 
-A change that adds a migration needs it applied before the deploy, because the new code reads the new columns. Migrations are additive (new columns with defaults), so the code still running reads the database fine in between.
+A change that adds a migration needs it applied before the deploy. **Never deploy before the migration: the new code reads columns 0006 adds, and without them webhooks fail and read endpoints answer 500.** Migrations are additive (new columns with defaults), so the code still running reads the database fine in between.
 
 ```bash
 cd "/c/Tinyfish Bounties/fineprint" || exit 1
@@ -362,7 +362,14 @@ CLOUDFLARE_API_TOKEN=$(grep -m1 '^CLOUDFLARE_API_TOKEN=' ../.cloudflare.env | cu
 
 Success: wrangler lists the migrations it applied (or says there are none to apply), then the deploy prints the bindings and the URL.
 
-After the deploy that brings migration 0006 (summaries), fill the summaries of the versions recorded before it. Each call fills what fits in its CPU budget and says how many remain, so the block calls it until none do:
+After the deploy that brings migration 0006, empty the diff cache once. Between the migration (which empties it) and the deploy, the old code could store diffs in the old shape, without `summary_source`; a stored diff is only a cache and is computed again on its next request:
+
+```bash
+cd "/c/Tinyfish Bounties/fineprint" || exit 1
+CLOUDFLARE_API_TOKEN=$(grep -m1 '^CLOUDFLARE_API_TOKEN=' ../.cloudflare.env | cut -d= -f2- | tr -d '\r') npx wrangler d1 execute fineprint --remote -y --command "DELETE FROM diff_cache"
+```
+
+Then fill the summaries of the versions recorded before 0006. A call answers `{"filled":<n>,"remaining":<m>,"oversized":[<version ids>]}`: it fills every TinyFish summary and the diff lines that fit its CPU budget, and lists in `oversized` the versions whose diff alone is too large for a call that does other work. The block calls it until it fills nothing, then once with `?version=<id>` for each id in `oversized` (each such call works on that one version only):
 
 ```bash
 cd "/c/Tinyfish Bounties/fineprint" || exit 1
@@ -372,11 +379,14 @@ ADMIN_TOKEN=$(grep -m1 '^ADMIN_TOKEN=' ../.fineprint-prod.env | cut -d= -f2- | t
 [ "${#ADMIN_TOKEN}" = 48 ] || { echo "STOP: ADMIN_TOKEN is missing or not 48 characters in ../.fineprint-prod.env"; exit 1; }
 for i in $(seq 1 40); do
   OUT=$(curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$BASE/api/admin/backfill-summaries"); echo "$OUT"
-  echo "$OUT" | grep -q '"remaining":0' && break
+  echo "$OUT" | grep -q '"filled":0,' && break
+done
+for ID in $(echo "$OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{for(const id of JSON.parse(s).oversized??[])if(/^[0-9a-f-]{36}$/.test(id))console.log(id)}catch{}})'); do
+  curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" "$BASE/api/admin/backfill-summaries?version=$ID"; echo
 done
 ```
 
-Success: the last line is `{"filled":<n>,"remaining":0}`. A call that answers 500 or the same `remaining` several times in a row has hit a version too large to diff in one request; note its id (the oldest non-baseline version with no summary) and report it. The hourly job also asks for a fill whenever a summary is missing, so nothing else is needed afterwards.
+Success: the loop ends on a line with `"filled":0`, and each `?version=` call answers `"filled":1`. If one of those answers 500 (that page is too large for the free plan's CPU even alone), note its id and report it; it holds nothing else back. The hourly job asks for one fill whenever a summary is missing, plus one `?version=` request a tick for the oldest oversized version, so anything left is filled over the next ticks.
 
 ## If something goes wrong
 

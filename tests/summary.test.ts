@@ -93,6 +93,18 @@ describe("diffSummary", () => {
     expect(out).toMatch(/^1 block added: "word word .*…"$/);
   });
 
+  it("never cuts a character made of two UTF-16 units (an emoji) in half", () => {
+    // "1 block added" leaves room for 183 characters of quote; the cut keeps 182, and the emoji starts at 181.
+    const quote = `${"a".repeat(181)}😀${"b".repeat(60)}`;
+    const out = summarize("Intro", `Intro\n\n${quote}`);
+    expect(out.length).toBeLessThanOrEqual(SUMMARY_MAX_CHARS);
+    // Booleans, not the string: a lone surrogate in a failure message cannot cross the test pool's socket.
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(out), "a lone surrogate").toBe(false);
+    expect(out === `1 block added: "${"a".repeat(181)}…"`, "cut before the emoji").toBe(true);
+    // An emoji that fits whole is kept.
+    expect(summarize("Intro", `Intro\n\n${"a".repeat(170)}😀${"b".repeat(60)}`)).toContain("😀");
+  });
+
   it("still says something when the two texts split into the same blocks", () => {
     expect(diffSummary({ added: [], removed: [], changed: [] }, "x")).toBe("No block-level change after normalization");
   });
@@ -235,7 +247,7 @@ describe("storing a summary when a version is created", () => {
     expect(await versionRow(res.version_id)).toMatchObject({ summary: null, summary_source: null, capture_status: "complete" });
     expect(errorLog.mock.calls.flat().map(String).join(" ")).toContain("subrequest failed");
     summaryDeps.fill = realFill;
-    expect(await (await backfill()).json()).toEqual({ filled: 1, remaining: 0 });
+    expect(await (await backfill()).json()).toEqual({ filled: 1, remaining: 0, oversized: [] });
     expect(await versionRow(res.version_id)).toMatchObject({ summary: '1 block changed: "$25 per month per seat."', summary_source: "diff" });
   });
 });
@@ -260,13 +272,13 @@ describe("POST /api/admin/backfill-summaries", () => {
   it("fills every non-baseline version without a summary, oldest first, against the version before it; baselines stay null; a second call fills nothing", async () => {
     await seedHistory();
 
-    expect(await (await backfill()).json()).toEqual({ filled: 2, remaining: 0 });
+    expect(await (await backfill()).json()).toEqual({ filled: 2, remaining: 0, oversized: [] });
 
     expect(await versionRow("v-0")).toMatchObject({ summary: null, summary_source: null });
     expect(await versionRow("v-1")).toMatchObject({ summary: "TinyFish: Pro rose to $25.", summary_source: "tinyfish" });
     expect(await versionRow("v-2")).toMatchObject({ summary: '1 block added: "Includes 20 seats."', summary_source: "diff" });
     const before = await all("SELECT * FROM versions ORDER BY rowid");
-    expect(await (await backfill()).json()).toEqual({ filled: 0, remaining: 0 });
+    expect(await (await backfill()).json()).toEqual({ filled: 0, remaining: 0, oversized: [] });
     expect(await all("SELECT * FROM versions ORDER BY rowid")).toEqual(before);
   });
 
@@ -275,43 +287,109 @@ describe("POST /api/admin/backfill-summaries", () => {
     await seedVersion("v-0", "2026-11-01T00:00:00.000Z", BASE_TEXT, { is_baseline: 1 });
     await seedVersion("v-1", "2026-11-02T00:00:00.000Z", REAL_TEXT, { summary: "kept as it is", summary_source: "diff" });
     await seedVersion("v-2", "2026-11-03T00:00:00.000Z", `${REAL_TEXT}\n\nIncludes 20 seats.\n\nNew footnote.`, { summary: null, summary_source: null });
-    expect(await (await backfill()).json()).toEqual({ filled: 1, remaining: 0 });
+    expect(await (await backfill()).json()).toEqual({ filled: 1, remaining: 0, oversized: [] });
     expect(await versionRow("v-1")).toMatchObject({ summary: "kept as it is" });
     expect(await versionRow("v-2")).toMatchObject({ summary: '1 block added: "New footnote."', summary_source: "diff" });
   });
 
   it("?version=<id> fills only that version (an unknown id, a baseline or one already filled: nothing)", async () => {
     await seedHistory();
-    expect(await (await backfill("?version=v-2")).json()).toEqual({ filled: 1, remaining: 1 });
+    expect(await (await backfill("?version=v-2")).json()).toEqual({ filled: 1, remaining: 1, oversized: [] });
     expect(await versionRow("v-1")).toMatchObject({ summary: null });
     expect(await versionRow("v-2")).toMatchObject({ summary_source: "diff" });
-    for (const id of ["v-2", "v-0", "nope"]) expect(await (await backfill(`?version=${id}`)).json()).toEqual({ filled: 0, remaining: 1 });
+    for (const id of ["v-2", "v-0", "nope"]) expect(await (await backfill(`?version=${id}`)).json()).toEqual({ filled: 0, remaining: 1, oversized: [] });
   });
 
   it("a non-baseline version with no earlier version is described against an empty page", async () => {
     await seedPage();
     await seedVersion("v-only", "2026-11-02T00:00:00.000Z", BASE_TEXT, { summary: null, summary_source: null });
-    expect(await (await backfill()).json()).toEqual({ filled: 1, remaining: 0 });
+    expect(await (await backfill()).json()).toEqual({ filled: 1, remaining: 0, oversized: [] });
     expect(await versionRow("v-only")).toMatchObject({ summary: '4 blocks added: "Example pricing"', summary_source: "diff" });
   });
 
-  it(`stops after about ${SUMMARY_TEXT_BUDGET_CHARS} characters of text a call (always at least one version) and says how many remain`, async () => {
+  it(`works on at most ${SUMMARY_TEXT_BUDGET_CHARS} characters of text a call and says how many remain`, async () => {
     await seedPage();
     const big = (n: number) => Array.from({ length: 500 }, (_, k) => `Paragraph ${k} of version ${n}: the fee is $${k}.`).join("\n\n");
+    // Each version and the one before it fit the budget, but two such pairs do not.
     expect(big(0).length * 2).toBeGreaterThan(SUMMARY_TEXT_BUDGET_CHARS / 2);
+    expect(big(0).length * 2).toBeLessThanOrEqual(SUMMARY_TEXT_BUDGET_CHARS);
     await seedVersion("v-0", "2026-11-01T00:00:00.000Z", big(0), { is_baseline: 1 });
     for (let n = 1; n <= 4; n++) {
       await seedVersion(`v-${n}`, `2026-11-0${n + 1}T00:00:00.000Z`, big(n), { summary: null, summary_source: null });
     }
 
-    const first: Json = await (await backfill()).json();
-    expect(first.filled).toBeGreaterThanOrEqual(1);
-    expect(first.filled).toBeLessThan(4);
-    expect(first.remaining).toBe(4 - first.filled);
+    expect(await (await backfill()).json()).toEqual({ filled: 1, remaining: 3, oversized: [] });
     let rounds = 1;
-    for (let left = first.remaining; left > 0; rounds++) left = ((await (await backfill()).json()) as Json).remaining;
-    expect(rounds).toBeGreaterThan(1);
+    for (let left = 3; left > 0; rounds++) left = ((await (await backfill()).json()) as Json).remaining;
+    expect(rounds).toBe(4);
     expect(await all("SELECT id FROM versions WHERE is_baseline = 0 AND summary IS NULL")).toEqual([]);
+  });
+
+  describe("versions too large to diff in one call", () => {
+    const PAGE_B = "page-sum-b";
+    /** Text this long, with its predecessor as long, is over the per-call budget. */
+    const huge = (n: number) => "x".repeat(Math.ceil(SUMMARY_TEXT_BUDGET_CHARS / 2) + 500) + `\n\nEntry ${n}.`;
+
+    // No Monitor and no schedule on either page, so the cron's pull and health steps leave them alone.
+    async function seedOversizedFirst(): Promise<void> {
+      await seedPage({ monitor_id: null, schedule_cron: null });
+      await seedVersion("big-0", "2026-11-01T00:00:00.000Z", huge(0), { is_baseline: 1 });
+      await seedVersion("big-1", "2026-11-02T00:00:00.000Z", huge(1), { summary: null, summary_source: null }); // the oldest missing
+      await insertPage(env.DB, {
+        id: PAGE_B, url: "https://example.com/sum-b", label: "B", kind: "policy", monitor_id: null, schedule_cron: null,
+        purpose: null, status: "active", added_by: "curated", ignore_patterns: "[]", expires_at: null,
+      });
+      await seedVersion("b-0", "2026-11-01T00:00:00.000Z", BASE_TEXT, { page_id: PAGE_B, is_baseline: 1 });
+      await seedVersion("b-1", "2026-11-03T00:00:00.000Z", REAL_TEXT, { page_id: PAGE_B, summary: null, summary_source: null });
+    }
+
+    it("an oversized oldest version is skipped and listed, and blocks neither a smaller later one nor any TinyFish summary", async () => {
+      await seedOversizedFirst();
+      // 60 versions with TinyFish's summary and none stored yet (rows from before the columns): all in the one call.
+      for (let i = 0; i < 60; i++) {
+        const at = new Date(Date.parse("2026-11-04T00:00:00.000Z") + i * 60_000).toISOString();
+        await seedVersion(`tf-${i}`, at, `${REAL_TEXT}\n\nNote ${i}.`, { page_id: PAGE_B, summary: null, summary_source: null }, `TinyFish says ${i}`);
+      }
+
+      expect(await (await backfill()).json()).toEqual({ filled: 61, remaining: 1, oversized: ["big-1"] });
+
+      expect(await versionRow("big-1")).toMatchObject({ summary: null, summary_source: null });
+      expect(await versionRow("b-1")).toMatchObject({ summary: '1 block changed: "$25 per month per seat."', summary_source: "diff" });
+      expect(await all("SELECT id FROM versions WHERE summary_source = 'tinyfish'")).toHaveLength(60);
+      expect(await versionRow("tf-59")).toMatchObject({ summary: "TinyFish says 59", summary_source: "tinyfish" });
+      // Called again, it fills nothing and lists the oversized one again.
+      expect(await (await backfill()).json()).toEqual({ filled: 0, remaining: 1, oversized: ["big-1"] });
+    });
+
+    it("?version=<id> fills an oversized version, in its own invocation", async () => {
+      await seedOversizedFirst();
+      expect(await (await backfill("?version=big-1")).json()).toEqual({ filled: 1, remaining: 1, oversized: [] });
+      expect(await versionRow("big-1")).toMatchObject({ summary: '1 block changed: "Entry 1."', summary_source: "diff" });
+    });
+
+    it("the hourly cron asks for one default fill and at most one ?version= fill a tick, for the oldest oversized version", async () => {
+      await seedOversizedFirst();
+      await seedVersion("big-2", "2026-11-05T00:00:00.000Z", huge(2), { summary: null, summary_source: null }); // oversized too, newer
+      const fills = vi.fn((e: Env, id?: string) => realFill(e, id));
+      summaryDeps.fill = fills;
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await runCron(env);
+      expect(fills.mock.calls.map(([, id]) => id)).toEqual([undefined, "big-1"]);
+      expect(await versionRow("b-1")).toMatchObject({ summary_source: "diff" });
+      expect(await versionRow("big-1")).toMatchObject({ summary_source: "diff" });
+      expect(await versionRow("big-2")).toMatchObject({ summary: null });
+
+      fills.mockClear();
+      await runCron(env);
+      expect(fills.mock.calls.map(([, id]) => id)).toEqual([undefined, "big-2"]);
+      expect(await versionRow("big-2")).toMatchObject({ summary_source: "diff" });
+
+      fills.mockClear();
+      await runCron(env);
+      expect(fills).not.toHaveBeenCalled();
+      expect(errorLog).not.toHaveBeenCalled();
+    });
   });
 });
 

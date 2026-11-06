@@ -23,7 +23,7 @@ import { clearStalePending, expiredPublicPages, monitoredPages, pendingConfirmPa
 import { pullCandidates } from "./db/runs";
 import { countMissingSummaries, inFlightFactsRuns, listFactsClaims, pendingCaptures, updateIfFactsHolder } from "./db/versions";
 import type { Env } from "./env";
-import { requestSummary } from "./summary";
+import { oldestOversizedSummary, requestSummary } from "./summary";
 import { getRun } from "./tinyfish/agent";
 import { TinyFishError } from "./tinyfish/client";
 import { deleteMonitor, getMonitor, listMonitors, UNKNOWN_STATUS } from "./tinyfish/monitor";
@@ -346,8 +346,14 @@ async function repair(env: Env, result: CronResult): Promise<void> {
 /**
  * The safety net behind each new version's own summary request (src/summary.ts): when any non-baseline
  * version still has no summary (its request failed, or a replay created it), one fill is asked for, in
- * its own invocation through the SELF binding, within that route's per-call budget.
+ * its own invocation through the SELF binding, within that route's per-call budget. That fill leaves a
+ * version whose diff alone is over the budget, so the oldest such version also gets one request of its
+ * own (`?version=<id>`), at most one a tick: if that one runs out of CPU it costs nothing and holds
+ * nothing back.
  */
 async function fillMissingSummaries(env: Env): Promise<void> {
-  if ((await countMissingSummaries(env.DB)) > 0) await requestSummary(env);
+  if ((await countMissingSummaries(env.DB)) === 0) return;
+  await requestSummary(env);
+  const oversized = await oldestOversizedSummary(env.DB);
+  if (oversized !== null) await requestSummary(env, oversized);
 }

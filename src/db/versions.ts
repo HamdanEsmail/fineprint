@@ -298,15 +298,23 @@ export async function listAllVersionSummaries(db: D1Database): Promise<WithTrigg
 // summary when its run had one, else a line built from the diff against the version before it.
 
 /**
- * A version still without a summary (never a baseline), with the length of its text (not the text: a
- * TinyFish summary needs none) and its page's ignore patterns.
+ * A version still without a summary (never a baseline), with the length of its text and of the text of
+ * the version before it (not the texts: a TinyFish summary needs neither, and the lengths say whether a
+ * diff fits one call), and its page's ignore patterns.
  */
 export type SummaryCandidate = Pick<VersionRow, "id" | "page_id" | "captured_at" | "judgment_summary"> & {
   text_length: number;
+  /** 0 when there is no earlier version. */
+  previous_length: number;
   ignore_patterns: string;
 };
 
-const CANDIDATE_SELECT = `SELECT v.id, v.page_id, v.captured_at, v.judgment_summary, length(v.text) AS text_length, p.ignore_patterns
+const CANDIDATE_SELECT = `SELECT v.id, v.page_id, v.captured_at, v.judgment_summary, length(v.text) AS text_length,
+    COALESCE((SELECT length(w.text) FROM versions w
+              WHERE w.page_id = v.page_id AND w.id != v.id
+                AND (w.captured_at < v.captured_at OR (w.captured_at = v.captured_at AND w.rowid < v.rowid))
+              ORDER BY w.captured_at DESC, w.rowid DESC LIMIT 1), 0) AS previous_length,
+    p.ignore_patterns
   FROM versions v JOIN pages p ON p.id = v.page_id
   WHERE v.is_baseline = 0 AND v.summary IS NULL`;
 
@@ -317,6 +325,36 @@ export async function versionsMissingSummary(db: D1Database, limit: number): Pro
     .bind(Math.max(0, Math.trunc(limit)) || 0)
     .all<SummaryCandidate>();
   return results;
+}
+
+/** Every non-baseline version without a summary whose run carried a judgment text, id and text only. */
+export async function versionsWithJudgmentMissingSummary(db: D1Database): Promise<Pick<VersionRow, "id" | "judgment_summary">[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT id, judgment_summary FROM versions
+       WHERE is_baseline = 0 AND summary IS NULL AND judgment_summary IS NOT NULL
+       ORDER BY captured_at, rowid`,
+    )
+    .all<Pick<VersionRow, "id" | "judgment_summary">>();
+  return results;
+}
+
+/**
+ * Stores TinyFish summaries for many versions in one statement (the free plan allows 50 D1 queries an
+ * invocation, so not one each), never replacing a stored summary. Returns how many were written.
+ */
+export async function setTinyFishSummaries(db: D1Database, summaries: { id: string; summary: string }[]): Promise<number> {
+  if (summaries.length === 0) return 0;
+  const result = await db
+    .prepare(
+      `UPDATE versions
+       SET summary = (SELECT json_extract(j.value, '$.summary') FROM json_each(?1) j WHERE json_extract(j.value, '$.id') = versions.id),
+           summary_source = 'tinyfish'
+       WHERE summary IS NULL AND id IN (SELECT json_extract(j.value, '$.id') FROM json_each(?1) j)`,
+    )
+    .bind(JSON.stringify(summaries))
+    .run();
+  return result.meta.changes;
 }
 
 /** One version, if it is a non-baseline version without a summary; else null. */
