@@ -5,17 +5,27 @@
 import type { SpendKind } from "../core/spend";
 
 export type PageKind = "pricing" | "fees" | "policy" | "rules" | "other";
-export type PageStatus = "active" | "paused" | "failed" | "expired";
+export type PageStatus = "active" | "paused" | "failed" | "expired" | "retired";
 export type AddedBy = "curated" | "public" | "admin";
 
 /**
  * pending: no capture attempted yet, or retries remain. partial: one of the
  * captures (screenshot, source, facts) is still missing. awaiting_facts: the
  * Agent run has started and a callback will finish it; a serial facts queue
- * owns the version, so the repair cron must not touch it. complete / failed:
- * terminal.
+ * owns the version, so the repair cron must not touch it. complete: screenshot
+ * and source are stored, whatever became of the facts (see FactsStatus). failed:
+ * a screenshot or source is missing and the attempts are used up. complete and
+ * failed are terminal.
  */
 export type CaptureStatus = "pending" | "partial" | "awaiting_facts" | "complete" | "failed";
+
+/**
+ * What became of a version's price facts (migrations/0004_facts_status.sql). ok: facts_json is stored.
+ * pending: facts are needed and not settled yet (queued or in flight). unavailable: needed, the attempts
+ * are used up, none stored. not_needed: the page is not a pricing or fees page, or the version's run was
+ * judged not relevant.
+ */
+export type FactsStatus = "ok" | "pending" | "unavailable" | "not_needed";
 
 export interface PageRow {
   id: string;
@@ -86,6 +96,8 @@ export interface VersionRow {
   capture_error: string | null;
   capture_attempts: number;
   agent_run_id: string | null;
+  /** What became of the version's price facts; see FactsStatus. */
+  facts_status: FactsStatus;
   /** Why the version exists when it is not the plain result of one read (a confirmed suspect read), or null. */
   notes: string | null;
 }

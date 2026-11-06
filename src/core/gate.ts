@@ -73,6 +73,17 @@ function looksPartial(latestNormalized: string, newNormalized: string): boolean 
   return structuredDiff(latestNormalized, newNormalized).added.length === 0;
 }
 
+/**
+ * What the admin replay changes about a judgment. `latest` is the version the run is compared with
+ * (the replay's chain) in place of the page's newest; `text` spares reading it again. `replay` judges
+ * the run as of its own receipt time: the flap check ignores versions captured after it, and
+ * `exceptVersionId` is the version the run itself made (when it made one).
+ */
+export type JudgeOptions = {
+  latest?: { id: string; normalized_hash: string; text?: string } | null;
+  replay?: { exceptVersionId?: string };
+};
+
 type JudgedPage = Pick<PageRow, "id" | "ignore_patterns"> &
   Partial<Pick<PageRow, "pending_hash" | "pending_run_id" | "pending_at">>;
 
@@ -99,7 +110,13 @@ type JudgedPage = Pick<PageRow, "id" | "ignore_patterns"> &
  * Any judgment of a page's next read, whatever it decides, ends its pending confirm read, except a
  * new suspect, which replaces it.
  */
-export async function judgeChange(db: D1Database, page: JudgedPage, run: { text: string; hasErrors: boolean }, nowMs: number = Date.now()): Promise<Verdict> {
+export async function judgeChange(
+  db: D1Database,
+  page: JudgedPage,
+  run: { text: string; hasErrors: boolean },
+  nowMs: number = Date.now(),
+  opts: JudgeOptions = {},
+): Promise<Verdict> {
   if (isFetchFailure(run)) return { kind: "fetch_error" };
 
   const patterns = readIgnorePatterns(page.ignore_patterns);
@@ -112,12 +129,12 @@ export async function judgeChange(db: D1Database, page: JudgedPage, run: { text:
     nowMs - Date.parse(page.pending_at) <= CONFIRM_WINDOW_MS &&
     hash === page.pending_hash;
 
-  const latest = await latestVersionHash(db, page.id);
+  const latest: JudgeOptions["latest"] = opts.latest !== undefined ? opts.latest : await latestVersionHash(db, page.id);
   if (latest === null) return { kind: "new_version", hash, baseline: false, ...clear };
   if (hash === latest.normalized_hash) return { kind: "suppressed", reason: "normalized_identical", heal: null, ...clear };
 
-  const previous = await getVersion(db, latest.id);
-  const previousNormalized = previous === null ? null : normalize(previous.text, patterns).text;
+  const previousText = latest.text ?? (await getVersion(db, latest.id))?.text ?? null;
+  const previousNormalized = previousText === null ? null : normalize(previousText, patterns).text;
   if (previousNormalized !== null && (await hashText(previousNormalized)) === hash) {
     return { kind: "suppressed", reason: "normalized_identical", heal: { versionId: latest.id, hash }, ...clear };
   }
@@ -125,7 +142,8 @@ export async function judgeChange(db: D1Database, page: JudgedPage, run: { text:
   if (!confirming && previousNormalized !== null && looksPartial(previousNormalized, newNormalized)) {
     return { kind: "partial_suspect", hash };
   }
-  if (await hasVersionWithHashSince(db, page.id, hash, new Date(nowMs - FLAP_WINDOW_MS).toISOString())) {
+  const bounds = opts.replay ? { untilIso: new Date(nowMs).toISOString(), exceptVersionId: opts.replay.exceptVersionId } : {};
+  if (await hasVersionWithHashSince(db, page.id, hash, new Date(nowMs - FLAP_WINDOW_MS).toISOString(), bounds)) {
     return { kind: "suppressed", reason: "flap", heal: null, ...clear };
   }
   return {

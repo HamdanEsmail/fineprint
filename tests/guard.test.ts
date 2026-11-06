@@ -573,14 +573,15 @@ describe("exposure", () => {
 });
 
 describe("the admin replay", () => {
-  it("leaves a run the guard set aside as it is, instead of turning it into a version", async () => {
+  it("judges a run the guard set aside by the same guard again, and makes no version of it", async () => {
     const pageId = await seedPage();
     await seedVersion(pageId, build(32), 5, true);
     await pullText(pageId, "tf-suspect", build(10)); // stores raw/tf-suspect.json and a partial_render run
 
     const res = await callWorker(`/api/pages/${pageId}/replay`, { method: "POST", headers: ADMIN });
 
-    expect(await res.json()).toEqual({ created: 0, suppressed: 0 });
+    // Judged again by the same gate, the read is a suspect again: counted as suppressed, no version.
+    expect(await res.json()).toMatchObject({ created: 0, suppressed: 1, decisions: [{ monitor_run_id: "tf-suspect", decision: "partial_render" }] });
     expect(await versionsOf(pageId)).toHaveLength(1);
     expect((await runsOf(pageId))[0]).toMatchObject({ noise_suppressed: 1, noise_reason: "partial_render" });
   });

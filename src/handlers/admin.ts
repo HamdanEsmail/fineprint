@@ -3,18 +3,19 @@
 // checks the admin token first, so an unknown page or a bad body never tells a stranger anything.
 import { Hono } from "hono";
 import { adminOnly } from "../auth";
-import { spendPaused } from "../capture";
+import { needsFacts, spendPaused } from "../capture";
 import { isFetchFailure, judgeChange, normalizedHash, readIgnorePatterns, type Verdict } from "../core/gate";
 import { changedRunsForReplay, clearNoise, markNoise } from "../db/runs";
 import { deleteCachedDiffsOfPage } from "../db/diffCache";
-import { getPage, listPages, updatePage } from "../db/pages";
+import { getPage, listPages, setPageStatusIf, updatePage } from "../db/pages";
+import type { VersionRow } from "../db/types";
 import { baselineVersion, getVersion, insertVersion, latestVersion } from "../db/versions";
 import type { Env } from "../env";
 import { recordMonitorRun, type MonitorRun } from "../record";
 import { TinyFishError } from "../tinyfish/client";
-import { runMonitorNow, updateMonitor } from "../tinyfish/monitor";
-import { codeOf, readBody } from "./pages";
-import { parsePayload, type MonitorPayload } from "./webhooks";
+import { deleteMonitor, runMonitorNow, updateMonitor } from "../tinyfish/monitor";
+import { codeOf, pageToJson, readBody } from "./pages";
+import { parseStoredRun, type StoredRun } from "./webhooks";
 
 export const adminRouter = new Hono<{ Bindings: Env }>();
 
@@ -33,74 +34,122 @@ adminRouter.onError((err, c) => {
 
 // --- Replay -------------------------------------------------------------------------------------
 
-/** What the next run is compared with: the newest version so far, read and hashed only when needed. */
-type Chain = { versionId: string | null; text: string | null; hash: string | null };
+/** What the next run is compared with: the newest version so far, read only when a run needs it. */
+type Chain = { versionId: string | null; loaded: VersionRow | null };
 
-async function chainHash(db: D1Database, chain: Chain, patterns: string[]): Promise<string | null> {
-  if (chain.hash !== null) return chain.hash;
-  if (chain.text === null && chain.versionId !== null) chain.text = (await getVersion(db, chain.versionId))?.text ?? null;
-  if (chain.text === null) return null;
-  chain.hash = await normalizedHash(chain.text, patterns);
-  return chain.hash;
+async function chainVersion(db: D1Database, chain: Chain): Promise<VersionRow | null> {
+  if (chain.loaded === null && chain.versionId !== null) chain.loaded = await getVersion(db, chain.versionId);
+  return chain.loaded;
 }
 
-/** A stored raw webhook payload, or null when the object is missing or is not a Monitor payload. */
-async function readRaw(store: R2Bucket, key: string): Promise<MonitorPayload | null> {
+/** A stored raw body of either shape, or null when the object is missing or is not a Monitor run. */
+async function readRaw(store: R2Bucket, key: string): Promise<StoredRun | null> {
   const object = await store.get(key);
-  return object === null ? null : parsePayload(await object.text());
+  return object === null ? null : parseStoredRun(await object.text());
+}
+
+/** What the replay decided about one run. */
+type ReplayDecision = "existing_version" | "created" | "normalized_identical" | "partial_render" | "flap" | "skipped_unreadable";
+
+/** The gate's verdict as a replay decision. */
+function decisionOf(verdict: Verdict): Exclude<ReplayDecision, "existing_version"> {
+  switch (verdict.kind) {
+    case "new_version":
+      return "created";
+    case "suppressed":
+      return verdict.reason;
+    case "partial_suspect":
+      return "partial_render";
+    case "fetch_error":
+      return "skipped_unreadable";
+  }
 }
 
 /**
- * Walks the page's `changed` runs that kept a raw payload, oldest first, against a chain that
- * starts at the baseline version, and decides each one again with the gate as it is now:
- * - a run that already made a version is left alone and the chain moves to that version;
- * - a payload that is missing, unreadable, empty or carries an error is skipped (counted nowhere);
- * - a payload that normalizes to the chain's text is suppressed (and marked as noise if it was not);
- * - any other payload becomes a version, dated by the run's receipt time and left `pending` with
+ * Walks the page's `changed` runs that kept a raw body, oldest first, against a chain that starts at
+ * the baseline version, and decides each one again with the gate as it is now (src/core/gate.ts: the
+ * normalization, the partial-render guard and flap suppression, as of the run's own receipt time). The
+ * body may be a webhook payload or the 201 body of a run-now pull. A run that was a suspect read is
+ * counted as suppressed (`partial_render`); the replay schedules no confirm reads.
+ * - a run that already made a version is left alone and the chain moves to that version; the answer
+ *   also says what the gate would decide for it now (`would_now_be`), and changes nothing;
+ * - a body that is missing, unreadable, empty or carries an error is skipped (counted nowhere);
+ * - a read that normalizes to the chain's text, is a suspect partial render or repeats a text of the
+ *   last 72 hours is suppressed (and marked as noise, with that reason, if it was not);
+ * - any other read becomes a version, dated by the run's receipt time and left `pending` with
  *   `capture_error "replayed"` for the hourly repair, and its run stops counting as noise.
- * Nothing is captured and TinyFish is never called. A replay that is cut off, or run again, picks up
- * where the stored versions say it was.
+ * Nothing is captured and TinyFish is never called. The replay only adds: it never deletes or changes
+ * a version (R79). A replay that is cut off, or run again, picks up where the stored versions say it was.
+ * The page's cached diffs are dropped before the first write, so a cut-off replay leaves none stale.
  */
 adminRouter.post("/pages/:id/replay", adminOnly, async (c) => {
   const db = c.env.DB;
   const page = await getPage(db, c.req.param("id"));
   if (!page) return c.json({ error: "not_found" }, 404);
 
-  const patterns = readIgnorePatterns(page.ignore_patterns);
-  let chain: Chain = { versionId: (await baselineVersion(db, page.id))?.id ?? null, text: null, hash: null };
+  const chain: Chain = { versionId: (await baselineVersion(db, page.id))?.id ?? null, loaded: null };
+  // The gate sees the page as the replay does: no confirm read pending, so a suspect is a suspect.
+  const judged = { id: page.id, ignore_patterns: page.ignore_patterns };
   let created = 0;
   let suppressed = 0;
-  let marked = 0;
-  let newest: string | null = null;
+  let lastChange = page.last_change_at;
+  let purged = false;
+  const decisions: { run_id: string; monitor_run_id: string; received_at: string; decision: ReplayDecision; would_now_be?: ReplayDecision }[] = [];
+
+  /** Called before every write: the page's cached diffs hold counts the write makes wrong. */
+  const beforeWrite = async (): Promise<void> => {
+    if (purged) return;
+    await deleteCachedDiffsOfPage(db, page.id);
+    purged = true;
+  };
+
+  /** What the gate decides for this read now, against the chain. */
+  const judge = async (stored: StoredRun, receivedAt: string, ownVersionId?: string): Promise<Verdict> => {
+    const latest = await chainVersion(db, chain);
+    return judgeChange(db, judged, stored, Date.parse(receivedAt), {
+      latest: latest === null ? null : { id: latest.id, normalized_hash: latest.normalized_hash, text: latest.text },
+      replay: { exceptVersionId: ownVersionId },
+    });
+  };
 
   for (const run of await changedRunsForReplay(db, page.id)) {
-    // Checked before the raw object is read: a version that exists is history whether or not its
-    // payload survived, and the next run is compared with it, as the live gate would have.
+    const entry = { run_id: run.id, monitor_run_id: run.monitor_run_id, received_at: run.received_at };
+    const stored = await readRaw(c.env.STORE, run.raw_key!);
+
+    // A version that exists is history whether or not its body survived, and the next run is compared
+    // with it, as the live gate would have. Only the answer to "and now?" needs the body.
     if (run.version_id !== null) {
-      chain = { versionId: run.version_id, text: null, hash: null };
+      const wouldNowBe = stored === null ? "skipped_unreadable" : decisionOf(await judge(stored, run.received_at, run.version_id));
+      decisions.push({ ...entry, decision: "existing_version", would_now_be: wouldNowBe });
+      chain.versionId = run.version_id;
+      chain.loaded = null;
       continue;
     }
 
-    // A run the partial-render guard or flap suppression set aside stays set aside: the replay
-    // re-judges with new ignore patterns, and would otherwise make a version of the very read the
-    // guard held back.
-    if (run.noise_reason === "partial_render" || run.noise_reason === "flap") continue;
+    if (stored === null || isFetchFailure(stored)) {
+      decisions.push({ ...entry, decision: "skipped_unreadable" });
+      continue;
+    }
 
-    const payload = await readRaw(c.env.STORE, run.raw_key!);
-    if (payload === null || isFetchFailure(payload)) continue;
-
-    const hash = await normalizedHash(payload.text, patterns);
-    if (hash === (await chainHash(db, chain, patterns))) {
+    const verdict = await judge(stored, run.received_at);
+    if (verdict.kind === "suppressed" || verdict.kind === "partial_suspect") {
+      const reason = verdict.kind === "partial_suspect" ? "partial_render" : verdict.reason;
       suppressed++;
-      if (run.noise_suppressed !== 1) {
-        await markNoise(db, run.id, "normalized_identical");
-        marked++;
+      if (run.noise_suppressed !== 1 || run.noise_reason !== reason) {
+        await beforeWrite();
+        await markNoise(db, run.id, reason);
       }
+      decisions.push({ ...entry, decision: reason });
+      continue;
+    }
+    if (verdict.kind !== "new_version") {
+      decisions.push({ ...entry, decision: "skipped_unreadable" });
       continue;
     }
 
     // The flag comes off first: if the insert then fails, the next replay finds a run with no
     // version and judges it again, which is right whichever way it goes.
+    await beforeWrite();
     if (run.noise_suppressed !== 0 || run.noise_reason !== null) await clearNoise(db, run.id);
     const versionId = crypto.randomUUID();
     await insertVersion(db, {
@@ -109,25 +158,58 @@ adminRouter.post("/pages/:id/replay", adminOnly, async (c) => {
       run_id: run.id,
       is_baseline: 0,
       captured_at: run.received_at,
-      text: payload.text,
-      normalized_hash: hash,
-      judgment_summary: payload.judgmentSummary,
+      text: stored.text,
+      normalized_hash: verdict.hash,
+      judgment_summary: stored.judgmentSummary,
       capture_status: "pending",
       capture_error: "replayed",
+      facts_status: needsFacts(page, { is_baseline: 0 }, run) ? "pending" : "not_needed",
     });
     created++;
-    newest = run.received_at;
-    chain = { versionId, text: payload.text, hash };
+    decisions.push({ ...entry, decision: "created" });
+    if (lastChange === null || run.received_at > lastChange) {
+      await updatePage(db, page.id, { last_change_at: run.received_at });
+      lastChange = run.received_at;
+    }
+    chain.versionId = versionId;
+    chain.loaded = null;
   }
 
-  if (newest !== null && (page.last_change_at === null || newest > page.last_change_at)) {
-    await updatePage(db, page.id, { last_change_at: newest });
-  }
-  // A cached diff holds the number of versions and suppressed runs between its two ends; a version
-  // added or a run un-marked inside that stretch makes those numbers wrong.
-  if (created > 0 || marked > 0) await deleteCachedDiffsOfPage(db, page.id);
+  return c.json({ created, suppressed, decisions });
+});
 
-  return c.json({ created, suppressed });
+// --- Retire a page --------------------------------------------------------------------------------
+
+/**
+ * Retires a page: its TinyFish Monitor is deleted (a Monitor already gone, 404, counts as deleted) and
+ * its status becomes `retired`, which frees its Monitor slot. Its versions, runs and stored objects
+ * stay, and the page stays in the list, the export and the history. A retired page is not pulled,
+ * health-checked, repaired or expired, and its facts are not queued. A delete that fails otherwise
+ * leaves the page as it was (502), so the Monitor and the page cannot drift apart. A page that is
+ * already retired or expired is refused (409).
+ */
+adminRouter.post("/admin/pages/:id/retire", adminOnly, async (c) => {
+  const db = c.env.DB;
+  const page = await getPage(db, c.req.param("id"));
+  if (!page) return c.json({ error: "not_found" }, 404);
+  if (page.status === "retired") return c.json({ error: "already_retired" }, 409);
+  if (page.status === "expired") return c.json({ error: "page_expired" }, 409);
+
+  if (page.monitor_id !== null) {
+    try {
+      await deleteMonitor(c.env, page.monitor_id);
+    } catch (err) {
+      logFailure("retire: Monitor delete failed", err);
+      return c.json({ error: "monitor_delete_failed", reason: codeOf(err) }, 502);
+    }
+  }
+  if (!(await setPageStatusIf(db, page.id, "retired", ["active", "paused", "failed"]))) {
+    return c.json({ error: "not_retirable" }, 409); // the status changed while the Monitor was being deleted
+  }
+  // No read of a retired page is awaited any more.
+  await updatePage(db, page.id, { pending_hash: null, pending_run_id: null, pending_at: null });
+  const retired = await getPage(db, page.id);
+  return c.json({ retired: true, page: pageToJson(retired ?? { ...page, status: "retired" }) });
 });
 
 // --- Rotate the webhook -------------------------------------------------------------------------
@@ -146,7 +228,7 @@ function parseBaseUrl(raw: unknown): string | null {
 }
 
 /**
- * Points every live Monitor (a page with a Monitor that is not expired) at `<base_url>/hooks/monitor/<secret>`.
+ * Points every live Monitor (a page with a Monitor that is not expired or retired) at `<base_url>/hooks/monitor/<secret>`.
  * PUBLIC_BASE_URL itself is a Worker var changed at deploy time; this only updates TinyFish. The calls
  * go one at a time, and the answer carries the pages that failed with a reason, never the url or the secret.
  */
@@ -164,7 +246,7 @@ adminRouter.post("/admin/rotate-webhook", adminOnly, async (c) => {
   let updated = 0;
   const failed: { page_id: string; reason: string }[] = [];
   for (const page of await listPages(c.env.DB)) {
-    if (page.monitor_id === null || page.status === "expired") continue;
+    if (page.monitor_id === null || page.status === "expired" || page.status === "retired") continue;
     // TinyFish rejects an edit without schedule_cron, so a page with none stored cannot be re-pointed.
     if (page.schedule_cron === null) {
       failed.push({ page_id: page.id, reason: "no_schedule_cron" });
@@ -189,7 +271,7 @@ adminRouter.post("/admin/rotate-webhook", adminOnly, async (c) => {
  * It asks TinyFish to run the page's Monitor now and records that run under TinyFish's run id,
  * marked `pull`, through the same recording path a webhook run takes.
  *
- * - An expired or paused page, or one without a Monitor, is not pulled (409 `not_pullable`); a page
+ * - An expired, retired or paused page, or one without a Monitor, is not pulled (409 `not_pullable`); a page
  *   health marked failed is (run-now works whatever the Monitor's schedule is doing, and a deleted
  *   Monitor just fails the pull); at the spend pause nothing is called (200, `pulled: false`). Only
  *   the spend pause stops a pull: the lower facts pause (FACTS_PAUSE_USD) does not.
@@ -204,7 +286,7 @@ adminRouter.post("/admin/pull/:pageId", adminOnly, async (c) => {
   const db = c.env.DB;
   const page = await getPage(db, c.req.param("pageId"));
   if (!page) return c.json({ error: "not_found" }, 404);
-  if (page.status === "expired" || page.status === "paused" || page.monitor_id === null) {
+  if (page.status === "expired" || page.status === "retired" || page.status === "paused" || page.monitor_id === null) {
     return c.json({ error: "not_pullable" }, 409);
   }
   if (await spendPaused(db)) return c.json({ ok: true, pulled: false, reason: "spend_paused" });

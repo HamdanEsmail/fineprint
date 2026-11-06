@@ -417,7 +417,7 @@ describe("POST /api/pages/:id/replay", () => {
 
     const res = await replay();
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ created: 1, suppressed: 1 });
+    expect(await res.json()).toMatchObject({ created: 1, suppressed: 1 });
 
     const stored = await versionsOf();
     expect(stored).toHaveLength(2);
@@ -467,25 +467,27 @@ describe("POST /api/pages/:id/replay", () => {
     await seedRun({ n: 1, at: T1, raw: rawPayload("mrun-1", BASE_TEXT + STAMP) });
     await seedRun({ n: 2, at: T2, raw: rawPayload("mrun-2", REAL_TEXT) });
 
-    expect(await (await replay()).json()).toEqual({ created: 1, suppressed: 1 });
+    expect(await (await replay()).json()).toMatchObject({ created: 1, suppressed: 1 });
     const first = await versionsOf();
-    expect(await (await replay()).json()).toEqual({ created: 0, suppressed: 1 });
+    expect(await (await replay()).json()).toMatchObject({ created: 0, suppressed: 1 });
     expect(await versionsOf()).toEqual(first);
     expect((await pageRow(PAGE_ID)).last_change_at).toBe(T2);
   });
 
   it("compares each run with the newest version in the chain, not with the baseline", async () => {
     await seedPage();
-    await seedBaseline(BASE_TEXT);
+    const baselineId = await seedBaseline(BASE_TEXT);
+    // The baseline is older than the flap window (72 hours), so going back to its text is a change, not a flap.
+    await env.DB.prepare("UPDATE versions SET captured_at = ? WHERE id = ?").bind("2026-10-01T00:00:00.000Z", baselineId).run();
     // $25, then $25 with a stamp (same page), then back to $20 (a real change against the $25 version).
     await seedRun({ n: 1, at: T1, raw: rawPayload("mrun-1", REAL_TEXT) });
     await seedRun({ n: 2, at: T2, raw: rawPayload("mrun-2", REAL_TEXT + STAMP) });
     await seedRun({ n: 3, at: T3, raw: rawPayload("mrun-3", BASE_TEXT) });
 
-    expect(await (await replay()).json()).toEqual({ created: 2, suppressed: 1 });
+    expect(await (await replay()).json()).toMatchObject({ created: 2, suppressed: 1 });
     const stored = await versionsOf();
     expect(stored.map((v) => [v.run_id, v.captured_at])).toEqual([
-      [null, BASELINE_AT],
+      [null, "2026-10-01T00:00:00.000Z"],
       ["run-1", T1],
       ["run-3", T3],
     ]);
@@ -515,7 +517,7 @@ describe("POST /api/pages/:id/replay", () => {
     await seedRun({ n: 2, at: T2, raw: rawPayload("mrun-2", REAL_TEXT + STAMP) });
     const before = (await versionsOf())[1]!;
 
-    expect(await (await replay()).json()).toEqual({ created: 0, suppressed: 1 });
+    expect(await (await replay()).json()).toMatchObject({ created: 0, suppressed: 1 });
     const after = await versionsOf();
     expect(after).toHaveLength(2);
     expect(after[1]).toEqual(before);
@@ -539,7 +541,7 @@ describe("POST /api/pages/:id/replay", () => {
     await seedRun({ n: 9, at: T1, raw: rawPayload("mrun-9", REAL_TEXT, { id: undefined }) }); // no payload id: not a webhook body
     const flagged = await seedRun({ n: 10, at: T1, raw: rawPayload("mrun-10", REAL_TEXT, { errors: [{ code: "x" }] }), over: { noise_reason: "fetch_error" } });
 
-    expect(await (await replay()).json()).toEqual({ created: 0, suppressed: 0 });
+    expect(await (await replay()).json()).toMatchObject({ created: 0, suppressed: 0 });
     expect(await versionsOf()).toHaveLength(1);
     expect(await all<RunRow>("SELECT * FROM runs WHERE noise_suppressed = 1")).toEqual([]);
     expect((await runRow(flagged)).noise_reason).toBe("fetch_error");
@@ -550,7 +552,7 @@ describe("POST /api/pages/:id/replay", () => {
     await seedRun({ n: 1, at: T1, raw: rawPayload("mrun-1", REAL_TEXT) });
     await seedRun({ n: 2, at: T2, raw: rawPayload("mrun-2", REAL_TEXT + STAMP) });
 
-    expect(await (await replay()).json()).toEqual({ created: 1, suppressed: 1 });
+    expect(await (await replay()).json()).toMatchObject({ created: 1, suppressed: 1 });
     const stored = await versionsOf();
     expect(stored).toHaveLength(1);
     expect(stored[0]).toMatchObject({ run_id: "run-1", is_baseline: 0, captured_at: T1, text: REAL_TEXT });
@@ -565,7 +567,7 @@ describe("POST /api/pages/:id/replay", () => {
     await seedRun({ n: 1, at: T1, raw: rawPayload("mrun-1", BASE_TEXT.replace("\n\nPopular\n\n", "\n\nMost popular\n\n")) });
     await seedRun({ n: 2, at: T2, raw: rawPayload("mrun-2", REAL_TEXT) });
 
-    expect(await (await replay()).json()).toEqual({ created: 1, suppressed: 1 });
+    expect(await (await replay()).json()).toMatchObject({ created: 1, suppressed: 1 });
     const stored = await versionsOf();
     expect(stored[1]!.normalized_hash).toBe(await hashText(normalize(REAL_TEXT, patterns).text));
   });
@@ -576,7 +578,7 @@ describe("POST /api/pages/:id/replay", () => {
     await env.DB.prepare("UPDATE versions SET normalized_hash = 'hash-from-older-rules' WHERE id = ?").bind(id).run();
     await seedRun({ n: 1, at: T1, raw: rawPayload("mrun-1", BASE_TEXT + STAMP) });
 
-    expect(await (await replay()).json()).toEqual({ created: 0, suppressed: 1 });
+    expect(await (await replay()).json()).toMatchObject({ created: 0, suppressed: 1 });
     expect(await versionsOf()).toHaveLength(1);
   });
 
@@ -587,7 +589,7 @@ describe("POST /api/pages/:id/replay", () => {
     await env.DB.prepare("UPDATE pages SET last_change_at = ? WHERE id = ?").bind(later, PAGE_ID).run();
     await seedRun({ n: 1, at: T1, raw: rawPayload("mrun-1", REAL_TEXT) });
 
-    expect(await (await replay()).json()).toEqual({ created: 1, suppressed: 0 });
+    expect(await (await replay()).json()).toMatchObject({ created: 1, suppressed: 0 });
     expect((await pageRow(PAGE_ID)).last_change_at).toBe(later);
   });
 
@@ -612,7 +614,7 @@ describe("POST /api/pages/:id/replay", () => {
       trigger_kind: "webhook",
     });
 
-    expect(await (await replay()).json()).toEqual({ created: 0, suppressed: 0 });
+    expect(await (await replay()).json()).toMatchObject({ created: 0, suppressed: 0 });
     expect(await versionsOf("page-other")).toEqual([]);
   });
 
@@ -636,7 +638,7 @@ describe("POST /api/pages/:id/replay", () => {
 
     // Nothing is half done: the next replay, with the fault gone, creates the version.
     await env.DB.prepare("DROP TRIGGER fail_version_insert").run();
-    expect(await (await replay()).json()).toEqual({ created: 1, suppressed: 0 });
+    expect(await (await replay()).json()).toMatchObject({ created: 1, suppressed: 0 });
   });
 });
 

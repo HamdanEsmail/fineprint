@@ -3,7 +3,7 @@
 // body and judged the run (src/core/gate.ts) before it gets here; this claims the run under
 // TinyFish's run id, then writes the noise flag or the new version, the page's timestamps and the
 // spend, and starts the new version's capture in the caller's own invocation.
-import { captureVersion } from "./capture";
+import { captureVersion, needsFacts } from "./capture";
 import type { Verdict } from "./core/gate";
 import { PRICES, recordSpend } from "./core/spend";
 import { updatePage } from "./db/pages";
@@ -126,6 +126,7 @@ export async function recordMonitorRun(
         normalized_hash: verdict.hash,
         judgment_summary: run.judgmentSummary,
         capture_status: "pending",
+        facts_status: needsFacts(page, { is_baseline: verdict.baseline ? 1 : 0 }, { judgment_relevant: run.judgmentRelevant }) ? "pending" : "not_needed",
         notes: verdict.notes ?? null,
       });
       versionId = newId;

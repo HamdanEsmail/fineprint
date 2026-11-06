@@ -137,12 +137,12 @@ export async function setPageStatusIf(
   return result.meta.changes === 1;
 }
 
-/** Public pages whose week is over (`expires_at` at or before `nowIso`) and that are not yet expired, oldest expiry first. */
+/** Public pages whose week is over (`expires_at` at or before `nowIso`) and that are not yet expired or retired, oldest expiry first. */
 export async function expiredPublicPages(db: D1Database, nowIso: string): Promise<PageRow[]> {
   const { results } = await db
     .prepare(
       `SELECT * FROM pages
-       WHERE added_by = 'public' AND expires_at IS NOT NULL AND expires_at <= ? AND status != 'expired'
+       WHERE added_by = 'public' AND expires_at IS NOT NULL AND expires_at <= ? AND status NOT IN ('expired', 'retired')
        ORDER BY expires_at, rowid`,
     )
     .bind(nowIso)
@@ -191,8 +191,8 @@ export async function clearStalePending(db: D1Database, beforeIso: string): Prom
 }
 
 /**
- * Pages that hold a Monitor slot: active, paused and failed (an expired page's
- * Monitor is deleted). Pass `addedBy` to count one origin only.
+ * Pages that hold a Monitor slot: active, paused and failed (the Monitor of an
+ * expired or retired page is deleted). Pass `addedBy` to count one origin only.
  */
 export async function countMonitors(db: D1Database, addedBy?: AddedBy): Promise<number> {
   const where = "status IN ('active', 'paused', 'failed')";

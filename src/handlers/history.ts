@@ -19,7 +19,7 @@ import { PRICES, type SpendKind } from "../core/spend";
 import { getCachedDiff, putCachedDiff } from "../db/diffCache";
 import { getPage, listPages } from "../db/pages";
 import { countNoiseBetween, countNoiseByReason, countRunsByTrigger } from "../db/runs";
-import type { PageRow, PageStatus, TriggerKind, VersionRow } from "../db/types";
+import type { FactsStatus, PageRow, PageStatus, TriggerKind, VersionRow } from "../db/types";
 import {
   baselineVersion,
   countVersionsBetween,
@@ -123,6 +123,7 @@ function versionJson(env: Env, page: PageRow, v: WithTrigger<VersionRow>) {
     live_url: page.url,
     judgment_summary: v.judgment_summary,
     capture_status: v.capture_status,
+    facts_status: v.facts_status,
     trigger: v.trigger_kind,
     notes: v.notes,
   };
@@ -157,6 +158,7 @@ type DiffEnd = {
   screenshot_url: string | null;
   source_url: string | null;
   trigger: TriggerKind | null;
+  facts_status: FactsStatus;
 };
 
 type DiffJson = {
@@ -170,12 +172,14 @@ type DiffJson = {
   noise_suppressed_between: number;
 };
 
-// A version's trigger never changes, so a stored diff keeps it.
+// A version's trigger never changes, so a stored diff keeps it. Its facts status does until the version is
+// final, and a diff is stored only once both of its versions are.
 const diffEnd = (env: Env, v: WithTrigger<VersionSummary>): DiffEnd => ({
   version_id: v.id,
   captured_at: v.captured_at,
   ...objectUrls(env, v),
   trigger: v.trigger_kind,
+  facts_status: v.facts_status,
 });
 
 /**
@@ -291,6 +295,7 @@ historyRouter.get("/changes", async (c) => {
       summary: row.judgment_summary,
       screenshot_url: objectUrls(c.env, row).screenshot_url,
       trigger: row.trigger_kind,
+      facts_status: row.facts_status,
     })),
   });
 });
@@ -320,6 +325,7 @@ historyRouter.get("/export.json", async (c) => {
         ...objectUrls(c.env, v),
         facts: parseFacts(v.facts_json),
         capture_status: v.capture_status,
+        facts_status: v.facts_status,
       })),
     })),
   });
@@ -328,7 +334,7 @@ historyRouter.get("/export.json", async (c) => {
 // --- Stats ------------------------------------------------------------------------------------
 
 const SPEND_KINDS = Object.keys(PRICES) as SpendKind[];
-const PAGE_STATUSES: readonly PageStatus[] = ["active", "paused", "failed", "expired"];
+const PAGE_STATUSES: readonly PageStatus[] = ["active", "paused", "failed", "expired", "retired"];
 
 /** Money rounded to six decimals, so adding floats leaves no drift (0.1 + 0.2 is 0.3). */
 const dollars = (amount: number): number => Math.round(amount * 1e6) / 1e6;
@@ -344,9 +350,18 @@ historyRouter.get("/stats", async (c) => {
            (SELECT COUNT(*) FROM versions) AS versions,
            (SELECT COUNT(*) FROM versions WHERE is_baseline = 0) AS catches,
            (SELECT COUNT(*) FROM runs WHERE noise_suppressed = 1) AS noise_suppressed,
+           (SELECT COUNT(*) FROM versions WHERE facts_status = 'unavailable') AS facts_unavailable,
            (SELECT COALESCE(SUM(amount_usd), 0) FROM spend) AS spend_usd`,
       )
-      .first<{ pages: number; runs: number; versions: number; catches: number; noise_suppressed: number; spend_usd: number }>(),
+      .first<{
+        pages: number;
+        runs: number;
+        versions: number;
+        catches: number;
+        noise_suppressed: number;
+        facts_unavailable: number;
+        spend_usd: number;
+      }>(),
     db.prepare("SELECT kind, SUM(amount_usd) AS usd FROM spend GROUP BY kind").all<{ kind: string; usd: number | null }>(),
     db.prepare("SELECT status, COUNT(*) AS n FROM pages GROUP BY status").all<{ status: string | null; n: number }>(),
     countRunsByTrigger(db),
@@ -372,6 +387,8 @@ historyRouter.get("/stats", async (c) => {
     runs: totals?.runs ?? 0,
     versions: totals?.versions ?? 0,
     noise_suppressed: totals?.noise_suppressed ?? 0,
+    // Versions whose screenshot and source are stored but whose price facts could not be taken.
+    facts_unavailable: totals?.facts_unavailable ?? 0,
     noise_by_reason: noiseByReason,
     spend_usd: dollars(spend),
     // The two pauses, read from the same total the Worker's own checks use: no facts run starts from

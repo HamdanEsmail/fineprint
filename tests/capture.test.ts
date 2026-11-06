@@ -188,7 +188,7 @@ describe("captureStatusFor", () => {
     ["both done, no facts needed", row(both), false, "complete"],
     ["both done, facts needed and stored", row({ ...both, facts_json: "[]" }), true, "complete"],
     ["both done, facts needed and missing", row(both), true, "awaiting_facts"],
-    ["both done, facts missing at the cap", row({ ...both, capture_attempts: CAPTURE_MAX_ATTEMPTS }), true, "failed"],
+    ["both done, facts missing at the cap", row({ ...both, capture_attempts: CAPTURE_MAX_ATTEMPTS }), true, "complete"],
     ["facts stored but screenshot missing", row({ html_key: "html/a.html", facts_json: "[]" }), true, "partial"],
   ] as const)("%s → %s", (_name, v, needsFacts, expected) => {
     expect(captureStatusFor(v, needsFacts)).toBe(expected);
@@ -497,7 +497,7 @@ describe("captureVersion", () => {
     expect(v.capture_error).not.toContain(SECRET);
   });
 
-  it("a pricing version whose screenshot needed every attempt is failed, and says the facts were never run", async () => {
+  it("a pricing version whose screenshot needed every attempt is complete with facts unavailable, and says the facts were never run", async () => {
     mockFetchHtml();
     mockRunAsync();
     shot.mockRejectedValueOnce(new Error("CDP timeout: Page.navigate")).mockRejectedValueOnce(new Error("CDP timeout: Page.navigate"));
@@ -516,7 +516,8 @@ describe("captureVersion", () => {
     expect(await version(id)).toMatchObject({
       screenshot_key: `shots/${id}.jpg`,
       html_key: `html/${id}.html`,
-      capture_status: "failed",
+      capture_status: "complete",
+      facts_status: "unavailable",
       capture_error: "facts: no_attempts_left",
       capture_attempts: CAPTURE_MAX_ATTEMPTS,
     });
@@ -644,7 +645,7 @@ describe("the facts queue", () => {
     expect(runAsyncCalls()).toHaveLength(1);
   });
 
-  it("a start that fails for another reason uses an attempt: at the cap the version is failed and never started again", async () => {
+  it("a start that fails for another reason uses an attempt: at the cap the version is complete with facts unavailable and never started again", async () => {
     fetchMock.intercept({
       method: "POST",
       url: RUN_ASYNC_API,
@@ -661,7 +662,8 @@ describe("the facts queue", () => {
     expect(await startNextFacts(env)).toBe(false);
     expect(await version(id)).toMatchObject({
       agent_run_id: null,
-      capture_status: "failed",
+      capture_status: "complete",
+      facts_status: "unavailable",
       capture_error: "facts: INVALID_INPUT",
       capture_attempts: CAPTURE_MAX_ATTEMPTS,
     });
@@ -671,7 +673,7 @@ describe("the facts queue", () => {
     expect(runAsyncCalls()).toHaveLength(1);
   });
 
-  it("a pricing baseline whose facts run fails keeps its screenshot and source and says facts failed; FAILED re-queues and the third attempt marks failed", async () => {
+  it("a pricing baseline whose facts run fails keeps its screenshot and source and says facts failed; FAILED re-queues and the third attempt makes the facts unavailable", async () => {
     mockFetchHtml();
     mockRunAsync();
     const id = await seedVersion(await seedPage("pricing"));
@@ -695,7 +697,8 @@ describe("the facts queue", () => {
       html_key: `html/${id}.html`,
       facts_json: null,
       agent_run_id: null,
-      capture_status: "failed",
+      capture_status: "complete",
+      facts_status: "unavailable",
       capture_error: "facts: CANCELLED",
       capture_attempts: CAPTURE_MAX_ATTEMPTS,
     });

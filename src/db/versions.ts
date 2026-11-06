@@ -1,5 +1,5 @@
 import { CAPTURE_MAX_ATTEMPTS } from "../core/limits";
-import type { CaptureStatus, TriggerKind, VersionRow } from "./types";
+import type { CaptureStatus, FactsStatus, TriggerKind, VersionRow } from "./types";
 
 /** What a caller supplies to insertVersion; the capture columns default to a fresh, uncaptured version. */
 export type NewVersion = Pick<
@@ -17,6 +17,7 @@ export type NewVersion = Pick<
       | "capture_attempts"
       | "agent_run_id"
       | "notes"
+      | "facts_status"
     >
   >;
 
@@ -30,6 +31,7 @@ export type CapturePatch = Partial<
     | "capture_error"
     | "capture_attempts"
     | "agent_run_id"
+    | "facts_status"
   >
 >;
 
@@ -70,6 +72,7 @@ const SUMMARY_COLUMNS = [
   "capture_attempts",
   "agent_run_id",
   "notes",
+  "facts_status",
 ] as const satisfies readonly (keyof VersionSummary)[];
 
 function summaryColumns(prefix = ""): string {
@@ -85,16 +88,22 @@ const CAPTURE_PATCH_COLUMNS = [
   "capture_error",
   "capture_attempts",
   "agent_run_id",
+  "facts_status",
 ] as const satisfies readonly (keyof CapturePatch)[];
 
-/** Inserts a version. Omitted capture fields start as NULL, `pending` and 0 attempts. */
+/**
+ * Inserts a version. Omitted capture fields start as NULL, `pending` and 0 attempts. An omitted
+ * `facts_status` is `ok` when facts are given and `pending` otherwise; a caller that knows the page
+ * does not need facts (src/capture.ts needsFacts) says `not_needed`.
+ */
 export async function insertVersion(db: D1Database, v: NewVersion): Promise<void> {
   await db
     .prepare(
       `INSERT INTO versions
          (id, page_id, run_id, is_baseline, captured_at, text, normalized_hash, judgment_summary,
-          screenshot_key, html_key, facts_json, capture_status, capture_error, capture_attempts, agent_run_id, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          screenshot_key, html_key, facts_json, capture_status, capture_error, capture_attempts, agent_run_id, notes,
+          facts_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       v.id,
@@ -113,20 +122,29 @@ export async function insertVersion(db: D1Database, v: NewVersion): Promise<void
       v.capture_attempts ?? 0,
       v.agent_run_id ?? null,
       v.notes ?? null,
+      v.facts_status ?? (v.facts_json != null ? "ok" : "pending"),
     )
     .run();
 }
 
-/** Whether the page has a version with this normalized hash captured at or after `sinceIso`. */
+/**
+ * Whether the page has a version with this normalized hash captured at or after `sinceIso` (and, when
+ * `untilIso` is given, at or before it, so the replay of an old run does not see later versions;
+ * `exceptVersionId` leaves out the version the run itself made).
+ */
 export async function hasVersionWithHashSince(
   db: D1Database,
   pageId: string,
   hash: string,
   sinceIso: string,
+  bounds: { untilIso?: string; exceptVersionId?: string } = {},
 ): Promise<boolean> {
   const row = await db
-    .prepare("SELECT 1 AS found FROM versions WHERE page_id = ? AND normalized_hash = ? AND captured_at >= ? LIMIT 1")
-    .bind(pageId, hash, sinceIso)
+    .prepare(
+      `SELECT 1 AS found FROM versions
+       WHERE page_id = ? AND normalized_hash = ? AND captured_at >= ? AND captured_at <= ? AND id != ? LIMIT 1`,
+    )
+    .bind(pageId, hash, sinceIso, bounds.untilIso ?? "9999-12-31T23:59:59.999Z", bounds.exceptVersionId ?? "")
     .first();
   return row !== null;
 }
@@ -283,7 +301,7 @@ export async function listChanges(
  * without `text`, at most `limit` of them when it is given. Versions in
  * `awaiting_facts` are never returned: a facts queue owns them, and counting a
  * wait for the Agent callback as a failed attempt would mark them failed. Nor are
- * versions of an expired page: its recording has ended.
+ * versions of an expired or retired page: its recording has ended.
  */
 export async function pendingCaptures(
   db: D1Database,
@@ -295,7 +313,7 @@ export async function pendingCaptures(
        WHERE capture_status IN ('pending', 'partial')
          AND capture_attempts < ?
          AND captured_at <= ?
-         AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = versions.page_id AND p.status = 'expired')
+         AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = versions.page_id AND p.status IN ('expired', 'retired'))
        ORDER BY captured_at, rowid`;
   const statement =
     limit === undefined
@@ -380,13 +398,14 @@ export async function setCaptureStatusIfUnchanged(
   seen: Pick<VersionRow, "id" | "screenshot_key" | "html_key" | "facts_json" | "capture_attempts">,
   status: CaptureStatus,
   error: string | null,
+  factsStatus: FactsStatus,
 ): Promise<boolean> {
   const result = await db
     .prepare(
-      `UPDATE versions SET capture_status = ?, capture_error = ?
+      `UPDATE versions SET capture_status = ?, capture_error = ?, facts_status = ?
        WHERE id = ? AND screenshot_key IS ? AND html_key IS ? AND facts_json IS ? AND capture_attempts = ?`,
     )
-    .bind(status, error, seen.id, seen.screenshot_key, seen.html_key, seen.facts_json, seen.capture_attempts)
+    .bind(status, error, factsStatus, seen.id, seen.screenshot_key, seen.html_key, seen.facts_json, seen.capture_attempts)
     .run();
   return result.meta.changes === 1;
 }
@@ -456,7 +475,7 @@ export type FactsCandidate = VersionSummary & { url: string };
 
 /**
  * The oldest version (by `captured_at`) that is waiting for a facts run: its page is
- * `pricing` or `fees` and not expired, it has no facts and no run, it is not `failed`, it
+ * `pricing` or `fees` and not expired or retired, it has no facts and no run, it is not `failed`, it
  * has attempts left, and it is a baseline or its run was not judged irrelevant (a judgment
  * of NULL, or no run at all, counts as relevant). Null when the queue is empty.
  */
@@ -471,7 +490,7 @@ export function nextFactsCandidate(
        JOIN pages p ON p.id = v.page_id
        LEFT JOIN runs r ON r.id = v.run_id
        WHERE p.kind IN ('pricing', 'fees')
-         AND p.status != 'expired'
+         AND p.status NOT IN ('expired', 'retired')
          AND v.facts_json IS NULL
          AND v.agent_run_id IS NULL
          AND v.capture_status != 'failed'

@@ -730,6 +730,7 @@ describe("the trigger in the read API", () => {
       screenshot_url: `${BASE}/shots/${baseline}.jpg`,
       source_url: `${BASE}/sources/${baseline}.html`,
       trigger: "create",
+      facts_status: "pending", // the seeded baseline was given no facts
     });
     expect(diff.to).toMatchObject({ version_id: pulled.id, trigger: "pull" });
     // A stored diff (both ends are final) keeps the triggers.

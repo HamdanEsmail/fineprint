@@ -401,7 +401,8 @@ describe("facts upkeep", () => {
     expect(await version(stuck)).toMatchObject({
       agent_run_id: null,
       facts_json: null,
-      capture_status: "failed",
+      capture_status: "complete",
+      facts_status: "unavailable",
       capture_error: "facts: STALE",
       capture_attempts: CAPTURE_MAX_ATTEMPTS,
     });
@@ -456,7 +457,8 @@ describe("facts upkeep", () => {
 
     expect(await version(stuck)).toMatchObject({
       agent_run_id: null,
-      capture_status: "failed",
+      capture_status: "complete",
+      facts_status: "unavailable",
       capture_error: "facts: STALE",
       capture_attempts: CAPTURE_MAX_ATTEMPTS,
     });

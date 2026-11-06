@@ -90,6 +90,33 @@ export function parsePayload(raw: string): MonitorPayload | null {
   };
 }
 
+/** What the admin replay needs of a stored raw body, whichever way the run arrived. */
+export type StoredRun = Pick<MonitorRun, "text" | "hasErrors" | "judgmentSummary">;
+
+/**
+ * Reads a raw body Fineprint stored under `raw/`: a Monitor webhook payload (see parsePayload) or the 201
+ * body of a run-now pull, `{run: {id, is_baseline, results: [{text, ...}], errors}}`. Null when it is
+ * neither: not JSON, no run id, or no monitor id on a payload that is not the pull shape.
+ */
+export function parseStoredRun(raw: string): StoredRun | null {
+  const payload = parsePayload(raw);
+  if (payload !== null) return payload;
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const run = isRecord(data) && isRecord(data.run) ? data.run : null;
+  if (run === null || typeof run.id !== "string" || run.id === "" || run.id.length > MAX_RUN_ID_LENGTH) return null;
+  const first = Array.isArray(run.results) && isRecord(run.results[0]) ? run.results[0] : null;
+  return {
+    text: typeof first?.text === "string" ? first.text : "",
+    hasErrors: Array.isArray(run.errors) && run.errors.length > 0,
+    judgmentSummary: null,
+  };
+}
+
 // --- Routes ---------------------------------------------------------------------
 
 webhooksRouter.post("/monitor/:secret", async (c) => {
@@ -107,6 +134,10 @@ webhooksRouter.post("/monitor/:secret", async (c) => {
     console.warn(`monitor webhook for unknown monitor ${payload.monitorId.slice(0, 100)}`);
     return c.json({ error: "unknown_monitor" }, 404);
   }
+
+  // A retired page's Monitor was deleted on purpose: a delivery that was already on its way is answered
+  // and set aside, with no run, no version and no capture.
+  if (page.status === "retired") return c.json({ ok: true, ignored: true });
 
   const now = new Date().toISOString();
   const rawKey = `raw/${payload.id}.json`;

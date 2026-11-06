@@ -8,11 +8,15 @@
 //   partial         screenshot or source still missing, attempts left
 //   awaiting_facts  screenshot and source stored, facts needed and missing: queued
 //                   while agent_run_id is NULL, in flight while it is set
-//   complete        screenshot and source stored, and facts stored or not needed
-//   failed          out of attempts with something still missing
+//   complete        screenshot and source stored, whatever became of the facts
+//   failed          out of attempts with the screenshot or the source still missing
+//
+// facts_status says what became of the price facts: ok (stored), pending (needed, queued or in
+// flight), unavailable (needed, the attempts used up, none stored) or not_needed.
 //
 // One counter, capture_attempts, counts capture attempts and failed facts runs alike;
-// at CAPTURE_MAX_ATTEMPTS the version is failed. capture_error holds one
+// at CAPTURE_MAX_ATTEMPTS a version with a screenshot or source missing is failed, and one with
+// both stored is complete with its facts unavailable. capture_error holds one
 // "<capture>: <code>" part per capture whose last try failed, joined with "; ".
 //
 // Facts are a serial queue: three projects share the account's 2 concurrent Agent
@@ -25,7 +29,7 @@ import { CAPTURE_MAX_ATTEMPTS, FACTS_PAUSE_USD, SPEND_PAUSE_USD } from "./core/l
 import { PRICES } from "./core/spend";
 import { getPage } from "./db/pages";
 import { getRunById } from "./db/runs";
-import type { CaptureStatus, PageRow, RunRow, VersionRow } from "./db/types";
+import type { CaptureStatus, FactsStatus, PageRow, RunRow, VersionRow } from "./db/types";
 import {
   addCaptureAttempt,
   claimFactsSlot,
@@ -60,10 +64,29 @@ type StatusInput = Pick<VersionRow, "screenshot_key" | "html_key" | "facts_json"
 /** The one rule for capture_status, used after every capture and every facts result. */
 export function captureStatusFor(v: StatusInput, needsFacts: boolean): CaptureStatus {
   const stored = v.screenshot_key !== null && v.html_key !== null;
-  if (stored && (!needsFacts || v.facts_json !== null)) return "complete";
+  // Facts that are stored, not needed or out of attempts do not hold the version back.
+  if (stored && (!needsFacts || v.facts_json !== null || v.capture_attempts >= CAPTURE_MAX_ATTEMPTS)) return "complete";
   if (v.capture_attempts >= CAPTURE_MAX_ATTEMPTS) return "failed";
   if (stored) return "awaiting_facts";
   return v.capture_attempts === 0 ? "pending" : "partial";
+}
+
+/**
+ * The rule for facts_status, used with captureStatusFor wherever a status is written. Stored facts are
+ * `ok`; otherwise `not_needed` when the version needs none; `unavailable` once the screenshot and the
+ * source are stored and the attempts are used up; `pending` for anything else (a version that failed
+ * for want of its screenshot or source never got its facts started, and is not called unavailable).
+ */
+export function factsStatusFor(v: StatusInput, needsFacts: boolean): FactsStatus {
+  if (v.facts_json !== null) return "ok";
+  if (!needsFacts) return "not_needed";
+  const stored = v.screenshot_key !== null && v.html_key !== null;
+  return stored && v.capture_attempts >= CAPTURE_MAX_ATTEMPTS ? "unavailable" : "pending";
+}
+
+/** capture_status and facts_status together, from the one state they are both worked out from. */
+function statusPair(v: StatusInput, needsFacts: boolean): { capture_status: CaptureStatus; facts_status: FactsStatus } {
+  return { capture_status: captureStatusFor(v, needsFacts), facts_status: factsStatusFor(v, needsFacts) };
 }
 
 /** Facts are taken on pricing and fee pages: always for the baseline, and for a later version unless its run was judged not relevant. */
@@ -90,10 +113,10 @@ async function loadNeedsFacts(db: D1Database, page: Pick<PageRow, "kind">, versi
  */
 async function settleStatus(db: D1Database, v: VersionRow | null, factsNeeded: boolean): Promise<void> {
   if (v === null) return;
-  const status = captureStatusFor(v, factsNeeded);
-  const error = withExhaustedFacts(v.capture_error, status, v, factsNeeded);
-  if (status !== v.capture_status || error !== v.capture_error) {
-    await setCaptureStatusIfUnchanged(db, v, status, error);
+  const { capture_status: status, facts_status: factsStatus } = statusPair(v, factsNeeded);
+  const error = withExhaustedFacts(v.capture_error, factsStatus);
+  if (status !== v.capture_status || error !== v.capture_error || factsStatus !== v.facts_status) {
+    await setCaptureStatusIfUnchanged(db, v, status, error, factsStatus);
   }
 }
 
@@ -120,10 +143,9 @@ function withErrors(existing: string | null, replace: readonly Capture[], fresh:
   return parts.length === 0 ? null : parts.join("; ");
 }
 
-/** A failed version must name what is missing: facts that can no longer be started say so. */
-function withExhaustedFacts(error: string | null, status: CaptureStatus, v: StatusInput, factsNeeded: boolean): string | null {
-  const factsMissing = factsNeeded && v.facts_json === null && v.screenshot_key !== null && v.html_key !== null;
-  if (status !== "failed" || !factsMissing || (error ?? "").split("; ").some((p) => captureOf(p) === "facts")) return error;
+/** Facts that are unavailable must name why: facts that could no longer be started say so. */
+function withExhaustedFacts(error: string | null, factsStatus: FactsStatus): string | null {
+  if (factsStatus !== "unavailable" || (error ?? "").split("; ").some((p) => captureOf(p) === "facts")) return error;
   return withErrors(error, [], ["facts: no_attempts_left"]);
 }
 
@@ -225,7 +247,10 @@ async function capture(env: Env, versionId: string): Promise<void> {
 
   // Nothing left that could cost money: settle the status and stop.
   if (!wantShot && !wantSource && !factsMissing) {
-    if (version.capture_status !== "complete") await updateCapture(db, versionId, { capture_status: "complete" });
+    const settled = statusPair(version, factsNeeded);
+    if (version.capture_status !== settled.capture_status || version.facts_status !== settled.facts_status) {
+      await updateCapture(db, versionId, settled);
+    }
     return;
   }
 
@@ -258,9 +283,9 @@ async function capture(env: Env, versionId: string): Promise<void> {
   // Read the row again: the captures wrote their keys, and a facts result may have landed.
   const now = await getVersion(db, versionId);
   if (now === null) return;
-  const status = captureStatusFor(now, factsNeeded);
-  const error = withExhaustedFacts(withErrors(now.capture_error, ["screenshot", "source"], failures), status, now, factsNeeded);
-  await updateCapture(db, versionId, { capture_status: status, capture_error: error });
+  const settled = statusPair(now, factsNeeded);
+  const error = withExhaustedFacts(withErrors(now.capture_error, ["screenshot", "source"], failures), settled.facts_status);
+  await updateCapture(db, versionId, { ...settled, capture_error: error });
   // A facts result can land between that read and that write; read once more and settle.
   const after = await getVersion(db, versionId);
   await settleStatus(db, after, factsNeeded);
@@ -379,7 +404,7 @@ async function settleFailedStart(db: D1Database, versionId: string, token: strin
     {
       agent_run_id: refused ? null : undefined,
       // It was a facts candidate, so it needs facts.
-      capture_status: captureStatusFor({ ...v, capture_attempts: v.capture_attempts + added }, true),
+      ...statusPair({ ...v, capture_attempts: v.capture_attempts + added }, true),
       capture_error: withErrors(v.capture_error, ["facts"], [`facts: ${code}`]),
     },
     added,
@@ -424,7 +449,7 @@ export async function recordFactsResult(
       const factsJson = JSON.stringify(facts);
       const row = await updateIfFactsHolder(db, version.id, runId, {
         facts_json: factsJson,
-        capture_status: captureStatusFor({ ...version, facts_json: factsJson }, factsNeeded),
+        ...statusPair({ ...version, facts_json: factsJson }, factsNeeded),
         capture_error: withErrors(version.capture_error, ["facts"], []),
       });
       await settleStatus(db, row, factsNeeded);
@@ -436,7 +461,7 @@ export async function recordFactsResult(
         runId,
         {
           agent_run_id: null,
-          capture_status: captureStatusFor({ ...version, capture_attempts: version.capture_attempts + 1 }, factsNeeded),
+          ...statusPair({ ...version, capture_attempts: version.capture_attempts + 1 }, factsNeeded),
           capture_error: withErrors(version.capture_error, ["facts"], [`facts: ${reason}`]),
         },
         1,

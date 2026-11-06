@@ -90,6 +90,7 @@ function versionInput(over: Partial<VersionRow> = {}): VersionRow {
     capture_attempts: 0,
     agent_run_id: null,
     notes: null,
+    facts_status: "pending",
     ...over,
   };
 }
@@ -339,6 +340,7 @@ describe("versions", () => {
       judgment_summary: "first sight",
     });
     expect(await getVersion(db, "v1")).toEqual({
+      facts_status: "pending",
       id: "v1",
       page_id: "page-1",
       run_id: "run-1",

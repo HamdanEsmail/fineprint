@@ -129,6 +129,10 @@ Normalization, in order:
 - Keep every number. Prices, limits, fees and dates in content are the signal.
 - Because raw payloads are kept in R2, a wrong rule is recoverable: an admin `POST /api/pages/:id/replay` re-runs the gate over stored raw payloads and creates the versions it should have created (screenshots for replayed versions are taken at replay time and marked as such).
 
+Two more rules apply to a read that really differs from the latest version:
+- **Partial render.** A read that is much shorter than the latest version (under 70% of its normalized length, or under 500 characters against a page of over 2,000) and only loses content (no block is added) is probably a page that rendered in part. It creates no version; the run is suppressed with the reason `partial_render`, and the page is marked for a confirm read, which the hourly job pulls within 24 hours. When the next read has the same normalized text as the suspect one, the two agree and a version is created, with a note naming the suspect run. Any other next read is judged on its own and the mark is cleared.
+- **Flap.** A read whose normalized text equals any version of the page captured in the last 72 hours is suppressed with the reason `flap`: a page that alternates between renderings does not make a version each time.
+
 Store the normalized text's hash on each version. The gate compares hashes, then falls back to a line diff only to produce the structured diff later. The suppressed count per page is shown in the UI and the stats endpoint ("Fineprint suppressed 37 noise events across 20 pages").
 
 `judgment.is_relevant` from TinyFish is stored and shown, but it does **not** decide whether a version is created. It decides whether the facts extraction (Agent) runs and how the change is labelled in the feed.

@@ -7,7 +7,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { adminOnly, isAdmin } from "../auth";
-import { captureVersion } from "../capture";
+import { captureVersion, needsFacts } from "../capture";
 import { MAX_MONITORS, PUBLIC_ADDS_PER_IP_PER_DAY, PUBLIC_SLOTS, PUBLIC_TTL_DAYS } from "../core/limits";
 import { hashText, normalize } from "../core/normalize";
 import { cronForIndex, PURPOSE } from "../core/schedule";
@@ -222,7 +222,7 @@ const isUniqueViolation = (err: unknown): boolean => err instanceof Error && /UN
 /** When the next public slot frees up: the earliest expiry among live public pages. */
 async function nextPublicSlotAt(db: D1Database): Promise<string | null> {
   const expiries = (await listPages(db))
-    .filter((p) => p.added_by === "public" && p.status !== "expired" && p.expires_at !== null)
+    .filter((p) => p.added_by === "public" && p.status !== "expired" && p.status !== "retired" && p.expires_at !== null)
     .map((p) => p.expires_at as string)
     .sort();
   return expiries[0] ?? null;
@@ -454,6 +454,7 @@ async function createPage(c: AppContext, req: NewPageRequest): Promise<Response>
         normalized_hash: await hashText(normalize(monitor.baselineText, ignorePatterns).text),
         judgment_summary: null,
         capture_status: "pending",
+        facts_status: needsFacts({ kind: fields.kind ?? "other" }, { is_baseline: 1 }, null) ? "pending" : "not_needed",
       });
     }
   } catch (err) {
@@ -508,7 +509,9 @@ pagesRouter.patch("/:id", adminOnly, async (c) => {
   // Schedule and purpose live on TinyFish too: one PATCH that always carries schedule_cron
   // (TinyFish rejects an edit without it), and D1 changes only if TinyFish accepted it.
   if (scheduleCron !== undefined || purpose !== undefined) {
-    if (page.status === "expired" || page.monitor_id === null) return c.json({ error: "page_expired" }, 409);
+    if (page.status === "expired" || page.status === "retired" || page.monitor_id === null) {
+      return c.json({ error: "page_expired" }, 409);
+    }
     const cron = scheduleCron ?? page.schedule_cron;
     if (cron === null) {
       return c.json({ error: "invalid_schedule_cron", reason: "This page has no stored schedule; send schedule_cron" }, 400);
