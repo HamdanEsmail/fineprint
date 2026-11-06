@@ -12,7 +12,7 @@
 // by similarity once SIMILARITY_BUDGET bigram operations are spent.
 
 import { diffArrays } from "diff";
-import { LAYOUT_ONLY_MIN_BLOCKS, LAYOUT_ONLY_MIN_OVERLAP, LAYOUT_ONLY_MIN_SKEW } from "./limits";
+import { LAYOUT_ONLY_MAX_REGION_CHARS, LAYOUT_ONLY_MIN_BLOCKS, LAYOUT_ONLY_MIN_OVERLAP, LAYOUT_ONLY_MIN_SKEW } from "./limits";
 
 export type Block = {
   /** Text of the nearest heading at or above the block ("" before the first heading). */
@@ -412,11 +412,11 @@ export function factCounts(diff: FactsDiff | null): BlockCounts | null {
 
 // The words of a text, lower-cased: letters, digits and the marks that sit inside a figure.
 const WORD_RE = /[\p{L}\p{N}$€£.,%/-]+/gu;
-// A dollar price ("$20", "US$ 1,200.50"). The validation of 6 Nov used prices only: counting every number
-// as well would miss the OpenAI privacy policy, whose restructure also moved a few dates.
+// A dollar price ("$20", "US$ 1,200.50"). Prices only: counting every number as well would miss the OpenAI
+// privacy policy (3 Nov), whose restructure also moved a few dates, on the changed region as on the whole page.
 const PRICE_RE = /(?:US)?\$\s?\d[\d,]*(?:\.\d+)?/g;
 
-/** Shared share of two word multisets: 2 × |A ∩ B| / (|A| + |B|). */
+/** Shared share of two word multisets: 2 × |A ∩ B| / (|A| + |B|); 0 when both are empty. */
 function wordOverlap(before: string, after: string): number {
   const counts = new Map<string, number>();
   let left = 0;
@@ -441,19 +441,48 @@ function wordOverlap(before: string, after: string): number {
 const priceTokens = (text: string): string => [...new Set(text.match(PRICE_RE) ?? [])].sort().join(" ");
 
 /**
- * Whether a change only restructured the page: the same words and figures, a different block structure
- * (the GitHub pricing table on 5 Nov, rows merged into one table). True when all four hold, on the
- * normalized texts: at least LAYOUT_ONLY_MIN_BLOCKS blocks added plus removed, a block skew
- * |added − removed| / (added + removed) of at least LAYOUT_ONLY_MIN_SKEW, the same set of price tokens on
- * both sides, and a word overlap of at least LAYOUT_ONLY_MIN_OVERLAP. The cheap tests come first, so most
- * changes never count a word. A label only: the version, its screenshot and its diff stay.
+ * The changed region of a diff as its two sides: what went (the removed blocks and the before side of the
+ * changed ones) and what came (the added blocks and the after side of the changed ones), each one text.
+ * Unchanged blocks are in neither, so the region is as large as the change, not the page.
  */
-export function isLayoutOnly(before: string, after: string, blocks: BlockCounts): boolean {
-  const touched = blocks.added + blocks.removed;
+export function changedRegion(diff: StructuredDiff): { went: string; came: string } {
+  return {
+    went: [...diff.removed.map((b) => b.text), ...diff.changed.map((c) => c.before)].join("\n"),
+    came: [...diff.added.map((b) => b.text), ...diff.changed.map((c) => c.after)].join("\n"),
+  };
+}
+
+/** The word overlap of a diff's changed region (see changedRegion): 0 for a pure addition or a pure removal. */
+export function changedRegionOverlap(diff: StructuredDiff): number {
+  const { went, came } = changedRegion(diff);
+  return wordOverlap(went, came);
+}
+
+/**
+ * Whether a change only restructured the page: the same words and figures in a different block structure
+ * (the GitHub pricing table on 5 Nov, rows merged into one table). True when all hold, on the diff of the
+ * normalized texts: at least LAYOUT_ONLY_MIN_BLOCKS blocks added plus removed, a block skew
+ * |added − removed| / (added + removed) of at least LAYOUT_ONLY_MIN_SKEW, a changed region of at most
+ * LAYOUT_ONLY_MAX_REGION_CHARS characters, the same set of price tokens on both sides of the region, and a
+ * word overlap of at least LAYOUT_ONLY_MIN_OVERLAP between them (ruling, 7 Nov). The overlap is taken
+ * over the changed region only, so a pure addition (nothing went) scores 0 however large the page, and the
+ * label's cost grows with the change, not the page. The cheap tests come first, so most changes never
+ * count a word. A label only: it never suppresses or holds back a version or a summary.
+ */
+export function isLayoutOnly(diff: StructuredDiff): boolean {
+  const added = diff.added.length;
+  const removed = diff.removed.length;
+  const touched = added + removed;
   if (touched < LAYOUT_ONLY_MIN_BLOCKS) return false;
-  if (Math.abs(blocks.added - blocks.removed) / touched < LAYOUT_ONLY_MIN_SKEW) return false;
-  if (priceTokens(before) !== priceTokens(after)) return false;
-  return wordOverlap(before, after) >= LAYOUT_ONLY_MIN_OVERLAP;
+  if (Math.abs(added - removed) / touched < LAYOUT_ONLY_MIN_SKEW) return false;
+  let chars = 0;
+  for (const b of diff.removed) chars += b.text.length;
+  for (const b of diff.added) chars += b.text.length;
+  for (const c of diff.changed) chars += c.before.length + c.after.length;
+  if (chars > LAYOUT_ONLY_MAX_REGION_CHARS) return false;
+  const { went, came } = changedRegion(diff);
+  if (priceTokens(went) !== priceTokens(came)) return false;
+  return wordOverlap(went, came) >= LAYOUT_ONLY_MIN_OVERLAP;
 }
 
 // --- Facts diff ---------------------------------------------------------------

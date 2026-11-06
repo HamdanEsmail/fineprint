@@ -416,21 +416,6 @@ export async function setSummaryIfMissing(db: D1Database, id: string, summary: s
   return result.meta.changes === 1;
 }
 
-/**
- * Stores a version's diff summary and, unless it has one, its delta, in one statement, only while the
- * version still has no summary (a stored summary is never replaced). True when it was written.
- */
-export async function setDiffSummaryAndDelta(db: D1Database, id: string, summary: string, deltaJson: string): Promise<boolean> {
-  const result = await db
-    .prepare(
-      `UPDATE versions SET summary = ?1, summary_source = 'diff', delta_json = COALESCE(delta_json, ?2)
-       WHERE id = ?3 AND summary IS NULL`,
-    )
-    .bind(summary, deltaJson, id)
-    .run();
-  return result.meta.changes === 1;
-}
-
 // --- Deltas ----------------------------------------------------------------------
 //
 // A non-baseline version's delta (src/core/diff.ts Delta) is computed out of band with its diff summary
@@ -555,8 +540,25 @@ export async function setThumbKey(db: D1Database, id: string, key: string): Prom
   return result.meta.changes === 1;
 }
 
-/** Which real changes a feed query covers; see listChanges. */
-export type ChangeFilter = { sinceIso?: string | null; beforeIso?: string | null; includeRetired?: boolean };
+/**
+ * A version's layout-only label as SQL over `versions v`, read from its stored delta: 1 when labelled, 0
+ * when not, when it has no delta yet, or when the stored delta cannot be read.
+ */
+export const LAYOUT_ONLY_SQL = "COALESCE(CASE WHEN json_valid(v.delta_json) THEN json_extract(v.delta_json, '$.layout_only') END, 0)";
+
+/** A page that is not retired, as SQL over `pages p` (a page whose status is NULL is not retired). */
+export const NOT_RETIRED_SQL = "(p.status IS NULL OR p.status != 'retired')";
+
+/**
+ * Which real changes a feed query covers; see listChanges. `excludeLayoutOnly` leaves out the changes
+ * labelled layout only (the home screen's count, which agrees with Stats.changes); the feed keeps them.
+ */
+export type ChangeFilter = {
+  sinceIso?: string | null;
+  beforeIso?: string | null;
+  includeRetired?: boolean;
+  excludeLayoutOnly?: boolean;
+};
 
 /**
  * The WHERE clause shared by listChanges and countChanges, over `versions v JOIN pages p`. A page
@@ -573,7 +575,8 @@ function changeWhere(filter: ChangeFilter): { where: string; binds: unknown[] } 
     where.push("v.captured_at < ?");
     binds.push(filter.beforeIso);
   }
-  if (filter.includeRetired === false) where.push("(p.status IS NULL OR p.status != 'retired')");
+  if (filter.includeRetired === false) where.push(NOT_RETIRED_SQL);
+  if (filter.excludeLayoutOnly === true) where.push(`${LAYOUT_ONLY_SQL} = 0`);
   return { where: where.join(" AND "), binds };
 }
 

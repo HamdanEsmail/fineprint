@@ -74,16 +74,23 @@ export const LAYOUT_HOLD_MAX_ADDED_SHARE = 0.05;
 export const CONFIRM_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
- * The layout-only label (src/core/diff.ts isLayoutOnly). A label, never a suppression: a change whose
- * normalized texts share at least LAYOUT_ONLY_MIN_OVERLAP of their words, carry the same price tokens,
- * touch at least LAYOUT_ONLY_MIN_BLOCKS blocks (added plus removed) and are skewed at least
- * LAYOUT_ONLY_MIN_SKEW one way (|added − removed| / (added + removed)). Validated on 6 Nov against the
- * 15 changes recorded so far: it marks GitHub pricing 5 Nov 14:38 and OpenAI privacy policy 3 Nov 18:06
- * and no other.
+ * The layout-only label (src/core/diff.ts isLayoutOnly). A label, never a suppression: a change that touches
+ * at least LAYOUT_ONLY_MIN_BLOCKS blocks (added plus removed), is skewed at least LAYOUT_ONLY_MIN_SKEW one
+ * way (|added − removed| / (added + removed)), and whose changed region (what went against what came)
+ * carries the same price tokens on both sides and shares at least LAYOUT_ONLY_MIN_OVERLAP of its words.
+ * Validated on 7 Nov against the 15 changes recorded so far: it marks GitHub pricing 5 Nov 14:38 (region
+ * overlap 0.925) and OpenAI privacy policy 3 Nov 18:06 (0.878) and no other; a pure addition scores 0.
  */
-export const LAYOUT_ONLY_MIN_OVERLAP = 0.9;
+export const LAYOUT_ONLY_MIN_OVERLAP = 0.85;
 export const LAYOUT_ONLY_MIN_BLOCKS = 20;
 export const LAYOUT_ONLY_MIN_SKEW = 0.4;
+/**
+ * A changed region longer than this (both sides together, in characters) is not labelled, and no word is
+ * counted. The two labelled restructures are 27,613 (GitHub) and 28,950 (OpenAI privacy) characters, so
+ * this leaves them room; counting the words of 40,000 characters takes about 2.5 ms, which keeps the label
+ * a small part of a delta's CPU even beside two 228 KB normalizations.
+ */
+export const LAYOUT_ONLY_MAX_REGION_CHARS = 40_000;
 /** A read whose text equals any version captured this recently is a flap, not a new version. */
 export const FLAP_WINDOW_MS = 72 * 60 * 60 * 1000;
 

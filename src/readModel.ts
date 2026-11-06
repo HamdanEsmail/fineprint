@@ -9,7 +9,12 @@ import { PRICES, type SpendKind } from "./core/spend";
 import { publicSlotUsage } from "./db/pages";
 import { countNoiseByReason, countRunsByTrigger } from "./db/runs";
 import type { FactsStatus, PageKind, PageStatus, SummarySource, TriggerKind } from "./db/types";
-import { countChanges as countChangeRows, listChanges as listChangeRows } from "./db/versions";
+import {
+  countChanges as countChangeRows,
+  LAYOUT_ONLY_SQL,
+  listChanges as listChangeRows,
+  NOT_RETIRED_SQL,
+} from "./db/versions";
 import type { Env } from "./env";
 import { objectUrls, parseDelta, thumbUrl } from "./handlers/versionJson";
 
@@ -90,10 +95,18 @@ export async function listChanges(
 
 /**
  * How many real changes `listChanges` would list for `since` (inclusive) with no limit, in one COUNT.
- * Retired pages are in unless `includeRetired` is false.
+ * Retired pages are in unless `includeRetired` is false; layout-only changes are in unless
+ * `excludeLayoutOnly` is true (the home screen's count, which then agrees with Stats.changes).
  */
-export function countChanges(env: Env, opts: { since?: string; includeRetired?: boolean }): Promise<number> {
-  return countChangeRows(env.DB, { sinceIso: opts.since ?? null, includeRetired: opts.includeRetired ?? true });
+export function countChanges(
+  env: Env,
+  opts: { since?: string; includeRetired?: boolean; excludeLayoutOnly?: boolean },
+): Promise<number> {
+  return countChangeRows(env.DB, {
+    sinceIso: opts.since ?? null,
+    includeRetired: opts.includeRetired ?? true,
+    excludeLayoutOnly: opts.excludeLayoutOnly ?? false,
+  });
 }
 
 /** How many retired pages hold at least one real change: their record is kept, out of the feed. */
@@ -143,10 +156,6 @@ export type Stats = {
   public_slots: { total: number; used: number; next_free_at: string | null };
 };
 
-// A version's layout-only label, read from its stored delta; 0 when it has no delta (or one that cannot be read).
-const LAYOUT_ONLY = "COALESCE(CASE WHEN json_valid(v.delta_json) THEN json_extract(v.delta_json, '$.layout_only') END, 0)";
-const NOT_RETIRED = "(p.status IS NULL OR p.status != 'retired')";
-
 export async function getStats(env: Env): Promise<Stats> {
   const db = env.DB;
   const [totals, spendRows, statusRows, runsByTrigger, noiseReasons, slots] = await Promise.all([
@@ -158,9 +167,9 @@ export async function getStats(env: Env): Promise<Stats> {
            (SELECT COUNT(*) FROM versions) AS versions,
            (SELECT COUNT(*) FROM versions WHERE is_baseline = 0) AS catches,
            (SELECT COUNT(*) FROM versions v JOIN pages p ON p.id = v.page_id
-              WHERE v.is_baseline = 0 AND ${NOT_RETIRED} AND ${LAYOUT_ONLY} = 0) AS changes,
+              WHERE v.is_baseline = 0 AND ${NOT_RETIRED_SQL} AND ${LAYOUT_ONLY_SQL} = 0) AS changes,
            (SELECT COUNT(*) FROM versions v JOIN pages p ON p.id = v.page_id
-              WHERE v.is_baseline = 0 AND ${NOT_RETIRED} AND ${LAYOUT_ONLY} = 1) AS layout_only,
+              WHERE v.is_baseline = 0 AND ${NOT_RETIRED_SQL} AND ${LAYOUT_ONLY_SQL} = 1) AS layout_only,
            (SELECT MIN(created_at) FROM pages) AS recording_since,
            (SELECT COUNT(*) FROM runs WHERE noise_suppressed = 1) AS noise_suppressed,
            (SELECT COUNT(*) FROM versions WHERE facts_status = 'unavailable') AS facts_unavailable,

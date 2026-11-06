@@ -59,7 +59,8 @@ siteRouter.get("/", async (c) => {
   const [stats, changes, weekCount, retiredWithChanges] = await Promise.all([
     getStats(c.env),
     listChanges(c.env, { before: before ?? undefined, limit: FEED_SIZE + 1, includeRetired: false }),
-    countChanges(c.env, { since, includeRetired: false }),
+    // The hero counts what Stats.changes counts: no retired page, no layout-only change (the feed lists those).
+    countChanges(c.env, { since, includeRetired: false, excludeLayoutOnly: true }),
     countRetiredPagesWithChanges(c.env),
   ]);
   return render(

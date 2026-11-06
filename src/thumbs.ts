@@ -10,24 +10,23 @@ import type { Env } from "./env";
 import { thumbnailsOfShots } from "./tinyfish/browser";
 
 /**
- * Makes the thumbnails of these versions (each must have a stored screenshot) in one browser session, stores
- * each at `thumbs/<id>.jpg` and records its key. Returns how many it made. Nothing is opened at the spend
- * pause, or for an empty list. A version whose image did not load is skipped; a later call can try again.
+ * Makes the thumbnails of these versions (each must have a stored screenshot) in one browser session, and
+ * stores each at `thumbs/<id>.jpg` and records its key as soon as it is made, while the session goes on, so
+ * a call that is cut off keeps what it made. Returns how many it made. Nothing is opened at the spend pause,
+ * or for an empty list. A version whose image did not load is skipped; a later call can try again.
  */
 export async function thumbnailFromScreenshot(env: Env, versionIds: string[]): Promise<number> {
   if (versionIds.length === 0 || (await spendPaused(env.DB))) return 0;
   const base = env.PUBLIC_BASE_URL.replace(/\/+$/, "");
-  const shots = await thumbnailsOfShots(
+  let made = 0;
+  await thumbnailsOfShots(
     env,
     versionIds.map((id) => ({ id, imageUrl: `${base}/shots/${id}.jpg` })),
+    async (id, thumb) => {
+      const key = `thumbs/${id}.jpg`;
+      await env.STORE.put(key, thumb, { httpMetadata: { contentType: "image/jpeg" } });
+      if (await setThumbKey(env.DB, id, key)) made++;
+    },
   );
-  let made = 0;
-  for (const id of versionIds) {
-    const thumb = shots.get(id);
-    if (!thumb) continue;
-    const key = `thumbs/${id}.jpg`;
-    await env.STORE.put(key, thumb, { httpMetadata: { contentType: "image/jpeg" } });
-    if (await setThumbKey(env.DB, id, key)) made++;
-  }
   return made;
 }

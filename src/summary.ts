@@ -13,20 +13,13 @@
 //
 // The delta's facts part needs both versions' facts, which land minutes after the version: it is null until
 // then, and the delta fill adds it once both are stored (no text is read for that). The summary never waits
-// for facts.
+// for facts, nor for the delta: a missing summary is written first, in a write of its own, and only then is
+// the delta (with its layout-only label, whose cost grows with the size of the change) worked out.
 //
 // Computing a delta is also when a diff summary stored under the old line rule is rebuilt: each version gets
 // its delta once, so each stored diff summary is rebuilt once, from the diff the delta needs anyway. A
 // TinyFish summary is never touched.
-import {
-  blockCounts,
-  factCounts,
-  factsDiff,
-  isLayoutOnly,
-  structuredDiff,
-  type Delta,
-  type StructuredDiff,
-} from "./core/diff";
+import { blockCounts, factCounts, factsDiff, isLayoutOnly, structuredDiff, type Delta, type StructuredDiff } from "./core/diff";
 import { readIgnorePatterns } from "./core/gate";
 import { FILL_DIFFS_PER_CALL, SUMMARY_TEXT_BUDGET_CHARS } from "./core/limits";
 import { normalize } from "./core/normalize";
@@ -37,7 +30,6 @@ import {
   factsDeltaCandidates,
   replaceDeltas,
   setDeltaOnce,
-  setDiffSummaryAndDelta,
   setSummaryIfMissing,
   setTinyFishSummaries,
   versionMissingDelta,
@@ -116,63 +108,77 @@ function logError(what: string, err: unknown): void {
 
 // --- One version ------------------------------------------------------------------------------------
 
-/** A version diffed against the one before it: the normalized new text, the diff and the delta. */
-type Diffed = { next: string; diff: StructuredDiff; delta: Delta };
+/** A version diffed against the one before it: the normalized new text and the structured diff. */
+type Diffed = { next: string; diff: StructuredDiff };
+
+type Facts = { facts_json: string | null };
 
 /**
  * Diffs a version against the version captured before it (an empty page when there is none), both texts
- * normalized with the page's current ignore patterns, and works out its delta. The facts part is null
- * while either version has no stored facts. Throws on a row it cannot read (a NULL text).
+ * normalized with the page's current ignore patterns. Throws on a row it cannot read (a NULL text).
  */
-function diffVersion(v: { text: string; facts_json: string | null }, previous: { text: string | null; facts_json: string | null } | null, ignorePatterns: string): Diffed {
+function diffVersion(v: { text: string }, previous: { text: string | null } | null, ignorePatterns: string): Diffed {
   const patterns = readIgnorePatterns(ignorePatterns);
   const next = normalize(v.text, patterns).text;
   const prev = previous === null ? "" : normalize(previous.text as string, patterns).text;
-  const diff = structuredDiff(prev, next);
-  const blocks = blockCounts(diff);
-  return {
-    next,
-    diff,
-    delta: {
-      blocks,
-      facts: factCounts(factsDiff(parseFacts(previous?.facts_json ?? null), parseFacts(v.facts_json))),
-      layout_only: isLayoutOnly(prev, next, blocks),
-    },
-  };
+  return { next, diff: structuredDiff(prev, next) };
 }
 
-/** What filling one version wrote. */
-type Filled = { summary: boolean; delta: boolean; rebuilt: boolean };
+/**
+ * A diffed version's delta: its block counts, its facts (null while either version has no stored facts)
+ * and the layout-only label, which looks only at the changed region and is bounded by
+ * LAYOUT_ONLY_MAX_REGION_CHARS.
+ */
+const deltaOf = (diff: StructuredDiff, v: Facts, previous: Facts | null): Delta => ({
+  blocks: blockCounts(diff),
+  facts: factCounts(factsDiff(parseFacts(previous?.facts_json ?? null), parseFacts(v.facts_json))),
+  layout_only: isLayoutOnly(diff),
+});
 
-const NOTHING: Filled = { summary: false, delta: false, rebuilt: false };
+/** What filling one version wrote; `failed` when its summary was written but its delta could not be. */
+type Filled = { summary: boolean; delta: boolean; rebuilt: boolean; failed: boolean };
+
+const NOTHING: Filled = { summary: false, delta: false, rebuilt: false, failed: false };
 
 /**
  * Fills what one non-baseline version is missing, from one read of it and the version before it:
- * - no summary: TinyFish's when its run had one (no diff), else the diff line, stored with the delta;
+ * - no summary: TinyFish's when its run had one (no diff), else the diff line, stored at once, in a write
+ *   of its own, before the delta is worked out; so a delta that fails (or runs out of time) never costs
+ *   the summary;
  * - no delta: the delta, and a diff summary stored under the old line rule is rebuilt from the same diff
- *   (dropping the cached diffs that end at the version when the line changes).
+ *   (dropping the cached diffs that end at the version when the line changes), in one write with the
+ *   delta.
  * Never replaces a stored delta or a TinyFish summary. A baseline, or a version with nothing missing, is
- * left alone. Throws on a row it cannot read.
+ * left alone. Throws on a row it cannot read; a delta that fails after the summary was written is logged
+ * and reported as `failed`.
  */
 async function fillVersion(db: D1Database, id: string, ignorePatterns: string): Promise<Filled> {
   const v = await versionWithPrevious(db, id);
   if (v === null || v.is_baseline === 1) return NOTHING;
   const previous = v.previous_id === null ? null : { text: v.previous_text, facts_json: v.previous_facts_json };
-
   if (v.summary === null) {
     const fromTinyFish = oneLine(v.judgment_summary);
     if (fromTinyFish !== null) return { ...NOTHING, summary: await setSummaryIfMissing(db, id, fromTinyFish, "tinyfish") };
-    const d = diffVersion(v, previous, ignorePatterns);
-    const written = await setDiffSummaryAndDelta(db, id, diffSummary(d.diff, d.next), JSON.stringify(d.delta));
-    return { summary: written, delta: written && v.delta_json === null, rebuilt: false };
+  } else if (v.delta_json !== null) {
+    return NOTHING;
   }
-  if (v.delta_json !== null) return NOTHING;
 
   const d = diffVersion(v, previous, ignorePatterns);
-  const line = v.summary_source === "diff" ? diffSummary(d.diff, d.next) : null;
-  const rebuilt = line !== null && line !== v.summary;
-  const stored = await setDeltaOnce(db, id, JSON.stringify(d.delta), rebuilt ? line : null);
-  return { summary: false, delta: stored, rebuilt: stored && rebuilt };
+  const out: Filled = { ...NOTHING };
+  if (v.summary === null) out.summary = await setSummaryIfMissing(db, id, diffSummary(d.diff, d.next), "diff");
+  if (v.delta_json !== null) return out;
+  try {
+    const delta = deltaOf(d.diff, v, previous);
+    const line = v.summary_source === "diff" ? diffSummary(d.diff, d.next) : null;
+    const rebuilt = line !== null && line !== v.summary;
+    out.delta = await setDeltaOnce(db, id, JSON.stringify(delta), rebuilt ? line : null);
+    out.rebuilt = out.delta && rebuilt;
+  } catch (err) {
+    if (!out.summary) throw err;
+    logError(`delta of version ${id} failed after its summary was stored`, err);
+    out.failed = true;
+  }
+  return out;
 }
 
 /**
@@ -220,7 +226,9 @@ async function fillBatch(
     chars += pairLength(candidate);
     diffs++;
     try {
-      add(await fillVersion(db, candidate.id, candidate.ignore_patterns));
+      const filled = await fillVersion(db, candidate.id, candidate.ignore_patterns);
+      add(filled);
+      if (filled.failed) oversized.push(candidate.id);
     } catch (err) {
       logError(`fill of version ${candidate.id} failed`, err);
       oversized.push(candidate.id);

@@ -124,7 +124,8 @@ type JudgedPage = Pick<PageRow, "id" | "ignore_patterns"> &
  * - The partial-render guard (looksPartial), then the layout hold (looksLikeLayoutHold), unless this read
  *   is the confirm of a pending suspect: the page has a pending read (pending_at within 24 hours) with the
  *   same hash, so two consecutive reads agree. A suspect read makes no version; the caller marks the page
- *   for a confirm read. The confirm's version notes which of the two held the first read.
+ *   for a confirm read. A confirm read runs neither check (no block diff on the webhook path for it), so its
+ *   version's note names the suspect run, not the rule; the run's noise_reason says which rule held it.
  * - Flap suppression: a hash equal to any version of the page captured in the last 72 hours is a
  *   flap, a confirm read included. (The latest-equal case above is checked first.)
  * - Otherwise a new version; a confirm read's carries a note naming the suspect run.
@@ -160,10 +161,12 @@ export async function judgeChange(
     return { kind: "suppressed", reason: "normalized_identical", heal: { versionId: latest.id, hash }, ...clear };
   }
 
-  const partial = previousNormalized !== null && looksPartial(previousNormalized, newNormalized);
-  if (!confirming && partial) return { kind: "partial_suspect", hash };
-  const held = !partial && previousNormalized !== null && looksLikeLayoutHold(previousNormalized, newNormalized);
-  if (!confirming && held) return { kind: "layout_hold", hash };
+  if (!confirming && previousNormalized !== null && looksPartial(previousNormalized, newNormalized)) {
+    return { kind: "partial_suspect", hash };
+  }
+  if (!confirming && previousNormalized !== null && looksLikeLayoutHold(previousNormalized, newNormalized)) {
+    return { kind: "layout_hold", hash };
+  }
   const bounds = opts.replay ? { untilIso: new Date(nowMs).toISOString(), exceptVersionId: opts.replay.exceptVersionId } : {};
   if (await hasVersionWithHashSince(db, page.id, hash, new Date(nowMs - FLAP_WINDOW_MS).toISOString(), bounds)) {
     return { kind: "suppressed", reason: "flap", heal: null, ...clear };
@@ -172,7 +175,7 @@ export async function judgeChange(
     kind: "new_version",
     hash,
     baseline: false,
-    ...(confirming ? { notes: `confirmed after ${held ? "layout-hold" : "partial-render"} suspect run ${page.pending_run_id}` } : {}),
+    ...(confirming ? { notes: `confirmed after suspect run ${page.pending_run_id}` } : {}),
     ...clear,
   };
 }

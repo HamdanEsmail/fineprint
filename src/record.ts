@@ -5,6 +5,7 @@
 // spend, and starts the new version's capture in the caller's own invocation.
 import { captureVersion, needsFacts } from "./capture";
 import type { Verdict } from "./core/gate";
+import { CONFIRM_WINDOW_MS } from "./core/limits";
 import { PRICES, recordSpendOnce } from "./core/spend";
 import { oneLine } from "./core/summary";
 import { clearPullFailures, updatePage } from "./db/pages";
@@ -48,6 +49,17 @@ export type Recorded =
 
 /** A page patch that ends a pending confirm read. */
 const NO_PENDING = { pending_hash: null, pending_run_id: null, pending_at: null } as const;
+
+/**
+ * When a held page's confirm window starts: a suspect read that replaces a pending one still inside its
+ * 24-hour window keeps that window's start, so a page whose reads keep differing and never agree is
+ * confirmed (pulled hourly) for 24 hours from its first suspect read, not for as long as suspects keep
+ * coming. Otherwise the window starts with this read.
+ */
+function pendingSince(page: Pick<PageRow, "pending_at">, receivedAt: string): string {
+  const since = page.pending_at === null ? NaN : Date.parse(page.pending_at);
+  return Number.isFinite(since) && Date.parse(receivedAt) - since <= CONFIRM_WINDOW_MS ? page.pending_at! : receivedAt;
+}
 
 function logError(what: string, err: unknown): void {
   console.error(what, err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 200) : "unknown error");
@@ -105,7 +117,7 @@ export async function recordMonitorRun(
       // No version: the page is held for a confirm read (the cron pulls it within the hour).
       await markNoise(db, runId, verdict.kind === "layout_hold" ? "layout_hold" : "partial_render");
       suppressed = true;
-      await updatePage(db, page.id, { pending_hash: verdict.hash, pending_run_id: runId, pending_at: receivedAt });
+      await updatePage(db, page.id, { pending_hash: verdict.hash, pending_run_id: runId, pending_at: pendingSince(page, receivedAt) });
     } else if (verdict?.kind === "suppressed") {
       await markNoise(db, runId, verdict.reason);
       suppressed = true;

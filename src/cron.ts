@@ -5,10 +5,10 @@
 // TinyFish no longer runs, retries captures that did not finish, and asks for any missing summaries
 // and deltas.
 //
-// Repair comes last and is capped (REPAIR_PER_TICK): each capture makes several outbound
-// requests, the free plan allows 50 per invocation, and a backlog must never starve the
-// cheap steps before it. Pulls are capped too (PULLS_PER_TICK), and each runs in its own Worker
-// invocation. Each step is wrapped on its own, so one failing step never stops the others, and
+// Repair comes after the cheap steps and is capped (REPAIR_PER_TICK): each capture makes several
+// outbound requests, the free plan allows 50 per invocation, and a backlog must never starve the
+// steps before it. Pulls are capped too (PULLS_PER_TICK), and each runs in its own Worker
+// invocation, as do the summary and delta fills that come last (one or two requests each). Each step is wrapped on its own, so one failing step never stops the others, and
 // runCron never throws. It logs one summary line; errors are logged by code, never with a
 // secret or page text.
 import { captureVersion, recordFactsResult, spendPaused, startNextFacts } from "./capture";

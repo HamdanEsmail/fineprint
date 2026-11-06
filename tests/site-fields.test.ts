@@ -6,7 +6,7 @@ import { applyD1Migrations, reset, SELF } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { captureDeps, captureVersion, startNextFacts } from "../src/capture";
-import { isLayoutOnly, structuredDiff } from "../src/core/diff";
+import { changedRegionOverlap, isLayoutOnly, structuredDiff } from "../src/core/diff";
 import { recordSpend } from "../src/core/spend";
 import { hashText, normalize } from "../src/core/normalize";
 import { diffSummary } from "../src/core/summary";
@@ -142,7 +142,9 @@ const bytesOf = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(
  * reply, the full-page capture (scale 1) one image and the clip (scale 0.5) another. `failThumb` makes the
  * clip fail; `imageLoads(n)` answers the n-th wait for an image.
  */
-function fakeBrowser(opts: { failThumb?: boolean; imageLoads?: (n: number) => boolean } = {}) {
+function fakeBrowser(
+  opts: { failThumb?: boolean; hangThumb?: boolean; hangClose?: boolean; imageLoads?: (n: number) => boolean; events?: string[] } = {},
+) {
   const sent: Sent[] = [];
   let sessions = 0;
   fetchMock.intercept({
@@ -163,6 +165,7 @@ function fakeBrowser(opts: { failThumb?: boolean; imageLoads?: (n: number) => bo
       server.addEventListener("message", (m) => {
         const msg = JSON.parse(String(m.data)) as Sent;
         sent.push(msg);
+        opts.events?.push(msg.method);
         const reply = (result: unknown) => server.send(JSON.stringify({ id: msg.id, result }));
         switch (msg.method) {
           case "Target.getTargets":
@@ -174,11 +177,13 @@ function fakeBrowser(opts: { failThumb?: boolean; imageLoads?: (n: number) => bo
           case "Page.captureScreenshot": {
             const scale = (msg.params.clip as { scale: number }).scale;
             if (scale !== 1 && opts.failThumb) return server.send(JSON.stringify({ id: msg.id, error: { code: -32000, message: "no clip" } }));
+            if (scale !== 1 && opts.hangThumb) return; // never answered
             return reply({ data: scale === 1 ? FULL_B64 : THUMB_B64 });
           }
           case "Runtime.evaluate":
             return reply({ result: { type: "boolean", value: opts.imageLoads?.(++waits) ?? true } });
           case "Browser.close":
+            if (opts.hangClose) return; // never answered, socket left open
             reply({});
             server.close(1000, "closed");
             return;
@@ -319,24 +324,62 @@ describe("the delta of a change", () => {
 });
 
 describe("isLayoutOnly", () => {
-  const counts = (from: string, to: string) => {
-    const d = structuredDiff(normalize(from).text, normalize(to).text);
-    return { added: d.added.length, removed: d.removed.length, changed: d.changed.length };
-  };
+  const diffOf = (from: string, to: string) => structuredDiff(normalize(from).text, normalize(to).text);
+  /** A release-notes page of `n` entries without prices, about 90 characters each. */
+  const notes = (n: number, from = 0) =>
+    Array.from({ length: n }, (_, i) => `Release entry ${from + i}: improved the workspace settings and the sharing dialog for teams.`).join("\n\n");
 
-  it("needs the same words, the same prices, at least 20 blocks touched and a skew of at least 0.4", () => {
-    const [a, b] = [normalize(rowsAsBlocks()).text, normalize(rowsAsTable()).text];
-    expect(isLayoutOnly(a, b, counts(a, b))).toBe(true);
+  it("labels rows merged into a table: same words, same prices, at least 20 blocks touched, skewed", () => {
+    expect(isLayoutOnly(diffOf(rowsAsBlocks(), rowsAsTable()))).toBe(true);
+    expect(changedRegionOverlap(diffOf(rowsAsBlocks(), rowsAsTable()))).toBeGreaterThanOrEqual(0.85);
     // A price changed.
-    const c = normalize(rowsAsTable("$25")).text;
-    expect(isLayoutOnly(a, c, counts(a, c))).toBe(false);
-    // Too few blocks touched.
-    expect(isLayoutOnly(a, b, { added: 1, removed: 18, changed: 0 })).toBe(false);
-    // Blocks moved one for one: no skew.
-    expect(isLayoutOnly(a, b, { added: 15, removed: 15, changed: 0 })).toBe(false);
+    expect(isLayoutOnly(diffOf(rowsAsBlocks(), rowsAsTable("$25")))).toBe(false);
     // Different words.
-    const d = normalize(rowsAsTable().replace(/billed yearly/g, "charged on the first of each month to the card on file")).text;
-    expect(isLayoutOnly(a, d, counts(a, d))).toBe(false);
+    expect(isLayoutOnly(diffOf(rowsAsBlocks(), rowsAsTable().replace(/billed yearly/g, "charged on the first of each month to the card on file")))).toBe(false);
+  });
+
+  it("does not label too few blocks touched, or blocks replaced one for one (no skew)", () => {
+    const nineteen = ["# Plans", "", ...Array.from({ length: 19 }, (_, i) => [`Plan ${i + 1}: $${100 + i} per month, billed yearly.`, ""]).flat()].join("\n");
+    const nineteenTable = ["# Plans", "", ...Array.from({ length: 19 }, (_, i) => `| Plan ${i + 1}: | $${100 + i} per month, billed yearly. |`)].join("\n");
+    expect(isLayoutOnly(diffOf(nineteen, nineteenTable))).toBe(false);
+    // 30 blocks each reworded in place: 30 removed and 30 added, skew 0.
+    const reworded = rowsAsBlocks().replace(/billed yearly/g, "billed yearly in advance");
+    const d = diffOf(rowsAsBlocks(), reworded);
+    expect(d.added.length - d.removed.length).toBe(0);
+    expect(isLayoutOnly(d)).toBe(false);
+  });
+
+  it("a pure addition of 20 paragraphs on a large page is not layout only, and its overlap score is 0", () => {
+    const page = notes(300);
+    expect(page.length).toBeGreaterThan(14_000);
+    const d = diffOf(page, `${notes(20, 1000)}\n\n${page}`);
+    expect([d.added.length, d.removed.length]).toEqual([20, 0]);
+    expect(changedRegionOverlap(d)).toBe(0);
+    expect(isLayoutOnly(d)).toBe(false);
+  });
+
+  it("trimming 25 old blocks while adding one new entry is not layout only", () => {
+    const page = notes(100);
+    const d = diffOf(page, `New release: the sharing dialog now lists every member of the team.\n\n${notes(75)}`);
+    expect([d.added.length, d.removed.length]).toEqual([1, 25]);
+    expect(changedRegionOverlap(d)).toBeLessThan(0.2);
+    expect(isLayoutOnly(d)).toBe(false);
+  });
+
+  it("does not count the words of a changed region over 40,000 characters", () => {
+    // The same restructure with long rows: over the cap, so no label (and no word counted).
+    const long = (table: boolean) =>
+      [
+        "# Plans",
+        "",
+        ...Array.from({ length: 30 }, (_, i) => {
+          const row = `Plan ${i + 1}: $${100 + i} per month, billed yearly. ${"Includes the full feature set for every seat. ".repeat(15)}`;
+          return table ? [`| ${row} |`] : [row, ""];
+        }).flat(),
+      ].join("\n");
+    const d = diffOf(long(false), long(true));
+    expect(changedRegionOverlap(d)).toBeGreaterThan(0.85);
+    expect(isLayoutOnly(d)).toBe(false);
   });
 });
 
@@ -392,7 +435,7 @@ describe("the layout hold", () => {
     // The second read agrees: now it is a version, with a note naming the held read.
     const second = await pull(page.id, "tf-confirm", SHRUNK);
     expect(second.version_id).toBeTypeOf("string");
-    expect(await versionRow(second.version_id)).toMatchObject({ text: SHRUNK, notes: `confirmed after layout-hold suspect run ${run!.id}` });
+    expect(await versionRow(second.version_id)).toMatchObject({ text: SHRUNK, notes: `confirmed after suspect run ${run!.id}` });
     const after = (await env.DB.prepare("SELECT * FROM pages WHERE id = ?").bind(page.id).first<PageRow>())!;
     expect([after.pending_hash, after.pending_run_id, after.pending_at]).toEqual([null, null, null]);
   });
@@ -419,6 +462,32 @@ describe("the layout hold", () => {
     const cut = Array.from({ length: 20 }, (_, i) => para(i)).join("\n\n");
     expect(await pull(page.id, "tf-cut", cut)).toMatchObject({ suppressed: true });
     expect((await all<RunRow>("SELECT * FROM runs WHERE monitor_run_id = 'tf-cut'"))[0]).toMatchObject({ noise_reason: "partial_render" });
+  });
+
+  it("a suspect that replaces a suspect keeps the first pending_at, so reads that never agree stop being confirmed after 24 hours", async () => {
+    const page = await seedPage({ kind: "policy" });
+    await seedVersion(page.id, "v-0", "2026-11-01T00:00:00.000Z", LONG, { is_baseline: 1 });
+    await pull(page.id, "tf-first", SHRUNK);
+    const first = (await env.DB.prepare("SELECT * FROM pages WHERE id = ?").bind(page.id).first<PageRow>())!;
+    // The first suspect read was 20 hours ago.
+    const twentyHoursAgo = new Date(Date.now() - 20 * 3_600_000).toISOString();
+    await env.DB.prepare("UPDATE pages SET pending_at = ? WHERE id = ?").bind(twentyHoursAgo, page.id).run();
+
+    // A different suspect read (also a shrinking restructure) replaces the pending hash and run, not the time.
+    const other = `${SHRUNK}\n\nOne more line that the second suspect read has.`;
+    expect(await pull(page.id, "tf-second", other)).toMatchObject({ suppressed: true });
+    const second = (await env.DB.prepare("SELECT * FROM pages WHERE id = ?").bind(page.id).first<PageRow>())!;
+    expect(second.pending_hash).toBe(await hashText(normalize(other).text));
+    expect(second.pending_hash).not.toBe(first.pending_hash);
+    expect(second.pending_run_id).not.toBe(first.pending_run_id);
+    expect(second.pending_at).toBe(twentyHoursAgo);
+
+    // Once the first is past the 24-hour window, the next suspect starts a new one.
+    const dayAgo = new Date(Date.now() - 25 * 3_600_000).toISOString();
+    await env.DB.prepare("UPDATE pages SET pending_at = ? WHERE id = ?").bind(dayAgo, page.id).run();
+    await pull(page.id, "tf-third", SHRUNK);
+    const third = (await env.DB.prepare("SELECT * FROM pages WHERE id = ?").bind(page.id).first<PageRow>())!;
+    expect(Date.parse(third.pending_at!)).toBeGreaterThan(Date.now() - 60_000);
   });
 
   it("/api/stats always has the layout_hold key", async () => {
@@ -467,6 +536,23 @@ describe("a pulled change gets its summary and its delta in one out-of-band requ
       summary_source: "diff",
     });
     expect(await deltaOf(res.version_id)).toEqual({ blocks: { added: 1, removed: 1, changed: 1 }, facts: null, layout_only: false });
+  });
+});
+
+describe("the summary step stores the summary before it works out the delta", () => {
+  it("a delta that fails leaves the summary stored and the version listed", async () => {
+    const page = await seedPage({ monitor_id: null, schedule_cron: null });
+    await seedVersion(page.id, "v-0", "2026-11-01T00:00:00.000Z", BEFORE, { is_baseline: 1, facts_json: JSON.stringify([{ price: "$1" }]) });
+    // Facts without a name: the facts part of the delta throws, after the summary is written.
+    await seedVersion(page.id, "v-1", "2026-11-02T00:00:00.000Z", AFTER, { facts_json: JSON.stringify([{ price: "$2" }]) });
+
+    expect(await (await post("/api/admin/backfill-summaries")).json()).toEqual({ filled: 1, remaining: 0, oversized: ["v-1"] });
+    expect(await versionRow("v-1")).toMatchObject({
+      summary: '1 block added, 1 changed, 1 removed: "The Pro plan costs $25 per month for every seat in the workspace."',
+      summary_source: "diff",
+      delta_json: null,
+    });
+    expect(errorLog).toHaveBeenCalled();
   });
 });
 
@@ -655,6 +741,28 @@ describe("the stats the site shows", () => {
     expect((await get("/api/stats")).public_slots).toEqual({ total: 4, used: 2, next_free_at: "2026-11-10T00:00:00.000Z" });
   });
 
+  it("the home hero counts what Stats.changes counts: layout-only changes stay in the feed but out of both counts", async () => {
+    const day = 86_400_000;
+    const at = (daysAgo: number) => new Date(Date.now() - daysAgo * day).toISOString();
+    const tables = await seedPage({ label: "Tables page" });
+    await seedVersion(tables.id, "t-0", at(3), rowsAsBlocks(), { is_baseline: 1 });
+    await seedVersion(tables.id, "t-1", at(2), rowsAsTable());
+    const prices = await seedPage({ label: "Prices page" });
+    await seedVersion(prices.id, "p-0", at(3), BEFORE, { is_baseline: 1 });
+    await seedVersion(prices.id, "p-1", at(1), AFTER);
+    await computeDelta(env, "t-1");
+    await computeDelta(env, "p-1");
+    expect((await deltaOf("t-1")).layout_only).toBe(true);
+
+    const stats = await get("/api/stats");
+    expect([stats.changes, stats.layout_only]).toEqual([1, 1]);
+    const home = await (await SELF.fetch("https://x/")).text();
+    expect(home).toContain("The web changed its mind once this week.");
+    // The feed still lists the layout-only change, tagged in the site's later task.
+    expect(home).toContain("Tables page");
+    expect(home).toContain("Prices page");
+  });
+
   it("has no recording_since on an empty database", async () => {
     expect((await get("/api/stats")).recording_since).toBeNull();
   });
@@ -788,6 +896,30 @@ describe("thumbnails", () => {
     expect(browser.sessions()).toBe(1);
   });
 
+  it("the backfill stores each thumbnail as it is made, and waits for the expected image", async () => {
+    const events: string[] = [];
+    const browser = fakeBrowser({ events });
+    const put = env.STORE.put.bind(env.STORE);
+    vi.spyOn(env.STORE, "put").mockImplementation(((key: string, ...rest: unknown[]) => {
+      events.push(`put ${key}`);
+      return (put as (...a: unknown[]) => unknown)(key, ...rest);
+    }) as typeof env.STORE.put);
+    const page = await seedPage();
+    await seedVersion(page.id, "v-0", "2026-11-01T00:00:00.000Z", BEFORE, { is_baseline: 1 });
+    await seedVersion(page.id, "v-1", "2026-11-02T00:00:00.000Z", AFTER);
+
+    expect(await (await post("/api/admin/thumbs")).json()).toEqual({ made: 2, remaining: 0 });
+
+    // Both thumbnails were stored while the session was open, each before the next image was opened.
+    expect(events.filter((e) => e.startsWith("put ") || e === "Page.navigate" || e === "Browser.close")).toEqual([
+      "Page.navigate", "put thumbs/v-1.jpg", "Page.navigate", "put thumbs/v-0.jpg", "Browser.close",
+    ]);
+    // The wait checks that the image in the page is the stored screenshot it was opened for.
+    const waits = browser.sent.filter((m) => m.method === "Runtime.evaluate").map((m) => String(m.params.expression));
+    expect(waits[0]).toContain(JSON.stringify(`${BASE}/shots/v-1.jpg`));
+    expect(waits[1]).toContain(JSON.stringify(`${BASE}/shots/v-0.jpg`));
+  });
+
   it("an image that does not load is skipped; the session is closed and the rest are made", async () => {
     const browser = fakeBrowser({ imageLoads: (n) => n !== 2 });
     const page = await seedPage();
@@ -822,6 +954,16 @@ describe("thumbnails", () => {
     const methods = browser.sent.map((m) => m.method);
     expect(methods.lastIndexOf("Page.captureScreenshot")).toBeLessThan(methods.indexOf("Browser.close"));
     expect(await all("SELECT kind FROM spend")).toEqual([{ kind: "screenshot" }]);
+  });
+
+  it("a thumbnail capture that never answers costs only a short wait: the full image comes back and the browser is closed", async () => {
+    const browser = fakeBrowser({ hangThumb: true, hangClose: true });
+    const started = Date.now();
+    const result = await screenshotFullPage(env, "https://example.com/pricing", { settleMs: 0, thumbTimeoutMs: 50, closeWaitMs: 50 });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(new Uint8Array(result.bytes)).toEqual(bytesOf(FULL_B64));
+    expect(result.thumb).toBeNull();
+    expect(browser.sent.filter((m) => m.method === "Browser.close")).toHaveLength(1);
   });
 
   it("the screenshot driver still returns the full image when the thumbnail capture fails", async () => {

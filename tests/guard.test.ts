@@ -291,7 +291,7 @@ describe("partial-render guard", () => {
     const runs = await runsOf(pageId);
     expect(created.run_id).toBe(runs[1]!.id);
     expect(created.text).toBe(short);
-    expect(created.notes).toBe(`confirmed after partial-render suspect run ${first!.id}`);
+    expect(created.notes).toBe(`confirmed after suspect run ${first!.id}`);
     expect(runs[1]).toMatchObject({ noise_suppressed: 0, noise_reason: null });
     expect(runs[0]).toMatchObject({ noise_reason: "partial_render" });
     const page = await pageRow(pageId);
@@ -357,7 +357,7 @@ describe("partial-render guard", () => {
     expect(await res.json()).toMatchObject({ ok: true, version_id: expect.any(String) });
     const versions = await versionsOf(pageId);
     expect(versions).toHaveLength(2);
-    expect(versions[1]!.notes).toBe(`confirmed after partial-render suspect run ${first!.id}`);
+    expect(versions[1]!.notes).toBe(`confirmed after suspect run ${first!.id}`);
     expect((await pageRow(pageId)).pending_at).toBeNull();
   });
 
@@ -566,7 +566,7 @@ describe("exposure", () => {
     const asOf: Json = await (await callWorker(`/api/pages/${pageId}/as-of?at=${at}`)).json();
     const first = (await runsOf(pageId))[0]!;
 
-    expect(one.notes).toBe(`confirmed after partial-render suspect run ${first.id}`);
+    expect(one.notes).toBe(`confirmed after suspect run ${first.id}`);
     expect(asOf.notes).toBe(one.notes);
     const baseline: Json = await (await callWorker(`/api/pages/${pageId}/versions/${baselineId}`)).json();
     expect(baseline.notes).toBeNull();
