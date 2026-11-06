@@ -47,6 +47,8 @@ export default defineConfig({
             ADMIN_TOKEN: "test-admin",
             WEBHOOK_SECRET: "test-secret",
             PUBLIC_BASE_URL: "https://fineprint.test",
+            // The site is on in tests; tests/site-routing.test.ts also checks it switched off.
+            SITE_ENABLED: "1",
             TEST_MIGRATIONS: await readD1Migrations("./migrations"),
             ...(live ? { LIVE_TINYFISH_API_KEY: live } : {}),
           },

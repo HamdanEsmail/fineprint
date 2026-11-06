@@ -75,7 +75,7 @@ All of these were verified on 2026-11-03 with real calls (see `spikes/` in the p
 
 ## 4. Architecture
 
-One Cloudflare Worker serves everything: the webhook receiver, the JSON API, the admin endpoints, and the React viewer as static assets. State lives in D1 (rows) and R2 (screenshots, HTML sources, raw webhook payloads). No Supabase, no other accounts. One `wrangler deploy`.
+One Cloudflare Worker serves everything: the webhook receiver, the JSON API, the admin endpoints, and the server-rendered viewer (hono/jsx), with its styles and fonts as static assets. State lives in D1 (rows) and R2 (screenshots, HTML sources, raw webhook payloads). No Supabase, no other accounts. One `wrangler deploy`.
 
 ```
                        scheduled run (every 12 h, staggered)

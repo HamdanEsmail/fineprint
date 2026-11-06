@@ -15,26 +15,24 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { factsDiff, structuredDiff, type FactsDiff, type StructuredDiff } from "../core/diff";
-import { FACTS_PAUSE_USD, SPEND_PAUSE_USD } from "../core/limits";
 import { normalize } from "../core/normalize";
-import { PRICES, type SpendKind } from "../core/spend";
 import { getCachedDiff, putCachedDiff } from "../db/diffCache";
 import { getPage, listPages } from "../db/pages";
-import { countNoiseBetween, countNoiseByReason, countRunsByTrigger } from "../db/runs";
-import type { FactsStatus, PageRow, PageStatus, SummarySource, TriggerKind } from "../db/types";
+import { countNoiseBetween } from "../db/runs";
+import type { FactsStatus, PageRow, SummarySource, TriggerKind } from "../db/types";
 import {
   baselineVersion,
   countVersionsBetween,
   getVersion,
   getVersionWithTrigger,
   listAllVersionSummaries,
-  listChanges,
   versionAsOf,
   versionSummaryAsOf,
   type VersionSummary,
   type WithTrigger,
 } from "../db/versions";
 import type { Env } from "../env";
+import { getStats, listChanges, parseTime } from "../readModel";
 import { pageToJson } from "./pages";
 import { objectUrls, parseFacts, versionJson, versionSummaryJson } from "./versionJson";
 
@@ -48,24 +46,6 @@ historyRouter.onError((err, c) => {
 });
 
 // --- Helpers ----------------------------------------------------------------------------------
-
-/**
- * A time parameter as the ISO string the database stores, or null when it is missing or not a
- * date. Stored times come from toISOString() (millisecond precision, a "Z", four-digit years), so
- * a parameter is converted the same way before it is compared as text. Left as typed,
- * "2026-11-02T09:15:00Z" would sort after "2026-11-02T09:15:00.123Z" ("Z" is above "."), and a
- * version captured 123 ms after that moment would be taken as already in force; converted, it is
- * "2026-11-02T09:15:00.000Z" and the version is correctly later. "2026-11-02T12:15:00+03:00"
- * becomes the same instant. A year outside 0000 to 9999 has no four-digit form and would not
- * sort as text, so it is refused.
- */
-function parseTime(raw: string | undefined): string | null {
-  if (raw === undefined) return null;
-  const ms = Date.parse(raw);
-  if (Number.isNaN(ms)) return null;
-  const iso = new Date(ms).toISOString();
-  return /^\d{4}-/.test(iso) ? iso : null;
-}
 
 /**
  * True when nothing a stored diff shows of a version will change any more: its capture is terminal
@@ -245,22 +225,19 @@ historyRouter.get("/changes", async (c) => {
   const sinceRaw = c.req.query("since");
   const since = sinceRaw === undefined ? null : parseTime(sinceRaw);
   if (sinceRaw !== undefined && since === null) return c.json({ error: "invalid_since" }, 400);
+  const beforeRaw = c.req.query("before");
+  const before = beforeRaw === undefined ? null : parseTime(beforeRaw);
+  if (beforeRaw !== undefined && before === null) return c.json({ error: "invalid_before" }, 400);
 
-  const rows = await listChanges(c.env.DB, since, readLimit(c.req.query("limit")));
-  return c.json({
-    changes: rows.map((row) => ({
-      version_id: row.id,
-      page_id: row.page_id,
-      page_label: row.page_label,
-      url: row.url,
-      captured_at: row.captured_at,
-      summary: row.summary,
-      summary_source: row.summary_source,
-      screenshot_url: objectUrls(c.env, row).screenshot_url,
-      trigger: row.trigger_kind,
-      facts_status: row.facts_status,
-    })),
+  const items = await listChanges(c.env, {
+    since: since ?? undefined,
+    before: before ?? undefined,
+    limit: readLimit(c.req.query("limit")),
+    // retired=0 leaves out the pages retired for unreliable reads; without it they stay in.
+    includeRetired: c.req.query("retired") !== "0",
   });
+  // The page's kind is the site's; the JSON items stay as they were.
+  return c.json({ changes: items.map(({ kind: _kind, ...item }) => item) });
 });
 
 // --- Export -----------------------------------------------------------------------------------
@@ -287,73 +264,8 @@ historyRouter.get("/export.json", async (c) => {
 
 // --- Stats ------------------------------------------------------------------------------------
 
-const SPEND_KINDS = Object.keys(PRICES) as SpendKind[];
-const PAGE_STATUSES: readonly PageStatus[] = ["active", "paused", "failed", "expired", "retired"];
-
-/** Money rounded to six decimals, so adding floats leaves no drift (0.1 + 0.2 is 0.3). */
-const dollars = (amount: number): number => Math.round(amount * 1e6) / 1e6;
-
 historyRouter.get("/stats", async (c) => {
-  const db = c.env.DB;
-  const [totals, spendRows, statusRows, runsByTrigger, noiseReasons] = await Promise.all([
-    db
-      .prepare(
-        `SELECT
-           (SELECT COUNT(*) FROM pages) AS pages,
-           (SELECT COUNT(*) FROM runs) AS runs,
-           (SELECT COUNT(*) FROM versions) AS versions,
-           (SELECT COUNT(*) FROM versions WHERE is_baseline = 0) AS catches,
-           (SELECT COUNT(*) FROM runs WHERE noise_suppressed = 1) AS noise_suppressed,
-           (SELECT COUNT(*) FROM versions WHERE facts_status = 'unavailable') AS facts_unavailable,
-           (SELECT COALESCE(SUM(amount_usd), 0) FROM spend) AS spend_usd`,
-      )
-      .first<{
-        pages: number;
-        runs: number;
-        versions: number;
-        catches: number;
-        noise_suppressed: number;
-        facts_unavailable: number;
-        spend_usd: number;
-      }>(),
-    db.prepare("SELECT kind, SUM(amount_usd) AS usd FROM spend GROUP BY kind").all<{ kind: string; usd: number | null }>(),
-    db.prepare("SELECT status, COUNT(*) AS n FROM pages GROUP BY status").all<{ status: string | null; n: number }>(),
-    countRunsByTrigger(db),
-    countNoiseByReason(db),
-  ]);
-
-  const spendByKind = Object.fromEntries(SPEND_KINDS.map((kind) => [kind, 0])) as Record<SpendKind, number>;
-  for (const row of spendRows.results) {
-    if ((SPEND_KINDS as string[]).includes(row.kind)) spendByKind[row.kind as SpendKind] = dollars(row.usd ?? 0);
-  }
-  const monitors = Object.fromEntries(PAGE_STATUSES.map((status) => [status, 0])) as Record<PageStatus, number>;
-  for (const row of statusRows.results) {
-    if ((PAGE_STATUSES as readonly (string | null)[]).includes(row.status)) monitors[row.status as PageStatus] = row.n;
-  }
-
-  // The three reasons are always present; a reason this code does not know is counted under its own key.
-  const noiseByReason: Record<string, number> = { normalized_identical: 0, partial_render: 0, flap: 0, ...noiseReasons };
-
-  const spend = totals?.spend_usd ?? 0;
-  const catches = totals?.catches ?? 0;
-  return c.json({
-    pages: totals?.pages ?? 0,
-    runs: totals?.runs ?? 0,
-    versions: totals?.versions ?? 0,
-    noise_suppressed: totals?.noise_suppressed ?? 0,
-    // Versions whose screenshot and source are stored but whose price facts could not be taken.
-    facts_unavailable: totals?.facts_unavailable ?? 0,
-    noise_by_reason: noiseByReason,
-    spend_usd: dollars(spend),
-    // The two pauses, read from the same total the Worker's own checks use: no facts run starts from
-    // FACTS_PAUSE_USD on, and no check, capture or pull from SPEND_PAUSE_USD on.
-    spend_paused: spend >= SPEND_PAUSE_USD,
-    facts_paused: spend >= FACTS_PAUSE_USD,
-    spend_by_kind: spendByKind,
-    monitors,
-    // A catch is a real change, not a baseline.
-    cost_per_catch_usd: catches > 0 ? dollars(spend / catches) : null,
-    // Which way the runs arrived: the add-page baselines, scheduled runs by webhook, overdue checks pulled.
-    runs_by_trigger: runsByTrigger,
-  });
+  // `changes` (real changes outside retired pages) is the site's; the JSON stays as it was.
+  const { changes: _changes, ...stats } = await getStats(c.env);
+  return c.json(stats);
 });

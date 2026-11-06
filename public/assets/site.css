@@ -1,0 +1,117 @@
+/* Fineprint site: layout and components on the Stamped Ledger tokens (tokens.css, loaded first; see
+   DESIGN.md). Colour, faces, radius, borders and shadows come only from the token variables. The
+   approved home comp (design/comp-home.html) is the reference for layout, spacing and type sizes. */
+
+/* --- Faces: self-hosted, Latin, variable (LICENSES.md beside them) ------------------------- */
+@font-face { font-family: "Fraunces"; font-style: normal; font-weight: 100 900; font-display: swap; src: url("fonts/fraunces-latin-opsz-normal.woff2") format("woff2"); }
+@font-face { font-family: "Fraunces"; font-style: italic; font-weight: 100 900; font-display: swap; src: url("fonts/fraunces-latin-opsz-italic.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 100 900; font-display: swap; src: url("fonts/inter-latin-wght-normal.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 100 800; font-display: swap; src: url("fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2"); }
+
+/* --- Base ------------------------------------------------------------------------------------ */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; caret-color: var(--accent); scrollbar-color: var(--ink-muted) var(--paper-sunken); }
+body { background: var(--paper); min-height: 100vh; display: flex; flex-direction: column; }
+main { flex: 1 0 auto; }
+::selection { background: var(--accent); color: var(--accent-ink); }
+a { text-underline-offset: 3px; }
+a:hover { text-decoration-color: var(--accent); }
+h1, h2, h3, p, ul, ol, figure { margin: 0; }
+ul, ol { padding: 0; list-style: none; }
+img { display: block; max-width: 100%; height: auto; }
+time, .num { font-variant-numeric: tabular-nums; }
+
+.wrap { max-width: var(--content-max); margin: 0 auto; padding: 0 16px; }
+@media (min-width: 700px) { .wrap { padding: 0 24px; } }
+@media (min-width: 900px) { .wrap { padding: 0 var(--gutter); } }
+
+.skip { position: absolute; left: 16px; top: -100px; z-index: 10; padding: 10px 14px; font: 500 14px/1 var(--font-body); color: var(--paper); background: var(--ink); border-radius: var(--r); text-decoration: none; }
+.skip:focus { top: 12px; }
+
+.label, .meta, .evidence, .origin, .notice, .meterline { font-family: var(--font-data); }
+.label { font-size: 11.5px; line-height: 1.3; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+
+/* --- Banner, header, nav --------------------------------------------------------------------- */
+.notice { background: var(--ink); color: var(--paper); font-size: 11.5px; line-height: 1.5; letter-spacing: .04em; padding: 8px 0; }
+
+.top { border-bottom: var(--border); }
+.top .wrap { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 24px; padding-top: 18px; padding-bottom: 16px; }
+.wordmark { gap: 12px; font: 600 22px/1 var(--font-display); text-decoration: none; }
+.stamp { display: inline-flex; align-items: center; gap: 6px; }
+.stamp::before { content: none; } /* the stamp's words are in the markup, so they can say PAUSED */
+.live { width: 7px; height: 7px; }
+@keyframes pulse { 50% { opacity: .3; } }
+nav ul { display: flex; gap: 4px; }
+nav a { display: block; padding: 8px 10px; font: 500 14px/1 var(--font-body); text-decoration: none; border-bottom: 2px solid transparent; transition: border-color var(--dur-fast) var(--ease); }
+nav a:hover { border-bottom-color: var(--rule); }
+nav a[aria-current="page"] { border-bottom-color: var(--accent); }
+
+/* --- Hero, steps, stat column ---------------------------------------------------------------- */
+.hero-grid { display: grid; gap: 32px; padding-top: 40px; padding-bottom: 8px; }
+@media (min-width: 900px) { .hero-grid { grid-template-columns: minmax(0, 1fr) 200px; gap: 56px; padding-top: 64px; } }
+.hero { max-width: 18ch; text-wrap: balance; }
+@media (min-width: 900px) { .hero { font-size: 52px; line-height: 1.02; } }
+.hero em { font-style: normal; color: var(--accent); }
+.lede { margin-top: 20px; max-width: 56ch; font-size: 17px; line-height: 1.5; color: var(--ink-soft); }
+
+.steps { display: grid; margin-top: 32px; border-top: var(--border); }
+@media (min-width: 700px) { .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.steps li { padding: 16px 0; border-bottom: var(--hairline); }
+@media (min-width: 700px) {
+  .steps li { padding: 16px 20px 4px 0; border-bottom: 0; }
+  .steps li + li { padding-left: 20px; border-left: var(--hairline); }
+}
+.steps .n { margin-right: 10px; font: 500 13px/1 var(--font-data); color: var(--accent); }
+.steps b { font: 600 18px/1.3 var(--font-display); letter-spacing: -.01em; }
+.steps .t { display: block; max-width: 34ch; margin-top: 4px; font-size: 14px; line-height: 1.45; color: var(--ink-soft); }
+
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-content: start; }
+@media (min-width: 900px) { .stats { grid-template-columns: 1fr; } }
+.stat { padding: 12px 14px; }
+.stat b { font-size: 30px; margin-bottom: 6px; }
+.stat span { line-height: 1.2; opacity: .72; }
+.stat.is-key span { opacity: .9; }
+
+/* --- Sections and cards ---------------------------------------------------------------------- */
+section { padding-top: 56px; }
+section > h2 { margin-bottom: 16px; }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11.5px; line-height: 1.3; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
+.meta span { color: var(--ink-muted); }
+.evidence { margin-top: 12px; font: 400 11.5px/1.5 var(--font-data); letter-spacing: .02em; color: var(--ink-muted); overflow-wrap: anywhere; }
+.page-note { margin: -4px 0 16px; font: var(--t-small); color: var(--ink-muted); }
+
+.btn { display: inline-block; padding: 11px 16px; text-decoration: none; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+
+/* --- The change feed: catch cards (DESIGN.md "Catch card") ----------------------------------- */
+.feed { display: grid; gap: 16px; }
+.catch { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 14px; padding: 14px; }
+@media (min-width: 700px) { .catch { grid-template-columns: 92px minmax(0, 1fr); gap: 18px; padding: 16px; } }
+.catch:hover { transform: translate(-1px, -1px); box-shadow: var(--shadow-hover); }
+.thumb { display: block; align-self: start; text-decoration: none; aspect-ratio: 1; overflow: hidden; background: var(--paper-sunken); border: var(--hairline); border-radius: var(--r); }
+.thumb img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.thumb-none { display: flex; align-items: center; justify-content: center; height: 100%; padding: 4px; text-align: center; font: 500 11.5px/1.2 var(--font-data); letter-spacing: .04em; text-transform: uppercase; color: var(--ink-muted); }
+.catch h3 { margin-top: 4px; font: 600 18px/1.3 var(--font-display); letter-spacing: -.01em; }
+.catch h3 a { text-decoration: none; }
+.catch h3 a:hover { text-decoration: underline; text-decoration-color: var(--accent); }
+.summary { max-width: 68ch; margin-top: 4px; color: var(--ink-soft); display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.summary.is-pending { color: var(--ink-muted); }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 10px; }
+.origin { font-size: 11.5px; letter-spacing: .02em; color: var(--ink-muted); }
+
+.empty { padding: 20px; max-width: 68ch; color: var(--ink-soft); }
+.more { margin-top: 20px; }
+.retired-note { margin-top: 24px; font: var(--t-small); color: var(--ink-muted); }
+
+/* --- Status chips (tokens.css has ok, warn, bad) --------------------------------------------- */
+.chip.muted { color: var(--ink-muted); }
+
+/* --- 404 and error ---------------------------------------------------------------------------- */
+.lost { padding-top: 64px; }
+.lost .lede { margin-top: 16px; }
+
+/* --- Footer: the spend meter ------------------------------------------------------------------ */
+footer { margin-top: 72px; padding: 20px 0 40px; border-top: var(--border); }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 24px; }
+.meterline { font-size: 12px; font-weight: 500; line-height: 1.5; letter-spacing: .02em; font-variant-numeric: tabular-nums; }
+footer ul { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 13px; }

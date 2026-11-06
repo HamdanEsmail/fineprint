@@ -1,6 +1,6 @@
 import { CAPTURE_MAX_ATTEMPTS } from "../core/limits";
 import { oneLine } from "../core/summary";
-import type { CaptureStatus, FactsStatus, SummarySource, TriggerKind, VersionRow } from "./types";
+import type { CaptureStatus, FactsStatus, PageKind, SummarySource, TriggerKind, VersionRow } from "./types";
 
 /** What a caller supplies to insertVersion; the capture columns default to a fresh, uncaptured version. */
 export type NewVersion = Pick<
@@ -49,7 +49,7 @@ export type VersionSummary = Omit<VersionRow, "text">;
 export type WithTrigger<T> = T & { trigger_kind: TriggerKind | null };
 
 /** A non-baseline version joined with its page, for the changes feed. */
-export type ChangeRow = WithTrigger<VersionSummary> & { page_label: string; url: string };
+export type ChangeRow = WithTrigger<VersionSummary> & { page_label: string; url: string; kind: PageKind };
 
 /** The `trigger_kind` column of WithTrigger, for a query over `versions` named `table`. */
 function triggerColumn(table: string): string {
@@ -398,24 +398,39 @@ export async function setSummaryIfMissing(db: D1Database, id: string, summary: s
 
 /**
  * Real changes across all pages: non-baseline versions, newest first,
- * captured at or after `sinceIso` when given, joined with the page's label and
- * url and the run's trigger. Never selects `text`. A limit below 1 (or NaN)
- * returns nothing; it never becomes SQLite's "no limit".
+ * captured at or after `sinceIso` when given and strictly before `beforeIso`
+ * when given, joined with the page's label, url and kind and the run's trigger.
+ * Retired pages are included unless `includeRetired` is false. Never selects
+ * `text`. A limit below 1 (or NaN) returns nothing; it never becomes SQLite's
+ * "no limit".
  */
 export async function listChanges(
   db: D1Database,
   sinceIso: string | null,
   limit: number,
+  opts: { beforeIso?: string | null; includeRetired?: boolean } = {},
 ): Promise<ChangeRow[]> {
   const max = Math.max(0, Math.trunc(limit)) || 0;
-  const select = `SELECT ${summaryColumns("v.")}, ${triggerColumn("v")}, p.label AS page_label, p.url AS url
-       FROM versions v JOIN pages p ON p.id = v.page_id`;
-  const order = "ORDER BY v.captured_at DESC, v.rowid DESC LIMIT ?";
-  const statement =
-    sinceIso === null
-      ? db.prepare(`${select} WHERE v.is_baseline = 0 ${order}`).bind(max)
-      : db.prepare(`${select} WHERE v.is_baseline = 0 AND v.captured_at >= ? ${order}`).bind(sinceIso, max);
-  const { results } = await statement.all<ChangeRow>();
+  const where = ["v.is_baseline = 0"];
+  const binds: unknown[] = [];
+  if (sinceIso !== null) {
+    where.push("v.captured_at >= ?");
+    binds.push(sinceIso);
+  }
+  if (opts.beforeIso != null) {
+    where.push("v.captured_at < ?");
+    binds.push(opts.beforeIso);
+  }
+  if (opts.includeRetired === false) where.push("p.status != 'retired'");
+  const { results } = await db
+    .prepare(
+      `SELECT ${summaryColumns("v.")}, ${triggerColumn("v")}, p.label AS page_label, p.url AS url, p.kind AS kind
+       FROM versions v JOIN pages p ON p.id = v.page_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY v.captured_at DESC, v.rowid DESC LIMIT ?`,
+    )
+    .bind(...binds, max)
+    .all<ChangeRow>();
   return results;
 }
 
