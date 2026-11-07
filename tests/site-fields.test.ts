@@ -741,7 +741,7 @@ describe("the stats the site shows", () => {
     expect((await get("/api/stats")).public_slots).toEqual({ total: 4, used: 2, next_free_at: "2026-11-10T00:00:00.000Z" });
   });
 
-  it("the home hero counts what Stats.changes counts: layout-only changes stay in the feed but out of both counts", async () => {
+  it("the home's week count counts what Stats.changes counts: layout-only changes stay in the feed but out of both counts", async () => {
     const day = 86_400_000;
     const at = (daysAgo: number) => new Date(Date.now() - daysAgo * day).toISOString();
     const tables = await seedPage({ label: "Tables page" });
@@ -757,7 +757,7 @@ describe("the stats the site shows", () => {
     const stats = await get("/api/stats");
     expect([stats.changes, stats.layout_only]).toEqual([1, 1]);
     const home = await (await SELF.fetch("https://x/")).text();
-    expect(home).toContain("The web changed its mind once this week.");
+    expect(home).toContain('<a href="#feed">1 real change this week, newest first</a>');
     // The feed still lists the layout-only change, tagged in the site's later task.
     expect(home).toContain("Tables page");
     expect(home).toContain("Prices page");

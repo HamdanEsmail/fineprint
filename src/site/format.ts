@@ -1,6 +1,7 @@
 // Pure text formatters for the site. Every date in the UI is UTC and absolute ("5 Nov 2026, 09:12 UTC");
 // ISO 8601 stays in data and URLs. Nothing here touches the DOM, the database or the clock.
 import type { BlockCounts, Delta } from "../core/diff";
+import { FACTS_PAUSE_USD, SPEND_PAUSE_USD } from "../core/limits";
 import type { TriggerKind } from "../db/types";
 import type { Stats } from "../readModel";
 
@@ -11,7 +12,21 @@ const pad = (n: number): string => String(n).padStart(2, "0");
 export function formatUtc(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}, ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+  return `${formatDate(iso)}, ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+}
+
+/** "5 Nov 2026": the date alone, in UTC. A string that is not a time comes back as it was. */
+export function formatDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Whole days from `sinceIso` to `nowMs`, at least 1: "3 days of recording" on the fourth day. */
+export function daysSince(sinceIso: string, nowMs: number): number {
+  return Math.max(1, Math.floor((nowMs - Date.parse(sinceIso)) / DAY_MS));
 }
 
 /** Dollars with two decimals, rounded half up on the cent: "$3.10". */
@@ -24,24 +39,6 @@ export function plural(n: number, one: string, many: string = `${one}s`): string
   return `${n} ${n === 1 ? one : many}`;
 }
 
-const NBSP = "\u00a0";
-
-/**
- * The hero line in three parts, so the view can set the count in the accent and the plain line can
- * never read differently: `before + count + after`. The count and its word are joined by a
- * non-breaking space ("14 times"), so a narrow screen never leaves the number at the end of a line.
- */
-export function heroParts(changes7d: number): { before: string; count: string | null; after: string } {
-  if (changes7d <= 0) return { before: "Nothing changed this week.", count: null, after: "" };
-  return { before: "The web changed its mind ", count: changes7d === 1 ? "once" : `${changes7d}${NBSP}times`, after: " this week." };
-}
-
-/** "The web changed its mind 14 times this week.", with plain spaces, for text that is not laid out. */
-export function heroLine(changes7d: number): string {
-  const { before, count, after } = heroParts(changes7d);
-  return `${before}${count ?? ""}${after}`.replaceAll(NBSP, " ");
-}
-
 /**
  * The footer's spend meter: "TinyFish spend $3.10 · 15 real changes · $0.21 per catch". The cost per
  * catch is the spend over the real changes the meter shows, so the line adds up as read; the API's
@@ -50,6 +47,40 @@ export function heroLine(changes7d: number): string {
 export function spendMeter(s: Stats): string {
   const parts = [`TinyFish spend ${formatUsd(s.spend_usd)}`, plural(s.changes, "real change")];
   if (s.changes > 0) parts.push(`${formatUsd(s.spend_usd / s.changes)} per catch`);
+  return parts.join(" · ");
+}
+
+/** The scheduled checks the Monitors delivered by webhook, and the overdue ones pulled: the "Checks run" block. */
+export const checksRun = (s: Stats): number => s.runs_by_trigger.webhook + s.runs_by_trigger.pull;
+
+/**
+ * The home's live line, in parts (the view sets them apart with " · "): "Recording since 3 Nov 2026",
+ * "20 pages", "11 real changes", "150 checks", "8 noise events filtered". The figures are the stat blocks':
+ * the active Monitors, Stats.changes, checksRun and every noise event. One sentence before any page is added.
+ */
+export function liveParts(s: Stats): string[] {
+  if (s.recording_since === null) return ["Not recording yet: no page has been added."];
+  return [
+    `Recording since ${formatDate(s.recording_since)}`,
+    plural(s.monitors.active, "page"),
+    plural(s.changes, "real change"),
+    plural(checksRun(s), "check"),
+    `${plural(s.noise_suppressed, "noise event")} filtered`,
+  ];
+}
+
+/** The live line as one string. */
+export const liveLine = (s: Stats): string => liveParts(s).join(" · ");
+
+/**
+ * The bounty section's cost line: "TinyFish spend so far $3.44 · $0.31 per real change · caps at $6 and $8 by
+ * design." The cost per real change follows the footer's rule (the spend over the changes the site shows) and
+ * is left out before the first one; the caps are the facts pause and the spend pause (src/core/limits.ts).
+ */
+export function costLine(s: Stats): string {
+  const parts = [`TinyFish spend so far ${formatUsd(s.spend_usd)}`];
+  if (s.changes > 0) parts.push(`${formatUsd(s.spend_usd / s.changes)} per real change`);
+  parts.push(`caps at $${FACTS_PAUSE_USD} and $${SPEND_PAUSE_USD} by design.`);
   return parts.join(" · ");
 }
 

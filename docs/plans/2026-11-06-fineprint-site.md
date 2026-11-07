@@ -572,6 +572,47 @@ git commit -m "feat: about page with how TinyFish is used and the API reference"
 - [ ] **Step 5: One real public add on the preview** (cleared, about $0.08): a page of your choice that is not already watched. It must show its baseline within a minute and its screenshot shortly after, with the pending copy and the refresh in between. Leave it to expire.
 - [ ] **Step 6: Run `npm run check`; commit** (`git commit -m "fix: audit and polish pass on the site"`), upload the final preview, and report: the preview URL, the CPU numbers, what the audit found and what was left alone, and the test count.
 
+### Task 7b: The home opens like a product, then proves itself for the judges
+
+Hamdan, 7 Nov: "Make Fineprint show itself, explain what it is at first. like a good product opening, then it shows like the competition stuff". The spec below replaces the top of the home screen; it is exact where it quotes copy.
+
+**Files:**
+- Modify: `src/site/views/home.tsx`, `src/site/router.tsx`, `src/site/format.ts`, `src/site/layout.tsx` (og:title and og:description from the title and description, on every screen), `src/readModel.ts` (`Stats` evidence counts, `asOfExample`, `homeCounts`), `src/db/versions.ts` (`countChangesStatement`), `public/assets/site.css`, `tests/site-home.test.ts`, `tests/site-format.test.ts`, and the home's assertions in `tests/site-compare.test.tsx`, `tests/site-fields.test.ts`, `tests/site-about.test.ts` and `tests/history.test.ts` (the `/api/stats` body gains the four counts, nothing else).
+
+**Interfaces:**
+- Consumes: `getStats`, `listChanges`, `featuredCatch`.
+- Produces: `GET /` as below; `/api/stats` gains `versions_with_screenshot`, `versions_with_source`, `versions_with_facts` (facts_status ok) and `thumbnails`, counted in the stats' first aggregate (no extra statement); `homeCounts(env, since)`: the week's real changes, the retired line's count and the as-of example in one `db.batch()`.
+
+**The home, top to bottom** (the opening is a Persuade surface; the rest of the site stays Operate and Read):
+1. The opening. H1 `A dated record of the web's small print.` Lede `Fineprint watches the pages you agree to without reading: pricing, fees, terms, privacy policies, visa and baggage rules. Every real change is recorded with the date, the text and a full-page screenshot, so you can see what a page said on any day, and exactly which words changed since.` Primary button `See what changed this week` (`#feed`), secondary `Watch a page of your own` (`/watchlist#add`). The featured catch, as built, is the product shot: beside the opening from 1100px (text left, kept in view as the catch scrolls), under it below that; its caption line reads `A real catch, recorded {time}`, and its two buttons are paper ones, so the opening has one ink button. With no featured catch the opening stands alone. Under it, the live line, mono, one line on a laptop: `Recording since 3 Nov 2026 · 20 pages · 11 real changes · 150 checks · 8 noise events filtered` (the active Monitors, `Stats.changes`, webhook plus pulled runs, every noise event: the stat blocks' figures; one or many for every count). The Watch, Catch, Compare steps leave the home; About's five steps say the same.
+2. `What it answers`: a ruled row of three real, linked examples, no cards. `What did this page say on {date}?` to `/pages/:id?at=` halfway between the first two versions of the page that is not retired with the most versions (the newest page on a tie; left out when no page has two), shown `{label}, as of {date}`. `What changed between two dates?` to the featured catch's comparison (else the newest change's, `compare?to=`). `What changed on the web this week?` to `#feed`, shown `{n} real changes this week, newest first` (`The feed, newest first` at none).
+3. `Built for the TinyFish Time Machine bounty`, sub-line `Every line below is live data from the recorder, not a description.` Six requirement rows (requirement in Fraunces, proof with live figures, one link each): Monitor does the core work (Watchlist), A screenshot for every change (the newest change's version), As-of lookup and a structured diff (the comparison above), Real changes caught live (`#feed`), Works for any page you add (`/watchlist#add`), Reusable by other tools (`/about#data` and `/api/export.json`). The screenshot row says `{n} of {versions} recorded versions have a full-page screenshot and the stored source.` only when every version has both; otherwise it gives the two counts apart. Then `How each TinyFish service is used`: a table, `<th scope="row">` Monitor, Fetch, Browser, Agent, Search, one sentence each with its figure. The cost line: `TinyFish spend so far {spend} · {per change} per real change · caps at $6 and $8 by design.` (per change as the footer's rule, left out at none). `Read how it works` to `/about`.
+4. `Every change, newest first` with the stat blocks beside it (sticky) from 900px and above it on a phone, the retired line, as built.
+5. The footer as built. Title `Fineprint: a dated record of the web's small print`; description and og:description: the H1 and the lede's first sentence.
+
+The older screens of the feed (`before=`) keep the opening without the featured catch and leave out 2 and 3 (and their reads). Round trips for `GET /`: the stats (a batch of six), the feed, and `homeCounts` (a batch of three), then the featured catch as before: 3 plus the featured catch, ten statements (four round trips and nine statements before).
+
+- [ ] **Step 1: Write the failing tests** (`tests/site-home.test.ts`, `tests/site-format.test.ts`):
+
+```ts
+expect(html).toContain('<h1 class="hero">A dated record of the web&#39;s small print.</h1>');
+expect(html).toContain('<a class="btn" href="#feed">See what changed this week</a>');
+expect(html).toContain('<a class="btn secondary" href="/watchlist#add">Watch a page of your own</a>');
+expect(html).not.toContain("TinyFish Monitor reads each of");
+expect(plain(liveline)).toBe(`Recording since ${since} · 2 pages · 3 real changes · 4 checks · 0 noise events filtered`);
+expect(await line()).toBe(`Recording since ${since} · 1 page · 1 real change · 2 checks · 1 noise event filtered`);
+expect(count(reqs, '<li class="req">')).toBe(6);
+expect(rowHeaders(services)).toEqual(["Monitor", "Fetch", "Browser", "Agent", "Search"]);
+expect(await get(asOfHref)).toContain("AS OF");
+expect(plain(costline)).toBe("TinyFish spend so far $0.30 · $0.10 per real change · caps at $6 and $8 by design.");
+expect(costLine(stats({ spend_usd: 0.3, changes: 0 }))).toBe("TinyFish spend so far $0.30 · caps at $6 and $8 by design.");
+```
+
+- [ ] **Step 2: Run; expect failure.**
+- [ ] **Step 3: Implement** the read model, the formatters, the view and the styles.
+- [ ] **Step 4: Look at it** on a scratch local D1/R2 seeded from the preview's real records, at 375px and 1280px; run `impeccable detect` on the changed files; `npm run check`.
+- [ ] **Step 5: Commit** (`git commit -m "feat: home opens like a product and shows the bounty requirements with live proof"`).
+
 ### Task 8: Switch the site on (on the go-ahead only)
 
 - [ ] **Step 1: Wait for the go-ahead.** Hamdan looks at the final preview on a phone and a laptop first.

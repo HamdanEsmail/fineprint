@@ -11,13 +11,13 @@ import type { Env } from "../env";
 import { discover } from "../handlers/discover";
 import { addPage, MAX_LABEL_LENGTH, visitorHash } from "../handlers/pages";
 import {
-  countChanges,
   countRetiredPagesWithChanges,
   diffVersions,
   findPage,
   getPageRecord,
   getStats,
   getVersion,
+  homeCounts,
   listChanges,
   listPages,
   listVersionsForDiff,
@@ -91,16 +91,22 @@ siteRouter.get("/", async (c) => {
   if (!siteEnabled(c.env)) return c.notFound();
   // A before= that is not a time shows the newest changes.
   const before = parseTime(c.req.query("before"));
-  const since = new Date(Date.now() - WEEK_MS).toISOString();
-  const [stats, changes, weekCount, retiredWithChanges] = await Promise.all([
+  const nowMs = Date.now();
+  const since = new Date(nowMs - WEEK_MS).toISOString();
+  const newest = before === null;
+  // Three round trips side by side: the stats (one batch of six), the feed, and the small reads (on the newest
+  // screen one batch of three: the week's count, the retired line's count and the as-of example; on an older
+  // screen the retired line's count alone).
+  const [stats, changes, counts] = await Promise.all([
     getStats(c.env),
     listChanges(c.env, { before: before ?? undefined, limit: FEED_SIZE + 1, includeRetired: false }),
-    // The hero counts what Stats.changes counts: no retired page, no layout-only change (the feed lists those).
-    countChanges(c.env, { since, includeRetired: false, excludeLayoutOnly: true }),
-    countRetiredPagesWithChanges(c.env),
+    newest
+      ? homeCounts(c.env, since)
+      : countRetiredPagesWithChanges(c.env).then((retiredWithChanges) => ({ weekCount: 0, retiredWithChanges, asOf: null })),
   ]);
-  // The featured catch is on the newest screen only; it reads its candidates from the feed it is shown above.
-  const featured = before === null ? await featuredCatch(c.env, changes) : null;
+  const { weekCount, retiredWithChanges, asOf } = counts;
+  // The featured catch is on the newest screen only; it reads its candidates from the feed it is shown beside.
+  const featured = newest ? await featuredCatch(c.env, changes) : null;
   return render(
     c,
     <Home
@@ -110,6 +116,8 @@ siteRouter.get("/", async (c) => {
       before={before}
       retiredWithChanges={retiredWithChanges}
       featured={featured}
+      asOf={asOf}
+      nowMs={nowMs}
     />,
     200,
     KEEP_A_MINUTE,

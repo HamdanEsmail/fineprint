@@ -1,20 +1,28 @@
-// Home (GET /, optional before=<ISO>): what Fineprint is, the week in one line, and every change
-// newest first as catch cards (DESIGN.md "Catch card"), twenty to a screen. Pages retired for
-// unreliable reads are left out of the feed, the hero count and the stat blocks; one line under the
-// feed says they exist and links to their record.
+// Home (GET /, optional before=<ISO>), top to bottom:
 //
-// Between the hero and the feed, the featured catch (the comp's "The latest catch, up close"): one changed
-// block of a recent change, before and after with word marks, beside the two screenshots. It is the one
-// place a first-time visitor sees a real before and after, and it runs on every home view, so it is bounded
-// (see featuredCatch): it never diffs a large page on the home's own request.
+// 1. The opening, the one Persuade surface on the site: what Fineprint is in one line and a lede, the two
+//    actions, and beside them (under them on a phone) the product itself, the featured catch (the comp's
+//    "The latest catch, up close"): one changed block of a recent change, before and after with word marks,
+//    beside the two screenshots. Under both, the live line: since when, and the stat blocks' figures.
+// 2. What it answers: the three questions, each with a real, linked example.
+// 3. Built for the TinyFish Time Machine bounty: each requirement with its live proof and one link, how each
+//    TinyFish service is used with its figure, and the cost line.
+// 4. Every change newest first as catch cards (DESIGN.md "Catch card"), twenty to a screen, with the stat
+//    blocks beside them (above them on a phone).
+//
+// Pages retired for unreliable reads are left out of the feed, the counts and the stat blocks; one line under
+// the feed says they exist and links to their record. The older screens of the feed (before=) keep the opening
+// without the featured catch and leave out 2 and 3. The featured catch runs on every newest home view, so it
+// is bounded (see featuredCatch): it never diffs a large page on the home's own request.
+import type { Child } from "hono/jsx";
 import type { ChangedBlock } from "../../core/diff";
 import type { CaptureStatus } from "../../db/types";
-import { LARGE_DIFF_TEXT_CHARS } from "../../core/limits";
+import { LARGE_DIFF_TEXT_CHARS, PUBLIC_TTL_DAYS } from "../../core/limits";
 import type { Env } from "../../env";
-import { featureCandidates, getDiff, type ChangeItem, type Stats } from "../../readModel";
+import { featureCandidates, getDiff, type AsOfExample, type ChangeItem, type Stats } from "../../readModel";
 import { BlockText, plainText } from "../blockText";
 import { DeltaBadge, EvidenceLine, hasDeltaBadge, LAYOUT_ONLY_LINE, ShotFigure, StatBlock, Thumb } from "../components";
-import { formatUtc, heroLine, heroParts, ownPath, plural, SUMMARY_ORIGIN } from "../format";
+import { checksRun, costLine, daysSince, formatDate, formatUtc, liveParts, ownPath, plural, SUMMARY_ORIGIN } from "../format";
 import { Layout } from "../layout";
 import { hasMarks, wordDiff, type Part } from "../wordDiff";
 
@@ -176,18 +184,30 @@ export async function featuredCatch(env: Env, changes: ChangeItem[]): Promise<Fe
   return null;
 }
 
-/** The comp's "The latest catch, up close": the one before and after a first-time visitor sees on the home. */
+/** The comparison of the featured catch's change with the version before it. */
+const featuredCompareHref = (featured: Featured): string =>
+  `/pages/${encodeURIComponent(featured.change.page_id)}/compare?from=${encodeURIComponent(featured.fromId)}&to=${encodeURIComponent(featured.change.version_id)}`;
+
+/**
+ * The comp's "The latest catch, up close": the one before and after a first-time visitor sees on the home, as
+ * the opening's product shot. Its caption line says it is a real catch and when it was recorded; the heading
+ * names the section for a screen reader (on screen the caption line does).
+ */
 function FeaturedCatch(props: { featured: Featured }) {
   const { featured } = props;
   const c = featured.change;
   const pageHref = `/pages/${encodeURIComponent(c.page_id)}`;
-  const compareHref = `${pageHref}/compare?from=${encodeURIComponent(featured.fromId)}&to=${encodeURIComponent(c.version_id)}`;
+  const compareHref = featuredCompareHref(featured);
   return (
     <section class="featured" aria-labelledby="featured-h">
-      <h2 id="featured-h">The latest catch, up close</h2>
+      <h2 id="featured-h" class="vh">
+        The latest catch, up close
+      </h2>
       <article class="card feature">
         <p class="meta">
-          <time datetime={c.captured_at}>{formatUtc(c.captured_at)}</time>
+          <span class="caught">
+            A real catch, recorded <time datetime={c.captured_at}>{formatUtc(c.captured_at)}</time>
+          </span>
           <span>{c.page_label}</span>
         </p>
         {c.summary === null ? null : <p class="feature-summary">{c.summary}</p>}
@@ -209,8 +229,9 @@ function FeaturedCatch(props: { featured: Featured }) {
           <ShotFigure v={featured.fromShot} pageLabel={c.page_label} liveUrl={c.url} gone={featured.gone} />
           <ShotFigure v={featured.toShot} pageLabel={c.page_label} liveUrl={c.url} gone={featured.gone} />
         </div>
+        {/* Paper buttons: in the opening, the one ink button is "See what changed this week". */}
         <p class="actions">
-          <a class="btn" href={compareHref}>
+          <a class="btn secondary" href={compareHref}>
             Open the full comparison
           </a>
           <a class="btn secondary" href={pageHref}>
@@ -227,7 +248,7 @@ function FeaturedCatch(props: { featured: Featured }) {
 
 export type HomeProps = {
   stats: Stats;
-  /** This week's real changes outside retired pages. */
+  /** This week's real changes outside retired pages, leaving out layout-only ones (as Stats.changes does). */
   weekCount: number;
   /** Up to FEED_SIZE + 1 changes: one more than is shown says there are older ones. */
   changes: ChangeItem[];
@@ -237,7 +258,278 @@ export type HomeProps = {
   retiredWithChanges: number;
   /** The featured catch, or null to leave the section out (always on the older screens of the feed). */
   featured?: Featured | null;
+  /** The page for "What did this page say on a date?" (asOfExample), or null to leave that example out. */
+  asOf?: AsOfExample | null;
+  /** The time of the request, for the days of recording. */
+  nowMs: number;
 };
+
+/** The opening's line and lede; the page's title and description are made from them. */
+export const OPENING = {
+  h1: "A dated record of the web's small print.",
+  lede: [
+    "Fineprint watches the pages you agree to without reading: pricing, fees, terms, privacy policies, visa and baggage rules.",
+    "Every real change is recorded with the date, the text and a full-page screenshot, so you can see what a page said on any day, and exactly which words changed since.",
+  ],
+} as const;
+
+/** "6 Nov 2026 to 7 Nov 2026", or the one date when both ends were recorded on the same day. */
+function dateSpan(fromIso: string, toIso: string): string {
+  const from = formatDate(fromIso);
+  const to = formatDate(toIso);
+  return from === to ? to : `${from} to ${to}`;
+}
+
+/** A figure in a sentence of proof, with its noun: "<b>20</b> pages", "<b>1</b> page". */
+function Fig(props: { n: number; one?: string; many?: string }) {
+  const { n, one } = props;
+  return (
+    <>
+      <b class="fig">{String(n)}</b>
+      {one === undefined ? null : ` ${n === 1 ? one : (props.many ?? `${one}s`)}`}
+    </>
+  );
+}
+
+/** The live line: the stat blocks' figures in one mono line, set apart so a phone breaks it between parts. */
+function LiveLine(props: { stats: Stats }) {
+  const parts = liveParts(props.stats);
+  return (
+    <p class="liveline">
+      {parts.map((part, i) => (
+        <>
+          {i === 0 ? null : " · "}
+          <span>{part}</span>
+        </>
+      ))}
+    </p>
+  );
+}
+
+/** One question the record answers, with its real example. */
+type Ask = { question: string; href: string; text: string };
+
+/** The examples that can be shown: the as-of one needs a page with two versions, the comparison a change. */
+function asks(props: HomeProps, compare: { href: string; text: string } | null): Ask[] {
+  const list: Ask[] = [];
+  if (props.asOf) {
+    const { page_id, label, first_at, second_at } = props.asOf;
+    // Halfway between the first two versions: the first is the one in force, and it is not the newest.
+    const mid = new Date((Date.parse(first_at) + Date.parse(second_at)) / 2).toISOString();
+    list.push({
+      question: `What did this page say on ${formatDate(mid)}?`,
+      href: `/pages/${encodeURIComponent(page_id)}?at=${encodeURIComponent(mid)}`,
+      text: `${label}, as of ${formatDate(mid)}`,
+    });
+  }
+  if (compare !== null) list.push({ question: "What changed between two dates?", ...compare });
+  list.push({
+    question: "What changed on the web this week?",
+    href: "#feed",
+    text: props.weekCount > 0 ? `${plural(props.weekCount, "real change")} this week, newest first` : "The feed, newest first",
+  });
+  return list;
+}
+
+/** The comparison the examples point to: the featured catch's, else the newest change's (against the version before it). */
+function compareExample(featured: Featured | null, newest: ChangeItem | undefined): { href: string; text: string } | null {
+  if (featured) {
+    const c = featured.change;
+    return { href: featuredCompareHref(featured), text: `${c.page_label}, ${dateSpan(featured.fromAt, c.captured_at)}` };
+  }
+  if (newest === undefined) return null;
+  return {
+    href: `/pages/${encodeURIComponent(newest.page_id)}/compare?to=${encodeURIComponent(newest.version_id)}`,
+    text: `${newest.page_label}, ${formatDate(newest.captured_at)}`,
+  };
+}
+
+/** The screenshot row's proof: both counts in one sentence only when every version has both. */
+function evidenceProof(s: Stats) {
+  const has = (n: number): string => (n === 1 ? "has" : "have");
+  if (s.versions_with_screenshot === s.versions && s.versions_with_source === s.versions) {
+    return (
+      <>
+        <Fig n={s.versions_with_screenshot} /> of <Fig n={s.versions} one="recorded version" /> {has(s.versions_with_screenshot)} a full-page
+        screenshot and the stored source.
+      </>
+    );
+  }
+  return (
+    <>
+      <Fig n={s.versions_with_screenshot} /> of <Fig n={s.versions} one="recorded version" /> {has(s.versions_with_screenshot)} a full-page
+      screenshot, and <Fig n={s.versions_with_source} /> {has(s.versions_with_source)} the stored source.
+    </>
+  );
+}
+
+type Requirement = { name: string; proof: Child; links: { href: string; text: string }[] };
+
+/** The bounty's requirements, each with its live proof and its link, with the figures from the stats. */
+function requirements(props: HomeProps, compare: { href: string; text: string } | null): Requirement[] {
+  const s = props.stats;
+  const runs = s.runs_by_trigger;
+  const newest = props.changes[0];
+  const since = s.recording_since;
+  const free = Math.max(0, s.public_slots.total - s.public_slots.used);
+  return [
+    {
+      name: "Monitor does the core work",
+      proof: (
+        <>
+          <Fig n={s.monitors.active} one="page" /> read twice a day by TinyFish Monitor: <Fig n={runs.webhook} one="scheduled check" />{" "}
+          delivered by webhook, <Fig n={runs.pull} /> fetched when one was overdue. Delete the Monitors and nothing new is ever recorded.
+        </>
+      ),
+      links: [{ href: "/watchlist", text: "Watchlist" }],
+    },
+    {
+      name: "A screenshot for every change",
+      proof: evidenceProof(s),
+      links:
+        newest === undefined
+          ? []
+          : [{ href: `/pages/${encodeURIComponent(newest.page_id)}?v=${encodeURIComponent(newest.version_id)}#version`, text: "The newest version" }],
+    },
+    {
+      name: "As-of lookup and a structured diff",
+      proof: "Pick a date on any page; compare any two versions section by section, with the changed words marked.",
+      links: compare === null ? [] : [{ href: compare.href, text: "The comparison above" }],
+    },
+    {
+      name: "Real changes caught live",
+      proof: (
+        <>
+          <Fig n={s.changes} one="real change" />
+          {since === null ? (
+            " so far"
+          ) : (
+            <>
+              {` since ${formatDate(since)} (`}
+              <Fig n={daysSince(since, props.nowMs)} one="day" />
+              {" of recording)"}
+            </>
+          )}
+          . <Fig n={s.noise_suppressed} one="noise event" /> filtered; <Fig n={s.layout_only} one="layout-only change" /> labelled, kept and
+          shown.
+        </>
+      ),
+      links: [{ href: "#feed", text: "The feed" }],
+    },
+    {
+      name: "Works for any page you add",
+      proof: (
+        <>
+          <Fig n={free} /> of <Fig n={s.public_slots.total} one="public slot" /> free; a public page is watched for {PUBLIC_TTL_DAYS} days and
+          refused with the reason when it cannot be read.
+        </>
+      ),
+      links: [{ href: "/watchlist#add", text: "Add a page" }],
+    },
+    {
+      name: "Reusable by other tools",
+      proof: "An open JSON API with CORS, and a full export.",
+      links: [
+        { href: "/about#data", text: "The API" },
+        { href: "/api/export.json", text: "The full export" },
+      ],
+    },
+  ];
+}
+
+/** How each TinyFish service is used, one sentence each with its live figure. */
+function services(s: Stats): { name: string; use: Child }[] {
+  return [
+    {
+      name: "Monitor",
+      use: (
+        <>
+          <Fig n={checksRun(s)} one="check" /> of the watched pages, each sent to Fineprint by webhook or, when one was overdue, run on
+          request.
+        </>
+      ),
+    },
+    {
+      name: "Fetch",
+      use: (
+        <>
+          <Fig n={s.pages} one="page" /> validated and <Fig n={s.versions_with_source} one="source" /> stored: each page is read before it is
+          added, and each version's HTML is kept.
+        </>
+      ),
+    },
+    {
+      name: "Browser",
+      use: (
+        <>
+          <Fig n={s.versions_with_screenshot} one="screenshot" /> and <Fig n={s.thumbnails} one="thumbnail" />: the whole page as it was read,
+          and the small copy the feed shows.
+        </>
+      ),
+    },
+    {
+      name: "Agent",
+      use: (
+        <>
+          Price tables read for <Fig n={s.versions_with_facts} one="version" /> of pricing and fee pages.
+        </>
+      ),
+    },
+    { name: "Search", use: "Finds a site's pricing, terms and fees pages on the watchlist, free." },
+  ];
+}
+
+/** 3. Built for the TinyFish Time Machine bounty: the requirements with their proof, the services, the cost. */
+function Bounty(props: { home: HomeProps; compare: { href: string; text: string } | null }) {
+  const s = props.home.stats;
+  return (
+    <section class="bounty" id="bounty" aria-labelledby="bounty-h">
+      <h2 id="bounty-h">Built for the TinyFish Time Machine bounty</h2>
+      <p class="section-lede">Every line below is live data from the recorder, not a description.</p>
+      <ul class="reqs">
+        {requirements(props.home, props.compare).map((r) => (
+          <li class="req">
+            <h3>{r.name}</h3>
+            <p class="req-proof">{r.proof}</p>
+            {r.links.length === 0 ? null : (
+              <p class="req-link">
+                {r.links.map((l, i) => (
+                  <>
+                    {i === 0 ? null : " · "}
+                    <a href={l.href}>{l.text}</a>
+                  </>
+                ))}
+              </p>
+            )}
+          </li>
+        ))}
+      </ul>
+      <h3 class="services-h" id="services-h">
+        How each TinyFish service is used
+      </h3>
+      <table class="table services" aria-labelledby="services-h">
+        <thead>
+          <tr>
+            <th scope="col">Service</th>
+            <th scope="col">Its use so far</th>
+          </tr>
+        </thead>
+        <tbody>
+          {services(s).map((row) => (
+            <tr>
+              <th scope="row">{row.name}</th>
+              <td>{row.use}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p class="costline">{costLine(s)}</p>
+      <p class="bounty-more">
+        <a href="/about">Read how it works</a>
+      </p>
+    </section>
+  );
+}
 
 /** "1 page was retired for unreliable reads. Its history is kept." and its plural. */
 export function retiredLine(n: number): string {
@@ -294,63 +586,57 @@ export function CatchCard(props: { change: ChangeItem }) {
 export function Home(props: HomeProps) {
   const { stats } = props;
   const watched = stats.monitors.active;
-  const hero = heroParts(props.weekCount);
   const shown = props.changes.slice(0, FEED_SIZE);
   const older = props.changes.length > FEED_SIZE ? shown[shown.length - 1] : undefined;
-  const checks = stats.runs_by_trigger.webhook + stats.runs_by_trigger.pull;
+  const featured = props.featured ?? null;
+  // The older screens of the feed are the feed: the opening stays (the one h1), the examples and the proof do not.
+  const newest = props.before === null;
+  const compare = newest ? compareExample(featured, props.changes[0]) : null;
 
   return (
     <Layout
-      title="Fineprint: a dated record of the small print"
-      description={`${heroLine(props.weekCount)} Fineprint keeps a dated record, with a screenshot, every time a pricing, fees, terms or rules page changes, so you can see what was true on any day.`}
+      title="Fineprint: a dated record of the web's small print"
+      description={`${OPENING.h1} ${OPENING.lede[0]}`}
       stats={stats}
       current="home"
     >
-      <div class="wrap hero-grid">
-        <div>
-          <h1 class="hero">
-            {hero.before}
-            {hero.count === null ? null : <em>{hero.count}</em>}
-            {hero.after}
-          </h1>
-          <p class="lede">
-            Fineprint watches the pages you agree to without reading: prices, fees, terms, visa rules. Every time one of them
-            changes, it keeps a dated record with a screenshot, so you can see what was true on any day.
+      <div class={featured === null ? "wrap opening" : "wrap opening has-shot"}>
+        <div class="opening-text">
+          <h1 class="hero">{OPENING.h1}</h1>
+          <p class="lede">{`${OPENING.lede[0]} ${OPENING.lede[1]}`}</p>
+          <p class="actions">
+            <a class="btn" href="#feed">
+              See what changed this week
+            </a>
+            <a class="btn secondary" href="/watchlist#add">
+              Watch a page of your own
+            </a>
           </p>
-          <ol class="steps">
-            <li>
-              <span class="n" aria-hidden="true">
-                1
-              </span>
-              <b>Watch</b>
-              <span class="t">{`TinyFish Monitor reads each of ${plural(watched, "page")} twice a day.`}</span>
-            </li>
-            <li>
-              <span class="n" aria-hidden="true">
-                2
-              </span>
-              <b>Catch</b>
-              <span class="t">A real difference becomes a dated version with a screenshot. Noise is filtered out.</span>
-            </li>
-            <li>
-              <span class="n" aria-hidden="true">
-                3
-              </span>
-              <b>Compare</b>
-              <span class="t">Pick any two dates and see exactly which words changed.</span>
-            </li>
-          </ol>
         </div>
-        <div class="stats" role="group" aria-label="The record so far">
-          <StatBlock figure={String(watched)} label="Pages watched" />
-          <StatBlock figure={String(stats.changes)} label="Real changes" isKey />
-          <StatBlock figure={String(checks)} label="Checks run" />
-          <StatBlock figure={String(stats.noise_suppressed)} label="Noise filtered" />
-        </div>
+        {/* Under the opening's words on a phone; under the words and the catch from 1000px (site.css). */}
+        <LiveLine stats={stats} />
+        {featured === null ? null : <FeaturedCatch featured={featured} />}
       </div>
 
       <div class="wrap">
-        {props.featured ? <FeaturedCatch featured={props.featured} /> : null}
+        {newest ? (
+          <section class="answers" aria-labelledby="answers-h">
+            <h2 id="answers-h">What it answers</h2>
+            <ul class="asks">
+              {asks(props, compare).map((a) => (
+                <li>
+                  <h3>{a.question}</h3>
+                  <p>
+                    <a href={a.href}>{a.text}</a>
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+
+        {newest ? <Bounty home={props} compare={compare} /> : null}
+
         <section id="feed" aria-labelledby="feed-h">
           <h2 id="feed-h">Every change, newest first</h2>
           {props.before === null ? null : (
@@ -359,31 +645,41 @@ export function Home(props: HomeProps) {
               <a href="/#feed">Back to the newest</a>
             </p>
           )}
-          {shown.length === 0 ? (
-            <p class="empty card">
-              {props.before === null
-                ? `No changes recorded yet. ${plural(watched, "page")} ${watched === 1 ? "is" : "are"} checked twice a day.`
-                : `No changes recorded before ${formatUtc(props.before)}.`}
-            </p>
-          ) : (
-            <ul class="feed">
-              {shown.map((change) => (
-                <CatchCard change={change} />
-              ))}
-            </ul>
-          )}
-          {older === undefined ? null : (
-            <p class="more">
-              <a class="btn secondary" href={`/?before=${encodeURIComponent(older.captured_at)}#feed`}>
-                Older changes
-              </a>
-            </p>
-          )}
-          {props.retiredWithChanges > 0 ? (
-            <p class="retired-note">
-              <a href="/watchlist#retired">{retiredLine(props.retiredWithChanges)}</a>
-            </p>
-          ) : null}
+          <div class="feed-grid">
+            <div class="stats" role="group" aria-label="The record so far">
+              <StatBlock figure={String(watched)} label="Pages watched" />
+              <StatBlock figure={String(stats.changes)} label="Real changes" isKey />
+              <StatBlock figure={String(checksRun(stats))} label="Checks run" />
+              <StatBlock figure={String(stats.noise_suppressed)} label="Noise filtered" />
+            </div>
+            <div class="feed-main">
+              {shown.length === 0 ? (
+                <p class="empty card">
+                  {props.before === null
+                    ? `No changes recorded yet. ${plural(watched, "page")} ${watched === 1 ? "is" : "are"} checked twice a day.`
+                    : `No changes recorded before ${formatUtc(props.before)}.`}
+                </p>
+              ) : (
+                <ul class="feed">
+                  {shown.map((change) => (
+                    <CatchCard change={change} />
+                  ))}
+                </ul>
+              )}
+              {older === undefined ? null : (
+                <p class="more">
+                  <a class="btn secondary" href={`/?before=${encodeURIComponent(older.captured_at)}#feed`}>
+                    Older changes
+                  </a>
+                </p>
+              )}
+              {props.retiredWithChanges > 0 ? (
+                <p class="retired-note">
+                  <a href="/watchlist#retired">{retiredLine(props.retiredWithChanges)}</a>
+                </p>
+              ) : null}
+            </div>
+          </div>
         </section>
       </div>
     </Layout>

@@ -1,6 +1,7 @@
-// The document every screen shares: head (styles, the two preloaded fonts, the optional enhance.js), the
-// header (wordmark, stamp, nav) and the footer (the spend meter). No inline script or style element: the
-// CSP allows only files from this origin, and every screen works without the script.
+// The document every screen shares: head (the title and description, also as og: tags for link previews,
+// styles, the two preloaded fonts, the optional enhance.js), the header (wordmark, stamp, nav) and the footer
+// (the spend meter). No inline script or style element: the CSP allows only files from this origin, and every
+// screen works without the script.
 import type { Child } from "hono/jsx";
 import { raw } from "hono/html";
 import type { Stats } from "../readModel";
@@ -43,6 +44,8 @@ export function Layout(props: {
           {props.refreshSeconds === undefined ? null : <meta http-equiv="refresh" content={String(props.refreshSeconds)} />}
           <title>{props.title}</title>
           <meta name="description" content={props.description} />
+          <meta property="og:title" content={props.title} />
+          <meta property="og:description" content={props.description} />
           {props.noindex ? <meta name="robots" content="noindex" /> : null}
           <meta name="theme-color" content="#f3eee4" />
           <link rel="preload" href="/assets/fonts/fraunces-latin-opsz-normal.woff2" as="font" type="font/woff2" crossorigin="anonymous" />

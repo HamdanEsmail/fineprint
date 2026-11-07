@@ -405,13 +405,16 @@ describe("about", () => {
       const cold = await queries("/about");
       const warm = await queries("/about");
       const home = await queries("/");
-      expect(cold.length).toBe(home.length + 5);
-      expect(warm.length).toBe(home.length);
+      expect(cold.length).toBe(warm.length + 5);
+      // The home reads one statement more: the feed and its three small reads (one batch), where About reads two
+      // change lists and the pages.
+      expect(warm.length).toBe(home.length - 1);
       expect(warm.length).toBe(14);
       // The warm screen never reads a version's text.
       expect(warm.some((sql) => /SELECT\s+\*\s+FROM\s+versions/i.test(sql))).toBe(false);
-      // One batch a screen, one round trip: the stats' six aggregates (prepared, so counted above).
-      expect(batch.mock.calls.map((call) => call[0].length)).toEqual([6, 6, 6]);
+      // A batch is one round trip: the stats' six aggregates on each screen (prepared, so counted above), and the
+      // home's week count, retired count and as-of example.
+      expect(batch.mock.calls.map((call) => call[0].length)).toEqual([6, 6, 6, 3]);
     } finally {
       prepare.mockRestore();
       batch.mockRestore();

@@ -24,6 +24,7 @@ import type { CaptureStatus, FactsStatus, PageKind, PageRow, PageStatus, Summary
 import {
   baselineVersion,
   countChanges as countChangeRows,
+  countChangesStatement,
   countVersionsBetween,
   getVersion as getVersionRow,
   getVersionOfPage,
@@ -35,6 +36,7 @@ import {
   previousVersionOf,
   versionAsOf,
   versionsOfPageStatement,
+  type ChangeFilter,
   type VersionSummary,
   type WithTrigger,
 } from "./db/versions";
@@ -122,24 +124,71 @@ export async function listChanges(
  * Retired pages are in unless `includeRetired` is false; layout-only changes are in unless
  * `excludeLayoutOnly` is true (the home screen's count, which then agrees with Stats.changes).
  */
-export function countChanges(
-  env: Env,
-  opts: { since?: string; includeRetired?: boolean; excludeLayoutOnly?: boolean },
-): Promise<number> {
-  return countChangeRows(env.DB, {
-    sinceIso: opts.since ?? null,
-    includeRetired: opts.includeRetired ?? true,
-    excludeLayoutOnly: opts.excludeLayoutOnly ?? false,
-  });
+export function countChanges(env: Env, opts: CountOptions): Promise<number> {
+  return countChangeRows(env.DB, changeFilter(opts));
 }
+
+type CountOptions = { since?: string; includeRetired?: boolean; excludeLayoutOnly?: boolean };
+
+const changeFilter = (opts: CountOptions): ChangeFilter => ({
+  sinceIso: opts.since ?? null,
+  includeRetired: opts.includeRetired ?? true,
+  excludeLayoutOnly: opts.excludeLayoutOnly ?? false,
+});
+
+const RETIRED_WITH_CHANGES_SQL = `SELECT COUNT(*) AS n FROM pages p
+  WHERE p.status = 'retired' AND EXISTS (SELECT 1 FROM versions v WHERE v.page_id = p.id AND v.is_baseline = 0)`;
 
 /** How many retired pages hold at least one real change: their record is kept, out of the feed. */
 export async function countRetiredPagesWithChanges(env: Env): Promise<number> {
-  const row = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM pages p
-     WHERE p.status = 'retired' AND EXISTS (SELECT 1 FROM versions v WHERE v.page_id = p.id AND v.is_baseline = 0)`,
-  ).first<{ n: number }>();
+  const row = await env.DB.prepare(RETIRED_WITH_CHANGES_SQL).first<{ n: number }>();
   return row?.n ?? 0;
+}
+
+// --- The home's counts and its as-of example -----------------------------------------------------
+
+/** A page to show "what did this page say on a date" with: its first two versions' times. */
+export type AsOfExample = { page_id: string; label: string; first_at: string; second_at: string };
+
+/**
+ * The page that is not retired with the most versions (two at least, so a time between its first two has a
+ * version in force that is not the newest), the newest page on a tie, with the times of its first two
+ * versions. No text is read.
+ */
+const AS_OF_EXAMPLE_SQL = `SELECT p.id AS page_id, p.label AS label,
+    (SELECT w.captured_at FROM versions w WHERE w.page_id = p.id ORDER BY w.captured_at, w.rowid LIMIT 1) AS first_at,
+    (SELECT w.captured_at FROM versions w WHERE w.page_id = p.id ORDER BY w.captured_at, w.rowid LIMIT 1 OFFSET 1) AS second_at
+  FROM pages p JOIN (SELECT page_id, COUNT(*) AS n FROM versions GROUP BY page_id HAVING COUNT(*) >= 2) c ON c.page_id = p.id
+  WHERE ${NOT_RETIRED_SQL}
+  ORDER BY c.n DESC, p.created_at DESC, p.rowid DESC
+  LIMIT 1`;
+
+/** The home's as-of example (see AS_OF_EXAMPLE_SQL), or null when no page has two versions. One query. */
+export async function asOfExample(env: Env): Promise<AsOfExample | null> {
+  return (await env.DB.prepare(AS_OF_EXAMPLE_SQL).first<AsOfExample>()) ?? null;
+}
+
+/** What the newest home screen reads besides the stats and the feed. */
+export type HomeCounts = { weekCount: number; retiredWithChanges: number; asOf: AsOfExample | null };
+
+/**
+ * The newest home screen's three small reads, sent to D1 as one batch (one round trip): the real changes
+ * since `sinceIso` (countChanges with retired pages and layout-only changes left out, so it counts what
+ * Stats.changes counts), countRetiredPagesWithChanges and asOfExample, each with the same SQL as alone.
+ */
+export async function homeCounts(env: Env, sinceIso: string): Promise<HomeCounts> {
+  const db = env.DB;
+  const [week, retired, example] = await db.batch<Record<string, unknown>>([
+    countChangesStatement(db, changeFilter({ since: sinceIso, includeRetired: false, excludeLayoutOnly: true })),
+    db.prepare(RETIRED_WITH_CHANGES_SQL),
+    db.prepare(AS_OF_EXAMPLE_SQL),
+  ]);
+  const n = (result: D1Result<Record<string, unknown>> | undefined): number => Number(result?.results[0]?.n ?? 0);
+  return {
+    weekCount: n(week),
+    retiredWithChanges: n(retired),
+    asOf: (example?.results[0] as AsOfExample | undefined) ?? null,
+  };
 }
 
 // --- Stats ------------------------------------------------------------------------------------
@@ -158,6 +207,14 @@ export type Stats = {
   noise_suppressed: number;
   /** Versions whose screenshot and source are stored but whose price facts could not be taken. */
   facts_unavailable: number;
+  /** Versions with a full-page screenshot stored (TinyFish Browser). */
+  versions_with_screenshot: number;
+  /** Versions with their HTML source stored (TinyFish Fetch). */
+  versions_with_source: number;
+  /** Versions whose price table was read and stored (TinyFish Agent, `facts_status` ok). */
+  versions_with_facts: number;
+  /** Versions with a 640 by 400 thumbnail made from the screenshot. */
+  thumbnails: number;
   noise_by_reason: Record<string, number>;
   spend_usd: number;
   /** No check, capture or pull starts from SPEND_PAUSE_USD on. */
@@ -180,7 +237,7 @@ export type Stats = {
   public_slots: { total: number; used: number; next_free_at: string | null };
 };
 
-/** The record so far: six aggregates, sent to D1 as one batch (one round trip). */
+/** The record so far: six aggregates, sent to D1 as one batch (one round trip); the evidence counts are in the first. */
 export async function getStats(env: Env): Promise<Stats> {
   const db = env.DB;
   const [totalsResult, spendResult, statusResult, triggerResult, noiseResult, slotsResult] = await db.batch<Record<string, unknown>>([
@@ -197,6 +254,10 @@ export async function getStats(env: Env): Promise<Stats> {
            (SELECT MIN(created_at) FROM pages) AS recording_since,
            (SELECT COUNT(*) FROM runs WHERE noise_suppressed = 1) AS noise_suppressed,
            (SELECT COUNT(*) FROM versions WHERE facts_status = 'unavailable') AS facts_unavailable,
+           (SELECT COUNT(*) FROM versions WHERE screenshot_key IS NOT NULL) AS versions_with_screenshot,
+           (SELECT COUNT(*) FROM versions WHERE html_key IS NOT NULL) AS versions_with_source,
+           (SELECT COUNT(*) FROM versions WHERE facts_status = 'ok') AS versions_with_facts,
+           (SELECT COUNT(*) FROM versions WHERE thumb_key IS NOT NULL) AS thumbnails,
            (SELECT COALESCE(SUM(amount_usd), 0) FROM spend) AS spend_usd`),
     db.prepare("SELECT kind, SUM(amount_usd) AS usd FROM spend GROUP BY kind"),
     db.prepare("SELECT status, COUNT(*) AS n FROM pages GROUP BY status"),
@@ -215,6 +276,10 @@ export async function getStats(env: Env): Promise<Stats> {
         recording_since: string | null;
         noise_suppressed: number;
         facts_unavailable: number;
+        versions_with_screenshot: number;
+        versions_with_source: number;
+        versions_with_facts: number;
+        thumbnails: number;
         spend_usd: number;
       }
     | undefined;
@@ -244,6 +309,10 @@ export async function getStats(env: Env): Promise<Stats> {
     versions: totals?.versions ?? 0,
     noise_suppressed: totals?.noise_suppressed ?? 0,
     facts_unavailable: totals?.facts_unavailable ?? 0,
+    versions_with_screenshot: totals?.versions_with_screenshot ?? 0,
+    versions_with_source: totals?.versions_with_source ?? 0,
+    versions_with_facts: totals?.versions_with_facts ?? 0,
+    thumbnails: totals?.thumbnails ?? 0,
     noise_by_reason: noiseByReason,
     spend_usd: dollars(spend),
     // The two pauses, read from the same total the Worker's own checks use.

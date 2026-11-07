@@ -48,24 +48,26 @@ nav a { display: block; padding: 8px 10px; font: 500 14px/1 var(--font-body); te
 nav a:hover { border-bottom-color: var(--rule); }
 nav a[aria-current="page"] { border-bottom-color: var(--accent); }
 
-/* --- Hero, steps, stat column ---------------------------------------------------------------- */
-.hero-grid { display: grid; gap: 32px; padding-top: 40px; padding-bottom: 8px; }
-@media (min-width: 900px) { .hero-grid { grid-template-columns: minmax(0, 1fr) 200px; gap: 56px; padding-top: 64px; } }
-.hero { max-width: 18ch; text-wrap: balance; }
-@media (min-width: 900px) { .hero { font-size: 52px; line-height: 1.02; } }
-.hero em { font-style: normal; color: var(--accent); }
-.lede { margin-top: 20px; max-width: 56ch; font-size: 17px; line-height: 1.5; color: var(--ink-soft); }
-
-.steps { display: grid; margin-top: 32px; border-top: var(--border); }
-@media (min-width: 700px) { .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-.steps li { padding: 16px 0; border-bottom: var(--hairline); }
-@media (min-width: 700px) {
-  .steps li { padding: 16px 20px 4px 0; border-bottom: 0; }
-  .steps li + li { padding-left: 20px; border-left: var(--hairline); }
+/* --- Home: the opening (the site's one Persuade surface), the live line ----------------------------- */
+/* The line, the lede and the two actions; beside them from 1100px (under them below that) the featured catch,
+   the product itself, with the words kept in view beside it as it scrolls; under both, the live line, ruled
+   like the foot of a ledger page. Below 1100px the live line comes straight after the words. */
+.opening { display: grid; row-gap: 28px; padding-top: 40px; }
+@media (min-width: 900px) { .opening { row-gap: 36px; padding-top: 64px; } }
+@media (min-width: 1100px) {
+  .opening.has-shot { grid-template-columns: minmax(0, 9fr) minmax(0, 11fr); grid-template-areas: "text shot" "live live"; column-gap: 48px; }
+  .opening.has-shot .opening-text { grid-area: text; align-self: start; position: sticky; top: 32px; padding-top: 4px; }
+  .opening.has-shot .featured { grid-area: shot; }
+  .opening.has-shot .liveline { grid-area: live; }
 }
-.steps .n { margin-right: 10px; font: 500 13px/1 var(--font-data); color: var(--accent); }
-.steps b { font: 600 18px/1.3 var(--font-display); letter-spacing: -.01em; }
-.steps .t { display: block; max-width: 34ch; margin-top: 4px; font-size: 14px; line-height: 1.45; color: var(--ink-soft); }
+.hero { max-width: 16ch; text-wrap: balance; }
+@media (min-width: 900px) { .hero { font-size: 52px; line-height: 1.02; } }
+.lede { margin-top: 20px; max-width: 56ch; font-size: 17px; line-height: 1.5; color: var(--ink-soft); }
+.opening .actions { margin-top: 28px; }
+/* One line on a laptop; narrower, it breaks between its parts, never inside one. */
+.liveline { padding-top: 12px; font: 500 12px/1.7 var(--font-data); letter-spacing: .06em; text-transform: uppercase; font-variant-numeric: tabular-nums; color: var(--ink-muted); border-top: var(--border); }
+.liveline span { white-space: nowrap; }
+.liveline span:first-child { color: var(--ink); }
 
 .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-content: start; }
 @media (min-width: 900px) { .stats { grid-template-columns: 1fr; } }
@@ -361,6 +363,50 @@ section.diff-group { padding-top: 32px; }
 .feature-summary { max-width: 62ch; margin-top: 10px; font: 500 20px/1.35 var(--font-display); letter-spacing: -.01em; text-wrap: pretty; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .feature .pair { margin-top: 24px; }
 @media (max-width: 699.98px) { .feature-summary { font-size: 18px; } .feature .shot-none p + p { display: none; } }
+/* In the opening, the catch is the product shot: no section gap above it, and its caption line says it is real. */
+.opening .featured { padding-top: 0; }
+.meta .caught { color: var(--accent); }
+.meta .caught time { white-space: nowrap; }
+
+/* --- Home: what it answers, a ruled row of three examples (no cards) ------------------------------------ */
+.asks { display: grid; border-top: var(--border); }
+.asks li { padding: 16px 0 18px; border-bottom: var(--hairline); }
+@media (min-width: 760px) {
+  .asks { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .asks li { padding: 18px 24px 4px 0; border-bottom: 0; }
+  .asks li + li { padding-left: 24px; border-left: var(--hairline); }
+}
+.asks h3 { max-width: 26ch; font: 600 19px/1.3 var(--font-display); letter-spacing: -.01em; text-wrap: balance; }
+.asks p { margin-top: 8px; font: 500 14px/1.45 var(--font-body); overflow-wrap: anywhere; }
+
+/* --- Home: built for the bounty, each requirement beside its live proof ----------------------------------- */
+.bounty .section-lede { margin-top: -6px; }
+.reqs { margin-top: 22px; border-top: var(--border); }
+.req { display: grid; gap: 4px; padding: 14px 0 16px; border-bottom: var(--hairline); }
+@media (min-width: 900px) { .req { grid-template-columns: 240px minmax(0, 1fr) 170px; gap: 28px; align-items: baseline; padding: 16px 0 18px; } }
+.req h3 { font: 600 18px/1.35 var(--font-display); letter-spacing: -.01em; }
+.req-proof { max-width: 68ch; font-size: 15px; line-height: 1.55; color: var(--ink-soft); }
+/* A live figure in a sentence of proof: ink, tabular, a step heavier than the words around it. */
+.fig { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink); }
+.req-link { font: var(--t-small); }
+@media (min-width: 900px) { .req-link { text-align: right; } }
+.services-h { margin-top: 44px; font: 600 19px/1.3 var(--font-display); letter-spacing: -.01em; }
+.services { max-width: 880px; margin-top: 14px; }
+.services thead th { white-space: nowrap; }
+.services tbody th { width: 12ch; vertical-align: top; font: 600 16px/1.45 var(--font-display); letter-spacing: -.01em; }
+.services td { vertical-align: top; font-size: 15px; line-height: 1.5; color: var(--ink-soft); }
+@media (max-width: 699.98px) { .services tbody th { width: 9ch; } }
+.costline { margin-top: 18px; font: 500 12px/1.6 var(--font-data); letter-spacing: .02em; font-variant-numeric: tabular-nums; }
+.bounty-more { margin-top: 12px; font: 500 14px/1.45 var(--font-body); }
+
+/* --- Home: the feed, with the stat blocks beside it (above it on a phone) -------------------------------- */
+.feed-grid { display: grid; gap: 20px; }
+@media (min-width: 900px) {
+  .feed-grid { grid-template-columns: minmax(0, 1fr) 200px; gap: 40px; align-items: start; }
+  .feed-grid > .stats { grid-column: 2; grid-row: 1; position: sticky; top: 24px; }
+  .feed-grid > .feed-main { grid-column: 1; grid-row: 1; }
+}
+.feed-main { min-width: 0; }
 
 /* --- Watchlist (src/site/views/watchlist.tsx) -------------------------------------------------- */
 .watchlist .page-head .lede { margin-top: 14px; }

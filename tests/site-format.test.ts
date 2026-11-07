@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { Stats } from "../src/readModel";
 import { EvidenceLine } from "../src/site/components";
 import {
+  checksRun,
+  costLine,
+  daysSince,
+  formatDate,
   formatUsd,
   formatUtc,
-  heroLine,
-  heroParts,
+  liveLine,
   plural,
   sourceLabel,
   spendMeter,
@@ -48,14 +51,54 @@ describe("site formatters", () => {
     expect(plural(3, "was", "were")).toBe("3 were");
   });
 
-  it("writes the hero line from the week's count", () => {
-    expect(heroLine(0)).toBe("Nothing changed this week.");
-    expect(heroLine(1)).toBe("The web changed its mind once this week.");
-    expect(heroLine(14)).toBe("The web changed its mind 14 times this week.");
-    // For the heading, the count and its word are held together by a non-breaking space.
-    expect(heroParts(14)).toEqual({ before: "The web changed its mind ", count: "14 times", after: " this week." });
-    expect(heroParts(1)).toEqual({ before: "The web changed its mind ", count: "once", after: " this week." });
-    expect(heroParts(0)).toEqual({ before: "Nothing changed this week.", count: null, after: "" });
+  it("writes a date alone, in UTC", () => {
+    expect(formatDate("2026-11-03T14:17:38.543Z")).toBe("3 Nov 2026");
+    expect(formatDate("2026-11-04T23:59:59.999Z")).toBe("4 Nov 2026");
+    expect(formatDate("2026-11-05T01:15:00+03:00")).toBe("4 Nov 2026");
+    expect(formatDate("not a time")).toBe("not a time");
+  });
+
+  it("counts whole days of recording, at least one", () => {
+    const since = "2026-11-03T14:17:38.543Z";
+    expect(daysSince(since, Date.parse("2026-11-03T15:00:00.000Z"))).toBe(1);
+    expect(daysSince(since, Date.parse("2026-11-05T14:17:38.542Z"))).toBe(1);
+    expect(daysSince(since, Date.parse("2026-11-05T14:17:38.543Z"))).toBe(2);
+    expect(daysSince(since, Date.parse("2026-11-07T13:00:00.000Z"))).toBe(3);
+    // A clock behind the record still says one day, never zero or less.
+    expect(daysSince(since, Date.parse("2026-11-01T00:00:00.000Z"))).toBe(1);
+  });
+
+  const stats = (over: Partial<Stats> = {}): Stats =>
+    ({
+      recording_since: "2026-11-03T14:17:38.543Z",
+      monitors: { active: 20, paused: 0, failed: 0, expired: 0, retired: 1 },
+      changes: 11,
+      runs_by_trigger: { create: 20, webhook: 143, pull: 7 },
+      noise_suppressed: 8,
+      spend_usd: 3.435,
+      ...over,
+    }) as Stats;
+
+  it("writes the home's live line from the stats, one or many for every count", () => {
+    expect(checksRun(stats())).toBe(150);
+    expect(liveLine(stats())).toBe("Recording since 3 Nov 2026 · 20 pages · 11 real changes · 150 checks · 8 noise events filtered");
+    expect(
+      liveLine(
+        stats({
+          monitors: { active: 1, paused: 0, failed: 0, expired: 0, retired: 0 },
+          changes: 1,
+          runs_by_trigger: { create: 1, webhook: 1, pull: 0 },
+          noise_suppressed: 1,
+        }),
+      ),
+    ).toBe("Recording since 3 Nov 2026 · 1 page · 1 real change · 1 check · 1 noise event filtered");
+    expect(liveLine(stats({ recording_since: null }))).toBe("Not recording yet: no page has been added.");
+  });
+
+  it("writes the cost line, with a cost per real change only when there is one, and the two caps", () => {
+    expect(costLine(stats())).toBe("TinyFish spend so far $3.44 · $0.31 per real change · caps at $6 and $8 by design.");
+    expect(costLine(stats({ spend_usd: 0.3, changes: 0 }))).toBe("TinyFish spend so far $0.30 · caps at $6 and $8 by design.");
+    expect(costLine(stats({ spend_usd: 0.3, changes: 1 }))).toBe("TinyFish spend so far $0.30 · $0.30 per real change · caps at $6 and $8 by design.");
   });
 
   it("links only http and https sources, and shows anything else as text", async () => {

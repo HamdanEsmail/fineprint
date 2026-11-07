@@ -871,6 +871,11 @@ describe("GET /api/stats", () => {
       versions: 3,
       noise_suppressed: NOISE_RUNS,
       facts_unavailable: 0,
+      // ver-3's screenshot capture gave up; every version has its source and its facts; no thumbnail was made.
+      versions_with_screenshot: 2,
+      versions_with_source: 3,
+      versions_with_facts: 3,
+      thumbnails: 0,
       // The seeded noise runs carry the reason "last updated": a reason the code does not know has its own key.
       noise_by_reason: { normalized_identical: 0, partial_render: 0, flap: 0, layout_hold: 0, "last updated": NOISE_RUNS },
       spend_usd: 0.051,
@@ -899,6 +904,10 @@ describe("GET /api/stats", () => {
       versions: 0,
       noise_suppressed: 0,
       facts_unavailable: 0,
+      versions_with_screenshot: 0,
+      versions_with_source: 0,
+      versions_with_facts: 0,
+      thumbnails: 0,
       noise_by_reason: { normalized_identical: 0, partial_render: 0, flap: 0, layout_hold: 0 },
       spend_usd: 0,
       spend_paused: false,

@@ -669,13 +669,15 @@ export async function listChanges(
   return results;
 }
 
+/** countChanges as a statement, for a batch: one row, `n`. */
+export function countChangesStatement(db: D1Database, filter: ChangeFilter): D1PreparedStatement {
+  const { where, binds } = changeWhere(filter);
+  return db.prepare(`SELECT COUNT(*) AS n FROM versions v JOIN pages p ON p.id = v.page_id WHERE ${where}`).bind(...binds);
+}
+
 /** How many real changes listChanges would find with no limit: one COUNT, no rows read out. */
 export async function countChanges(db: D1Database, filter: ChangeFilter): Promise<number> {
-  const { where, binds } = changeWhere(filter);
-  const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM versions v JOIN pages p ON p.id = v.page_id WHERE ${where}`)
-    .bind(...binds)
-    .first<{ n: number }>();
+  const row = await countChangesStatement(db, filter).first<{ n: number }>();
   return row?.n ?? 0;
 }
 

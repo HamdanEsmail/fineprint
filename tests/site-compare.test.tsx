@@ -10,6 +10,7 @@ import type { Env } from "../src/env";
 import worker from "../src/index";
 import { getDiff, listChanges } from "../src/readModel";
 import { BlockText, plainText } from "../src/site/blockText";
+import { formatUtc } from "../src/site/format";
 import { BLOCKS_PER_GROUP, placesFromDiff, WORD_DIFF_CHARS, WORD_DIFF_PAIRS } from "../src/site/views/compare";
 import { FEATURE_TEXT_CAP, featuredCatch } from "../src/site/views/home";
 import { wordDiff, WORD_DIFF_MAX_CHARS } from "../src/site/wordDiff";
@@ -527,7 +528,7 @@ describe("GET /pages/:id/compare", () => {
 
 describe("the featured catch on the home screen", () => {
   it("shows one changed block before and after, with the screenshots and the links", async () => {
-    await seedPricing();
+    const { t1 } = await seedPricing();
     const home = await get("/");
     expect(home).toContain("The latest catch, up close");
     expect(home).toMatch(/<del[^>]*>\$20<\/del>/);
@@ -539,8 +540,11 @@ describe("the featured catch on the home screen", () => {
     expect(home).toMatch(/<img[^>]+src="\/shots\/v0\.jpg"/);
     expect(home).toMatch(/<img[^>]+src="\/thumbs\/v1\.jpg"/);
     expect(home).not.toMatch(/<img[^>]+src="https?:/);
-    // Between the hero and the feed.
+    // Beside the opening, before the feed; its caption line says it is a real catch, and when.
     expect(home.indexOf("The latest catch, up close")).toBeGreaterThan(home.indexOf('class="hero"'));
+    expect(home).toContain(`<span class="caught">A real catch, recorded <time datetime="${t1}">${formatUtc(t1)}</time></span>`);
+    // The opening's "What changed between two dates?" is the featured catch's comparison.
+    expect(home).toMatch(/<a href="\/pages\/pricing\/compare\?from=v0&amp;to=v1">Example pricing, [^<]+<\/a>/);
     expect(home.indexOf("The latest catch, up close")).toBeLessThan(home.indexOf("Every change, newest first"));
     // Only the block that changed, cut to its lines.
     expect(home).not.toContain("An old footnote that goes away.</p>");
@@ -605,10 +609,11 @@ describe("the featured catch on the home screen", () => {
     try {
       const cold = await queries();
       const warm = await queries();
-      // Nine for the home itself; the featured catch adds its candidate query, the two versions and the
-      // page, and the cached diff (warm), or the diff's own reads and the cache write (cold, once).
-      expect(cold.length).toBe(19);
-      expect(warm.length).toBe(14);
+      // Ten for the home itself (the stats' six, the feed, and the week's count, the retired line's count and the
+      // as-of example, those three in one batch); the featured catch adds its candidate query, the two versions and
+      // the page, and the cached diff (warm), or the diff's own reads and the cache write (cold, once).
+      expect(cold.length).toBe(20);
+      expect(warm.length).toBe(15);
       // The warm home never reads a version's text.
       expect(warm.some((sql) => /SELECT\s+\*\s+FROM\s+versions/i.test(sql))).toBe(false);
     } finally {
@@ -624,7 +629,7 @@ describe("the featured catch on the home screen", () => {
       const res = await worker.fetch(new Request("https://x/"), env, ctx);
       await waitOnExecutionContext(ctx);
       await res.text();
-      expect(spy.mock.calls.length).toBeLessThanOrEqual(9);
+      expect(spy.mock.calls.length).toBeLessThanOrEqual(10);
     } finally {
       spy.mockRestore();
     }
