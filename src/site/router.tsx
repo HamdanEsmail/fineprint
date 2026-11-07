@@ -23,10 +23,12 @@ import {
   listVersionsForDiff,
   parseTime,
   sectionPlaces,
+  type Stats,
   versionInForce,
   type VersionItem,
 } from "../readModel";
 import { parseAsOfInput, webHref } from "./format";
+import { cacheKey, markMiss, onlyParams, readCached } from "./htmlCache";
 import { About } from "./views/about";
 import { CompareView, diffSections, placesFromDiff, type CompareState } from "./views/compare";
 import { FEATURE_CHANGES, FEED_SIZE, featuredCatch, Home } from "./views/home";
@@ -78,6 +80,23 @@ export function notFound(c: AppContext): Response | Promise<Response> {
   return render(c, <NotFound />, 404);
 }
 
+/** Hands the stored copy's write to the execution context (a context-less call just skips the copy). */
+const schedule = (c: AppContext) => (work: Promise<unknown>) => {
+  try {
+    c.executionCtx.waitUntil(work);
+  } catch {
+    // no execution context: nothing to keep the write alive
+  }
+};
+
+/** A fresh render of a screen that may be stored under `key`: sent as a miss, and stored when `store` holds. */
+const fresh = async (c: AppContext, key: string | null, res: Response | Promise<Response>, store: boolean): Promise<Response> =>
+  key === null || c.env.HTML_CACHE === "0" ? res : markMiss(c.env, schedule(c), c.req.method, key, await res, store);
+
+/** The stored copy of a screen (null when there is none or the request is not cacheable). */
+const stored = (c: AppContext, key: string | null): Promise<Response | null> =>
+  key === null || c.env.HTML_CACHE === "0" ? Promise.resolve(null) : readCached(c.env, key);
+
 export const siteRouter = new Hono<{ Bindings: Env }>();
 
 siteRouter.onError((err, c) => {
@@ -89,6 +108,9 @@ siteRouter.onError((err, c) => {
 
 siteRouter.get("/", async (c) => {
   if (!siteEnabled(c.env)) return c.notFound();
+  const key = onlyParams(c.req.url) ? cacheKey.home() : null;
+  const hit = await stored(c, key);
+  if (hit !== null) return hit;
   // A before= that is not a time shows the newest changes.
   const before = parseTime(c.req.query("before"));
   const nowMs = Date.now();
@@ -107,20 +129,25 @@ siteRouter.get("/", async (c) => {
   const { weekCount, retiredWithChanges, asOf } = counts;
   // The featured catch is on the newest screen only; it reads its candidates from the feed it is shown beside.
   const featured = newest ? await featuredCatch(c.env, changes) : null;
-  return render(
+  return fresh(
     c,
-    <Home
-      stats={stats}
-      weekCount={weekCount}
-      changes={changes}
-      before={before}
-      retiredWithChanges={retiredWithChanges}
-      featured={featured}
-      asOf={asOf}
-      nowMs={nowMs}
-    />,
-    200,
-    KEEP_A_MINUTE,
+    key,
+    render(
+      c,
+      <Home
+        stats={stats}
+        weekCount={weekCount}
+        changes={changes}
+        before={before}
+        retiredWithChanges={retiredWithChanges}
+        featured={featured}
+        asOf={asOf}
+        nowMs={nowMs}
+      />,
+      200,
+      KEEP_A_MINUTE,
+    ),
+    true,
   );
 });
 
@@ -135,6 +162,10 @@ siteRouter.get("/pages/:id", async (c) => {
   // v= and at= are resolved from the versions already read.
   const head = await findPage(c.env, pageId);
   if (head === null) return render(c, <NotFound />, 404);
+  // The default view (no query) may come from the stored copy: the page exists, which is all a hit needs.
+  const key = onlyParams(c.req.url) ? cacheKey.page(pageId) : null;
+  const hit = await stored(c, key);
+  if (hit !== null) return hit;
   const [stats, detail] = await Promise.all([getStats(c.env), getPageRecord(c.env, head)]);
 
   const nowMs = Date.now();
@@ -177,11 +208,16 @@ siteRouter.get("/pages/:id", async (c) => {
   // Kept a minute, unless the page reloads itself for a screenshot being taken, or has no version yet (a page
   // just added, whose baseline is on its way).
   const kept = selected !== null && !refreshes(selected, isGone(head.page.status), nowMs);
-  return render(
+  return fresh(
     c,
-    <PageView stats={stats} detail={detail} selected={selected} asOf={asOf} text={text} nowMs={nowMs} />,
-    200,
-    kept ? KEEP_A_MINUTE : {},
+    key,
+    render(
+      c,
+      <PageView stats={stats} detail={detail} selected={selected} asOf={asOf} text={text} nowMs={nowMs} />,
+      200,
+      kept ? KEEP_A_MINUTE : {},
+    ),
+    kept,
   );
 });
 
@@ -196,7 +232,11 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   // stored, or the two texts and two counts and the cache write when it is not).
   const head = await findPage(c.env, pageId);
   if (head === null) return render(c, <NotFound />, 404);
-  const [stats, versions] = await Promise.all([getStats(c.env), listVersionsForDiff(c.env, pageId)]);
+  // A compare with no parameter but from= and to= may come from the stored copy, found by the concrete pair; a hit
+  // needs the versions (to name the pair) but not the stats, which are read after it.
+  const cacheable = onlyParams(c.req.url, ["from", "to"]);
+  const [stats, versions] = await Promise.all([cacheable ? null : getStats(c.env), listVersionsForDiff(c.env, pageId)]);
+  const statsNow = async (): Promise<Stats> => stats ?? (await getStats(c.env));
   const items = versions.map((v) => v.item);
 
   const indexOf = (id: string | undefined): number | null => {
@@ -208,19 +248,23 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   let toIndex = indexOf(c.req.query("to"));
   if (fromIndex === -1 || toIndex === -1) return render(c, <NotFound />, 404);
 
-  const view = (state: CompareState) => <CompareView stats={stats} page={head.page} versions={items} state={state} />;
-  if (versions.length < 2) return render(c, view({ kind: "single" }), 200, KEEP_A_MINUTE);
+  const view = (state: CompareState, stats: Stats) => <CompareView stats={stats} page={head.page} versions={items} state={state} />;
+  if (versions.length < 2) return render(c, view({ kind: "single" }, await statsNow()), 200, KEEP_A_MINUTE);
 
   // Versions are newest first. Without to=, the latest; without from=, the one just before `to` (the one
   // just after it when `to` is the first version).
   toIndex ??= 0;
   fromIndex ??= toIndex + 1 < versions.length ? toIndex + 1 : toIndex - 1;
-  if (fromIndex === toIndex) return render(c, view({ kind: "same", at: items[toIndex]! }), 200, KEEP_A_MINUTE);
+  if (fromIndex === toIndex) return render(c, view({ kind: "same", at: items[toIndex]! }, await statsNow()), 200, KEEP_A_MINUTE);
   // `from` is the older: a reversed pair is swapped, so the cache key is the one the JSON route uses.
   if (fromIndex < toIndex) [fromIndex, toIndex] = [toIndex, fromIndex];
 
   const from = versions[fromIndex]!;
   const to = versions[toIndex]!;
+  const key = cacheable ? cacheKey.compare(pageId, from.row.id, to.row.id) : null;
+  const hit = await stored(c, key);
+  if (hit !== null) return hit;
+  const statsRead = await statsNow();
   const answer = await diffVersions(c.env, head.page, from.row, to.row);
   // A version deleted between the two reads.
   if (answer === null) return render(c, <NotFound />, 404);
@@ -231,13 +275,21 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   const sections = blocks ? diffSections(blocks) : [];
   const places =
     blocks && sections.length > 1 ? (placesFromDiff(blocks) ?? (await sectionPlaces(c.env, from.row.id, to.row.id, sections))) : null;
-  return render(c, view({ kind: "diff", from: from.item, to: to.item, diff, all: c.req.query("all") === "1", places }), 200, KEEP_A_MINUTE);
+  return fresh(
+    c,
+    key,
+    render(c, view({ kind: "diff", from: from.item, to: to.item, diff, all: c.req.query("all") === "1", places }, statsRead), 200, KEEP_A_MINUTE),
+    true,
+  );
 });
 
 // --- About: how Fineprint works ---------------------------------------------------------------------
 
 siteRouter.get("/about", async (c) => {
   if (!siteEnabled(c.env)) return c.notFound();
+  const key = onlyParams(c.req.url) ? cacheKey.about() : null;
+  const hit = await stored(c, key);
+  if (hit !== null) return hit;
   // Four round trips, then the featured catch's: the stats (one batch of six); the newest changes outside retired pages, which
   // the featured catch picks from as the home does (the same change, under the same caps); the newest
   // layout-only change, for the one linked example; and the page list, for the retired pages it names.
@@ -248,19 +300,24 @@ siteRouter.get("/about", async (c) => {
     listPages(c.env),
   ]);
   const featured = await featuredCatch(c.env, changes);
-  return render(
+  return fresh(
     c,
-    <About
-      stats={stats}
-      featured={featured}
-      sample={changes[0] ?? null}
-      layoutExample={layoutOnly[0] ?? null}
-      retired={pages.filter((p) => p.status === "retired")}
-      baseUrl={c.env.PUBLIC_BASE_URL.replace(/\/+$/, "")}
-      repoUrl={webHref(c.env.REPO_URL ?? "")}
-    />,
-    200,
-    KEEP_A_MINUTE,
+    key,
+    render(
+      c,
+      <About
+        stats={stats}
+        featured={featured}
+        sample={changes[0] ?? null}
+        layoutExample={layoutOnly[0] ?? null}
+        retired={pages.filter((p) => p.status === "retired")}
+        baseUrl={c.env.PUBLIC_BASE_URL.replace(/\/+$/, "")}
+        repoUrl={webHref(c.env.REPO_URL ?? "")}
+      />,
+      200,
+      KEEP_A_MINUTE,
+    ),
+    true,
   );
 });
 
@@ -338,6 +395,9 @@ function watchlist(
 
 siteRouter.get("/watchlist", async (c) => {
   if (!siteEnabled(c.env)) return c.notFound();
+  const key = onlyParams(c.req.url) ? cacheKey.watchlist() : null;
+  const hit = await stored(c, key);
+  if (hit !== null) return hit;
   // url= and label= fill the add form (a Watch this page link); they are only shown, so they cost nothing.
   const url = c.req.query("url") ?? "";
   const label = c.req.query("label") ?? "";
@@ -356,16 +416,21 @@ siteRouter.get("/watchlist", async (c) => {
         : await discover(c.env, typed, { admin: false, ipHash: () => visitorHash(c) }, pages);
     find = { typed: typed.slice(0, MAX_URL_LENGTH), answer };
   }
-  return watchlist(
+  return fresh(
     c,
-    { stats, pages },
-    {
-      form: { url: url.slice(0, MAX_URL_LENGTH), label: label.slice(0, MAX_LABEL_LENGTH) },
-      refusal: null,
-      find,
-      noindex: url !== "" || label !== "" || typed !== "",
-    },
-    find !== null && !find.answer.ok ? find.answer.status : 200,
+    key,
+    watchlist(
+      c,
+      { stats, pages },
+      {
+        form: { url: url.slice(0, MAX_URL_LENGTH), label: label.slice(0, MAX_LABEL_LENGTH) },
+        refusal: null,
+        find,
+        noindex: url !== "" || label !== "" || typed !== "",
+      },
+      find !== null && !find.answer.ok ? find.answer.status : 200,
+    ),
+    true,
   );
 });
 

@@ -49,6 +49,8 @@ export default defineConfig({
             PUBLIC_BASE_URL: "https://fineprint.test",
             // The site is on in tests; tests/site-routing.test.ts also checks it switched off.
             SITE_ENABLED: "1",
+            // Off for the suites that change data and read a screen again; tests/site-cache.test.ts turns it on.
+            HTML_CACHE: "0",
             TEST_MIGRATIONS: await readD1Migrations("./migrations"),
             ...(live ? { LIVE_TINYFISH_API_KEY: live } : {}),
           },
