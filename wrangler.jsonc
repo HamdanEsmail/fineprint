@@ -34,7 +34,10 @@
     // the Worker did before the site existed. Previews upload with --var SITE_ENABLED:1.
     "SITE_ENABLED": "1",
     // The source repository the About screen links to. Empty, no link is shown.
-    "REPO_URL": ""
+    "REPO_URL": "",
+    // Stored copies of the site's screens (src/site/htmlCache.ts): "0" serves every screen freshly
+    // rendered. Off until the copies are rebuilt when the data they show changes.
+    "HTML_CACHE": "0"
   },
   // Styles, fonts, the favicon and robots.txt. A request that matches no file reaches the Worker.
   "assets": { "directory": "./public" },
