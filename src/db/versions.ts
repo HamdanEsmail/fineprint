@@ -235,6 +235,31 @@ export async function listVersions(db: D1Database, pageId: string): Promise<With
   return (await versionsOfPageStatement(db, pageId).all<WithTrigger<VersionSummary>>()).results;
 }
 
+/**
+ * The stored screens worth building ahead of readers: for each page with a version captured at or after `sinceIso`
+ * (one query), its page view and, when it has two versions, the default compare of the newest pair. Pages in id order.
+ */
+export async function prewarmKeys(db: D1Database, sinceIso: string): Promise<string[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT page_id, id FROM (
+         SELECT page_id, id, ROW_NUMBER() OVER (PARTITION BY page_id ORDER BY captured_at DESC, rowid DESC) AS n,
+                MAX(captured_at) OVER (PARTITION BY page_id) AS newest
+         FROM versions
+       ) WHERE n <= 2 AND newest >= ? ORDER BY page_id, n`,
+    )
+    .bind(sinceIso)
+    .all<{ page_id: string; id: string }>();
+  const byPage = new Map<string, string[]>();
+  for (const r of results) byPage.set(r.page_id, [...(byPage.get(r.page_id) ?? []), r.id]);
+  const keys: string[] = [];
+  for (const [pageId, [latest, previous]] of byPage) {
+    keys.push(`page/${pageId}`);
+    if (previous !== undefined) keys.push(`compare/${pageId}/${previous}/${latest}`);
+  }
+  return keys;
+}
+
 /** listVersions's statement, for a caller that sends it in a batch (src/readModel.ts getPageRecord). */
 export const versionsOfPageStatement = (db: D1Database, pageId: string): D1PreparedStatement =>
   db

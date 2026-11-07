@@ -112,5 +112,14 @@ export const FILL_DIFFS_PER_CALL = 12;
  * Node, normalize on both texts plus structuredDiff takes about 1.2 ms at 29 KB and 8 to 11 ms at 228 KB.
  */
 export const LARGE_DIFF_TEXT_CHARS = 40_000;
+/**
+ * The hourly job rebuilds stored screens (src/cron.ts): at most this many in a tick, each in an invocation of its
+ * own. The first three are always home, About and the watchlist, whose live counts move with every check; the
+ * rest, REBUILD_CALLS_PER_TICK minus those, pre-warm the views of pages with a version captured in the last
+ * REBUILD_WINDOW_HOURS, taken in turn by the hour of day when there are more.
+ */
+export const REBUILD_CALLS_PER_TICK = 8;
+export const REBUILD_FIXED_SCREENS = ["home", "about", "watchlist"] as const;
+export const REBUILD_WINDOW_HOURS = 24;
 /** The large pairs the cron looks at in a tick; it stores one of them, taken in turn by the hour of day. */
 export const WARM_DIFF_CANDIDATES = 24;

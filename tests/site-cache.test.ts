@@ -1,8 +1,8 @@
 import { applyD1Migrations, createExecutionContext, reset, waitOnExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { captureDeps } from "../src/capture";
-import { runCron } from "../src/cron";
+import { cronDeps, runCron } from "../src/cron";
 import { addPage } from "../src/handlers/pages";
 import { fillSummaries } from "../src/summary";
 import { fetchMock } from "./helpers/fetch-mock";
@@ -12,12 +12,16 @@ import { insertPage, type NewPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { RunRow, TriggerKind } from "../src/db/types";
 import { insertVersion, type NewVersion } from "../src/db/versions";
+import { REBUILD_CALLS_PER_TICK } from "../src/core/limits";
 import { cacheKey, dropCached } from "../src/site/htmlCache";
 import worker from "../src/index";
 
 // The stored copy of the likely screens (src/site/htmlCache.ts): the first answer is a miss that stores
 // html/<key>, the next is a hit with the same body and headers, and every screen with a varying query
 // parameter, every 404 and every screen that still refreshes itself is never stored.
+
+// Each test renders several screens, which the suite running in parallel can slow past the default 5 s.
+vi.setConfig({ testTimeout: 30_000 });
 
 const db = env.DB;
 const cacheOn = { ...env, HTML_CACHE: "1" };
@@ -332,7 +336,9 @@ describe("dropping the stored screens that show a change", () => {
     fetchMock.intercept({ method: "DELETE", url: /\/v1\/monitors\/mon-old$/, reply: { status: 204 } });
     fetchMock.intercept({ method: "GET", url: "https://agent.tinyfish.ai/v1/monitors", times: Infinity, reply: { json: { monitors: [] } } });
     await env.STORE.put("html/page/old", "<p>old</p>");
+    const rebuild = vi.spyOn(cronDeps, "rebuild").mockResolvedValue(new Response("{}")); // the tick's own rebuild is tested below
     const result = await runCron(cacheOn);
+    rebuild.mockRestore();
     expect(result.expired).toBe(1);
     // (The same tick also asks for the missing summaries, which drops alpha's screens: only these are checked.)
     const rest = await left();
@@ -364,3 +370,109 @@ function mockTinyFish(): void {
     },
   });
 }
+
+// --- The hourly rebuild ------------------------------------------------------------------------------
+
+const ADMIN = { Authorization: "Bearer test-admin" };
+
+describe("POST /api/admin/rebuild-html", () => {
+  it("refuses without the admin token and stores nothing", async () => {
+    for (const headers of [{} as Record<string, string>, { Authorization: "Bearer wrong" }]) {
+      const res = await callWorker("/api/admin/rebuild-html?key=home", { method: "POST", headers });
+      expect(res.status).toBe(401);
+    }
+    expect(await stored()).toEqual([]);
+  });
+
+  it("renders a screen fresh and stores it: a GET that follows is a hit with the same body and headers", async () => {
+    // the cache is on only for this suite's worker calls; the route itself needs no setting
+    for (const key of ["home", "about", "watchlist", "page/alpha", "compare/alpha/a-2/a-3"]) {
+      const res = await callWorker(`/api/admin/rebuild-html?key=${key}`, { method: "POST", headers: ADMIN });
+      expect(await res.json(), key).toEqual({ key, stored: true });
+    }
+    expect((await stored()).sort()).toEqual(["about", "compare/alpha/a-2/a-3", "home", "page/alpha", "watchlist"]);
+    const hit = await callWorker("/pages/alpha");
+    expect(hit.headers.get("x-fineprint-cache")).toBe("hit");
+    expect(await hit.text()).toContain("<h1>alpha</h1>");
+    // a rebuild replaces the copy with a fresh render
+    await env.STORE.put("html/page/alpha", "stale", { customMetadata: { headers: "{}" } });
+    await callWorker("/api/admin/rebuild-html?key=page/alpha", { method: "POST", headers: ADMIN });
+    const again = await callWorker("/pages/alpha");
+    expect(again.headers.get("x-fineprint-cache")).toBe("hit");
+    expect(await again.text()).toContain("<h1>alpha</h1>"); // the render, not the stale copy
+    expect(headersOf(again)).toEqual(headersOf(hit));
+  });
+
+  it("does not store a screen that is not kept, and refuses a key of another kind", async () => {
+    const missing = await callWorker("/api/admin/rebuild-html?key=page/nope", { method: "POST", headers: ADMIN });
+    expect(await missing.json()).toEqual({ key: "page/nope", stored: false });
+    for (const key of ["", "x", "page", "page/a/b", "compare/a/b", "../home"]) {
+      const res = await callWorker(`/api/admin/rebuild-html?key=${encodeURIComponent(key)}`, { method: "POST", headers: ADMIN });
+      expect(res.status, key).toBe(400);
+    }
+    expect(await stored()).toEqual([]);
+  });
+
+  it("the public cannot force a fresh render: HTML_CACHE is not read from a request", async () => {
+    await env.STORE.put("html/about", "<p>kept</p>", { customMetadata: { headers: "{}" } });
+    const res = await callWorker("/about", { headers: { "x-fineprint-cache": "rebuild", "cache-control": "no-cache" } });
+    expect(res.headers.get("x-fineprint-cache")).toBe("hit");
+    expect(await res.text()).toBe("<p>kept</p>");
+  });
+});
+
+describe("the hourly tick's rebuild", () => {
+  let asked: string[];
+  let rebuild: MockInstance<typeof cronDeps.rebuild>;
+  const at = (hour: number) => vi.spyOn(cronDeps, "now").mockReturnValue(new Date(`2026-11-07T${String(hour).padStart(2, "0")}:30:00.000Z`));
+  beforeEach(() => {
+    asked = [];
+    rebuild = vi.spyOn(cronDeps, "rebuild").mockImplementation(async (_env, key) => {
+      asked.push(key);
+      return new Response("{}");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("rebuilds home, about and the watchlist, then pre-warms only the pages changed in the last 24 hours", async () => {
+    await insertPage(db, page("quiet"));
+    await version("q-1", "quiet", ago(30 * HOUR), "create");
+    await version("q-2", "quiet", ago(26 * HOUR), "webhook");
+    await runCron(cacheOn);
+    expect(asked.slice(0, 3)).toEqual(["home", "about", "watchlist"]);
+    expect(asked.slice(3)).toEqual(["page/alpha", "compare/alpha/a-2/a-3"]);
+    expect(rebuild).toHaveBeenCalledTimes(5);
+  });
+
+  it("makes at most the cap in a tick, the fixed three always among them, and rotates by the hour", async () => {
+    for (let n = 0; n < 6; n++) {
+      await insertPage(db, page(`p${n}`));
+      await version(`p${n}-1`, `p${n}`, ago(3 * HOUR), "create");
+      await version(`p${n}-2`, `p${n}`, ago(2 * HOUR), "webhook");
+    }
+    at(5);
+    await runCron(cacheOn);
+    const first = asked.slice();
+    expect(first).toHaveLength(REBUILD_CALLS_PER_TICK);
+    expect(first.slice(0, 3)).toEqual(["home", "about", "watchlist"]);
+    expect(new Set(first).size).toBe(first.length);
+    asked.length = 0;
+    at(6);
+    await runCron(cacheOn);
+    expect(asked).toHaveLength(REBUILD_CALLS_PER_TICK);
+    expect(asked.slice(3)).not.toEqual(first.slice(3));
+  });
+
+  it("a failing rebuild is logged and does not fail the tick or stop the others", async () => {
+    rebuild.mockImplementation(async (_env: unknown, key: string) => {
+      asked.push(key);
+      if (key === "about") throw new Error("down");
+      return new Response("no", { status: 500 });
+    });
+    const result = await runCron(cacheOn);
+    expect(result).toEqual({ repaired: 0, expired: 0, unhealthy: [], pulled: 0 });
+    expect(asked.slice(0, 3)).toEqual(["home", "about", "watchlist"]);
+  });
+});

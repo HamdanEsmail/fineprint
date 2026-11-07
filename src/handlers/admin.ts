@@ -14,6 +14,7 @@ import type { VersionRow } from "../db/types";
 import { baselineVersion, countVersionsWithoutThumb, getVersion, insertVersion, latestVersion, versionsWithoutThumb } from "../db/versions";
 import type { Env } from "../env";
 import { dropCachedWatchlist } from "../site/htmlCache";
+import { rebuildScreen } from "../site/rebuild";
 import { warmDiff } from "../readModel";
 import { recordMonitorRun, type MonitorRun } from "../record";
 import { fillDeltas, fillSummaries, requestSummary } from "../summary";
@@ -244,6 +245,21 @@ adminRouter.post("/admin/backfill-summaries", adminOnly, async (c) => {
 adminRouter.post("/admin/backfill-deltas", adminOnly, async (c) => {
   const versionId = c.req.query("version");
   return c.json(await fillDeltas(c.env, versionId === undefined ? {} : { versionId }));
+});
+
+// --- Stored screens -------------------------------------------------------------------------------
+
+/**
+ * Renders one site screen fresh, exactly as the site route does, and stores it at `html/<key>` with the
+ * same headers (src/site/rebuild.ts): `?key=home|about|watchlist|page/<id>|compare/<id>/<from>/<to>`. Answers
+ * `{key, stored}`; `stored` is false for a screen that is not kept (a 404, a page still refreshing for its
+ * screenshot). A key of any other kind is 400. The hourly job calls it, one screen to an invocation.
+ */
+adminRouter.post("/admin/rebuild-html", adminOnly, async (c) => {
+  const key = c.req.query("key") ?? "";
+  const stored = await rebuildScreen(c.env, new URL(c.req.url).origin, key);
+  if (stored === null) return c.json({ error: "invalid_key" }, 400);
+  return c.json({ key, stored });
 });
 
 // --- Thumbnails ---------------------------------------------------------------------------------

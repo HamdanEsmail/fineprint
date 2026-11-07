@@ -888,6 +888,9 @@ describe("runCron", () => {
     const asked: string[] = [];
     const realWarm = cronDeps.warm;
     const realNow = cronDeps.now;
+    const realRebuild = cronDeps.rebuild;
+    // The stored screens' rebuild would render these pairs and store their diffs itself: not what is measured here.
+    cronDeps.rebuild = async () => new Response(JSON.stringify({ stored: false }));
     cronDeps.warm = async (_env, versionId) => {
       asked.push(versionId);
       return new Response(JSON.stringify({ stored: true }));
@@ -906,6 +909,7 @@ describe("runCron", () => {
     } finally {
       cronDeps.warm = realWarm;
       cronDeps.now = realNow;
+      cronDeps.rebuild = realRebuild;
     }
   });
 

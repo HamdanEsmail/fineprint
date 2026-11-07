@@ -21,6 +21,9 @@ import {
   LARGE_DIFF_TEXT_CHARS,
   MONITOR_LOOKUPS_PER_TICK,
   PULLS_PER_TICK,
+  REBUILD_CALLS_PER_TICK,
+  REBUILD_FIXED_SCREENS,
+  REBUILD_WINDOW_HOURS,
   REPAIR_PER_TICK,
   WARM_DIFF_CANDIDATES,
 } from "./core/limits";
@@ -34,6 +37,7 @@ import {
   inFlightFactsRuns,
   listFactsClaims,
   pendingCaptures,
+  prewarmKeys,
   updateIfFactsHolder,
 } from "./db/versions";
 import type { Env } from "./env";
@@ -61,6 +65,14 @@ export const cronDeps = {
   warm: (env: Env, versionId: string): Promise<Response> =>
     env.SELF.fetch(
       new Request(`https://fineprint.internal/api/admin/warm-diff?version=${encodeURIComponent(versionId)}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` },
+      }),
+    ),
+  /** Rebuilds one stored site screen in an invocation of its own (POST /api/admin/rebuild-html). */
+  rebuild: (env: Env, key: string): Promise<Response> =>
+    env.SELF.fetch(
+      new Request(`https://fineprint.internal/api/admin/rebuild-html?key=${encodeURIComponent(key)}`, {
         method: "POST",
         headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` },
       }),
@@ -109,6 +121,7 @@ export async function runCron(env: Env): Promise<CronResult> {
   await step("summaries", () => fillMissingSummaries(env));
   await step("deltas", () => fillMissingDeltas(env));
   await step("large diffs", () => warmLargeDiff(env));
+  await step("stored screens", () => rebuildScreens(env));
   console.log("cron", {
     repaired: result.repaired,
     expired: result.expired,
@@ -116,6 +129,37 @@ export async function runCron(env: Env): Promise<CronResult> {
     pulled: result.pulled,
   });
   return result;
+}
+
+// --- 8. Stored screens ----------------------------------------------------------------------
+
+/**
+ * The last step: rebuilds the stored copies of the site's screens, each in an invocation of its own through the
+ * SELF binding (one screen's render is most of a request's CPU). At most REBUILD_CALLS_PER_TICK in all: home,
+ * About and the watchlist every tick (their live counts move with every check), then the page view and the default
+ * compare of pages with a version in the last REBUILD_WINDOW_HOURS, taken in turn by the hour of day when there
+ * are more than fit. Never throws: a failed rebuild is logged and the copy is rebuilt on the next tick or the
+ * next change.
+ */
+async function rebuildScreens(env: Env): Promise<void> {
+  const now = cronDeps.now();
+  const since = new Date(now.getTime() - REBUILD_WINDOW_HOURS * 60 * MINUTE_MS).toISOString();
+  const room = REBUILD_CALLS_PER_TICK - REBUILD_FIXED_SCREENS.length;
+  const candidates = await prewarmKeys(env.DB, since).catch((err: unknown) => {
+    logError("cron could not list the screens to pre-warm", err);
+    return [] as string[];
+  });
+  const start = candidates.length > room ? (now.getUTCHours() * room) % candidates.length : 0;
+  const warm = Array.from({ length: Math.min(room, candidates.length) }, (_, i) => candidates[(start + i) % candidates.length]!);
+  for (const key of [...REBUILD_FIXED_SCREENS, ...warm]) {
+    try {
+      const res = await cronDeps.rebuild(env, key);
+      await res.arrayBuffer().catch(() => undefined);
+      if (!res.ok) console.error(`rebuild of ${key} failed`, `status=${res.status}`);
+    } catch (err) {
+      logError(`rebuild of ${key} failed`, err);
+    }
+  }
 }
 
 async function step(name: string, work: () => Promise<void>): Promise<void> {

@@ -7,7 +7,7 @@ export interface Env {
   PUBLIC_BASE_URL: string;
   /** "1" turns the site's screens on (src/site); anything else leaves every site path answering as before. */
   SITE_ENABLED: string;
-  /** "0" turns the stored copy of the site screens off (every screen renders fresh); anything else leaves it on. */
+  /** "0" turns the stored copy of the site screens off (every screen renders fresh); anything else leaves it on. "rebuild" is set in code only (src/site/rebuild.ts): render fresh and store. */
   HTML_CACHE?: string;
   /** The public source repository, linked from the About screen; empty (no link) until it is published. */
   REPO_URL: string;

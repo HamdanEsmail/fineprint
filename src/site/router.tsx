@@ -95,7 +95,7 @@ const fresh = async (c: AppContext, key: string | null, res: Response | Promise<
 
 /** The stored copy of a screen (null when there is none or the request is not cacheable). */
 const stored = (c: AppContext, key: string | null): Promise<Response | null> =>
-  key === null || c.env.HTML_CACHE === "0" ? Promise.resolve(null) : readCached(c.env, key);
+  key === null || c.env.HTML_CACHE === "0" || c.env.HTML_CACHE === "rebuild" ? Promise.resolve(null) : readCached(c.env, key);
 
 export const siteRouter = new Hono<{ Bindings: Env }>();
 
