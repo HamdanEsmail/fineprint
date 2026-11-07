@@ -612,9 +612,9 @@ export function Home(props: HomeProps) {
               Watch a page of your own
             </a>
           </p>
+          {/* Its own row under the buttons, in the words' column, at every width. */}
+          <LiveLine stats={stats} />
         </div>
-        {/* Under the opening's words on a phone; under the words and the catch from 1000px (site.css). */}
-        <LiveLine stats={stats} />
         {featured === null ? null : <FeaturedCatch featured={featured} />}
       </div>
 

@@ -55,15 +55,16 @@ nav a[aria-current="page"] { border-bottom-color: var(--accent); }
 .opening { display: grid; row-gap: 28px; padding-top: 40px; }
 @media (min-width: 900px) { .opening { row-gap: 36px; padding-top: 64px; } }
 @media (min-width: 1100px) {
-  .opening.has-shot { grid-template-columns: minmax(0, 9fr) minmax(0, 11fr); grid-template-areas: "text shot" "live live"; column-gap: 48px; }
+  .opening.has-shot { grid-template-columns: minmax(0, 9fr) minmax(0, 11fr); grid-template-areas: "text shot"; column-gap: 48px; }
   .opening.has-shot .opening-text { grid-area: text; align-self: start; position: sticky; top: 32px; padding-top: 4px; }
   .opening.has-shot .featured { grid-area: shot; }
-  .opening.has-shot .liveline { grid-area: live; }
 }
 .hero { max-width: 16ch; text-wrap: balance; }
 @media (min-width: 900px) { .hero { font-size: 52px; line-height: 1.02; } }
 .lede { margin-top: 20px; max-width: 56ch; font-size: 17px; line-height: 1.5; color: var(--ink-soft); }
 .opening .actions { margin-top: 28px; }
+/* The live line is the last line of the opening's words, on its own row under the buttons at every width. */
+.opening-text .liveline { margin-top: 28px; }
 /* One line on a laptop; narrower, it breaks between its parts, never inside one. */
 .liveline { padding-top: 12px; font: 500 12px/1.7 var(--font-data); letter-spacing: .06em; text-transform: uppercase; font-variant-numeric: tabular-nums; color: var(--ink-muted); border-top: var(--border); }
 .liveline span { white-space: nowrap; }

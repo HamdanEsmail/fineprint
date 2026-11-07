@@ -432,6 +432,16 @@ describe("the opening, what it answers and the bounty proof (site Task 7b)", () 
     expect(at('id="feed"')).toBeLessThan(at('class="stats"'));
   });
 
+  it("gives the live line its own row under the buttons, in the opening's words, never inside the buttons' row", async () => {
+    await seedWeek();
+    const html = await get("/");
+    // Not inside the buttons' row element.
+    expect(slice(html, '<p class="actions">', "</p>")).not.toContain("liveline");
+    // Straight after the buttons' row, still inside the opening's words column (no other element in between).
+    expect(html).toMatch(/<p class="actions">[\s\S]*?<\/p>\s*<p class="liveline">/);
+    expect(html).toMatch(/<div class="opening-text">(?:(?!<\/div>)[\s\S])*<p class="liveline">/);
+  });
+
   it("says each count in the singular when it is one", async () => {
     await insertPage(db, page("solo", { url: "https://example.com/solo", label: "Solo pricing" }));
     await version("solo-0", "solo", ago(2 * DAY), "create");
