@@ -56,7 +56,9 @@ export function Layout(props: {
           <a class="skip" href="#main">
             Skip to the content
           </a>
-          {stats?.spend_paused ? <Notice>Recording is paused at the budget line.</Notice> : null}
+          {stats?.spend_paused ? (
+            <Notice>Spending is paused at the budget line. Changes the Monitors report are still recorded, without screenshots or price tables.</Notice>
+          ) : null}
           <header class="top">
             <div class="wrap">
               <a class="wordmark" href="/">

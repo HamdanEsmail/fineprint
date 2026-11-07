@@ -201,6 +201,7 @@ describe("about", () => {
     const at = html.indexOf('<section id="example"');
     const section = html.slice(at, html.indexOf('<section id="tinyfish"', at));
     expect(section).toContain("One change, start to finish");
+    expect(section).toContain("A change from the home screen, followed through the record");
     for (const caption of ["The check that found it", "The cleaned text that differed", "The screenshots taken", "The entry in the feed"]) {
       expect(section).toContain(caption);
     }
@@ -257,8 +258,11 @@ describe("about", () => {
     expect(row("Fetch")).toContain("$0.00");
     expect(row("Search")).toContain("$0.00");
     expect(row("Agent")).toContain("one run at a time");
+    // When a facts run is taken (src/capture.ts needsFacts), said as the rule is written.
+    expect(row("Agent")).toContain("on pricing and fee pages, not on pages visitors add, and not for changes TinyFish judged irrelevant");
     expect(row("Search")).toContain("Find a site&#39;s small print");
     expect(table).toContain("<tfoot>");
+    expect(table).toContain("Every billed call is written to the spend ledger");
     expect(table).toContain("$0.36");
   });
 
@@ -281,10 +285,15 @@ describe("about", () => {
     expect(section).toContain('href="/pages/privacy/compare?to=p1"');
     expect(section).toContain("Example privacy policy");
 
-    // The retired page, named and linked from the data, with the reason and its kept history.
+    // The retired page, named and linked from the data, with the reason and its kept history. The retire date is
+    // not stored, so the date shown is said to be the newest version's.
     expect(section).toContain('href="/pages/gone"');
     expect(section).toContain("Gone API pricing");
-    expect(section).toContain("rendered differently from one read to the next");
+    expect(section).toContain("Retired by hand, so far for one reason: the page rendered differently from one read to the next");
+    expect(section).toContain("Fineprint stopped watching it");
+    expect(section).toContain("The retire date was not recorded; the date shown is when its newest version was recorded.");
+    expect(section).not.toContain("Monitor was deleted");
+    expect(section).toMatch(/2 versions; newest recorded \d{1,2} \w{3} \d{4}, \d{2}:\d{2} UTC/);
     expect(section).toContain("No longer watched. Its history is kept.");
     expect(section).toContain('class="chip muted">Retired</span>');
   });
@@ -296,17 +305,27 @@ describe("about", () => {
     const section = html.slice(at, html.indexOf('id="data"', at));
     expect(section).toContain("No history before a page is added");
     expect(section).toContain("twice a day");
-    expect(section).toContain("TinyFish writes a summary when it judges a change relevant to the page&#39;s purpose.");
-    expect(section).toContain("every pulled check");
-    expect(section).toContain("built from Fineprint&#39;s own diff");
+    // The summary rule as the recorder keeps it: a summary the run carries is kept, whatever its judgment says.
+    expect(section).toContain("When a Monitor run arrives with a summary of its own, Fineprint keeps it.");
+    expect(section).toContain("A pulled check carries no judgment");
+    expect(section).toContain("any change that arrives without a summary gets a one-line summary built from Fineprint&#39;s own diff");
+    expect(section).toContain("&quot;TinyFish&#39;s summary&quot; or &quot;From the diff&quot;");
+    expect(section).not.toContain("TinyFish writes a summary when");
     expect(section).toContain("Text is the diff; screenshots are evidence.");
     expect(section).toContain(`${PUBLIC_SLOTS} public slots`);
     expect(section).toContain(`${PUBLIC_TTL_DAYS} days`);
     expect(section).toContain("never gets a price table");
-    expect(section).toContain(`$${FACTS_PAUSE_USD}`);
-    expect(section).toContain(`$${SPEND_PAUSE_USD}`);
-    expect(section).toContain("price tables pause");
-    expect(section).toContain("recording pauses");
+    // The two budget lines as the code holds them: the facts pause, then the spend pause, which stops Fineprint's
+    // own costs while the Monitors' scheduled checks go on and their changes are still kept.
+    expect(section).toContain(`At $${FACTS_PAUSE_USD} of TinyFish spend, no new price-table run starts; changes are still recorded.`);
+    expect(section).toContain(
+      `At $${SPEND_PAUSE_USD}, Fineprint starts nothing more that costs money on its side: no overdue-check pull, screenshot, stored source or price table, and no new page can be added.`,
+    );
+    expect(section).toContain(
+      "The Monitors&#39; own scheduled checks keep running, and a change they report is still kept as a version, without its screenshot.",
+    );
+    expect(section).toContain("Spend so far: $0.36.");
+    expect(section).not.toContain("recording pauses");
   });
 
   it("lists the public endpoints with copyable curl commands against PUBLIC_BASE_URL, escaped", async () => {
@@ -368,6 +387,9 @@ describe("about", () => {
     expect(source).toContain("pre[data-copy]");
     expect(source).toContain("showModal");
     expect(source).toContain("navigator.clipboard");
+    // The lightbox opens only images on this origin; each copy button is named by its endpoint.
+    expect(source).toContain("target.origin !== location.origin");
+    expect(source).toContain('" command: "');
   });
 
   it("reads about as much as the home: the stats, two change lists, the pages and the featured catch", async () => {

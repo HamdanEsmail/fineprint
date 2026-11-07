@@ -80,10 +80,13 @@ export function triggerLabel(t: TriggerKind): string {
   return t === "create" ? "Monitor (baseline)" : t === "pull" ? "Monitor (pulled)" : "Monitor (webhook)";
 }
 
-/** The header stamp: RECORDING (with the live dot while any page is watched), or PAUSED at the budget line. */
+/**
+ * The header stamp follows the Monitors, not the wallet: RECORDING with the live dot while any Monitor is active
+ * (at the budget line too, where the Monitors' scheduled checks still run and their changes are still kept),
+ * PAUSED when none is.
+ */
 export function stampFor(s: Stats): { text: "RECORDING" | "PAUSED"; live: boolean } {
-  if (s.spend_paused) return { text: "PAUSED", live: false };
-  return { text: "RECORDING", live: s.monitors.active > 0 };
+  return s.monitors.active > 0 ? { text: "RECORDING", live: true } : { text: "PAUSED", live: false };
 }
 
 /**

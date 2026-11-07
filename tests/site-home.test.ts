@@ -234,13 +234,24 @@ describe("home", () => {
     expect(html).not.toContain("<span></span>");
   });
 
-  it("stamps PAUSED and says so in a banner at the budget line", async () => {
+  it("says so in a banner at the budget line, and keeps the stamp RECORDING while the Monitors run", async () => {
     await seedBaselines();
     await db.prepare("INSERT INTO spend (id, kind, amount_usd, ref, at) VALUES ('s', 'monitor_check', 8, 'x', ?)").bind(ago(HOUR)).run();
     const html = await get("/");
-    expect(html).toContain("PAUSED");
+    expect(html).toContain(
+      "Spending is paused at the budget line. Changes the Monitors report are still recorded, without screenshots or price tables.",
+    );
+    expect(html).toMatch(/<span class="stamp"><span class="live" aria-hidden="true"><\/span>RECORDING<\/span>/);
+    expect(html).not.toContain("PAUSED");
+  });
+
+  it("stamps PAUSED when no Monitor is active", async () => {
+    await insertPage(db, page("idle", { label: "Idle page", status: "paused" }));
+    await version("idle-0", "idle", ago(DAY), "create");
+    const html = await get("/");
+    expect(html).toMatch(/<span class="stamp">PAUSED<\/span>/);
     expect(html).not.toContain("RECORDING");
-    expect(html).toContain("Recording is paused at the budget line.");
+    expect(html).not.toContain("Spending is paused at the budget line.");
   });
 });
 

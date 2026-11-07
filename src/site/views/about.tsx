@@ -58,7 +58,7 @@ const STEPS: { title: string; text: string }[] = [
   },
   {
     title: "The evidence is captured",
-    text: "TinyFish Browser takes a full-page screenshot, TinyFish Fetch keeps the page's HTML source and, on pricing and fee pages, TinyFish Agent reads the price table.",
+    text: "TinyFish Browser takes a full-page screenshot and TinyFish Fetch keeps the page's HTML source. TinyFish Agent reads the price table on pricing and fee pages, not on pages visitors add, and not for changes TinyFish judged irrelevant.",
   },
   {
     title: "The change is published",
@@ -276,7 +276,7 @@ function Uses(props: { stats: Stats }) {
     },
     {
       name: "Agent",
-      does: "Reads the price table on pricing and fee pages, one run at a time; a run that finds no prices is final for that version.",
+      does: "Reads the price table on pricing and fee pages, not on pages visitors add, and not for changes TinyFish judged irrelevant; one run at a time, and a run that finds no prices is final for that version.",
       figure: formatUsd(spend.agent_step),
       note: "Price tables",
     },
@@ -314,7 +314,7 @@ function Uses(props: { stats: Stats }) {
       <tfoot>
         <tr>
           <th scope="row">All five</th>
-          <td class="uses-does">Every call is written to the spend ledger, which the footer adds up on every screen.</td>
+          <td class="uses-does">Every billed call is written to the spend ledger, which the footer adds up on every screen.</td>
           <td class="num uses-fig">
             <span class="uses-usd">{formatUsd(stats.spend_usd)}</span>
             <span class="uses-note">{`of the $${SPEND_PAUSE_USD} budget`}</span>
@@ -410,16 +410,16 @@ function Noise(props: { stats: Stats; layoutExample: ChangeItem | null; retired:
               <span class="kept-n">{plural(retired.length, "page")}</span>
             </p>
             <p>
-              Retired for unreliable reads: the page rendered differently from one read to the next, so a difference between two
-              reads did not have to mean a change. Its Monitor was deleted and nothing new is recorded; everything recorded while it
-              was watched stays.
+              Retired by hand, so far for one reason: the page rendered differently from one read to the next, so a difference
+              between two reads did not have to mean a change. Fineprint stopped watching it, and everything recorded while it was
+              watched stays. The retire date was not recorded; the date shown is when its newest version was recorded.
             </p>
             <ul class="kept-pages">
               {retired.map((p) => (
                 <li>
                   <a href={pageHref(p.id)}>{p.label}</a>
                   <span class="kept-line">No longer watched. Its history is kept.</span>
-                  <span class="kept-count">{`${plural(p.version_count, "version")}${p.latest_version_at === null ? "" : `, the last recorded ${formatUtc(p.latest_version_at)}`}`}</span>
+                  <span class="kept-count">{`${plural(p.version_count, "version")}${p.latest_version_at === null ? "" : `; newest recorded ${formatUtc(p.latest_version_at)}`}`}</span>
                 </li>
               ))}
             </ul>
@@ -444,7 +444,7 @@ function Limits(props: { stats: Stats }) {
     },
     {
       lead: "Not every summary is TinyFish's.",
-      text: `TinyFish writes a summary when it judges a change relevant to the page's purpose. For any other change, and for every pulled check, which carries no judgment, the one-line summary is built from Fineprint's own diff. Each card says which: "${SUMMARY_ORIGIN.tinyfish}" or "${SUMMARY_ORIGIN.diff}".`,
+      text: `When a Monitor run arrives with a summary of its own, Fineprint keeps it. So far TinyFish has sent one for every change it judged relevant to the page's purpose and for none it judged irrelevant. A pulled check carries no judgment, and any change that arrives without a summary gets a one-line summary built from Fineprint's own diff. Each card says which: "${SUMMARY_ORIGIN.tinyfish}" or "${SUMMARY_ORIGIN.diff}".`,
     },
     {
       lead: "Text is the diff; screenshots are evidence.",
@@ -456,7 +456,7 @@ function Limits(props: { stats: Stats }) {
     },
     {
       lead: "A small, fixed budget.",
-      text: `At $${FACTS_PAUSE_USD} of TinyFish spend, price tables pause and changes are still recorded; at $${SPEND_PAUSE_USD}, recording pauses. Spend so far: ${formatUsd(props.stats.spend_usd)}.`,
+      text: `At $${FACTS_PAUSE_USD} of TinyFish spend, no new price-table run starts; changes are still recorded. At $${SPEND_PAUSE_USD}, Fineprint starts nothing more that costs money on its side: no overdue-check pull, screenshot, stored source or price table, and no new page can be added. The Monitors' own scheduled checks keep running, and a change they report is still kept as a version, without its screenshot. Spend so far: ${formatUsd(props.stats.spend_usd)}.`,
     },
   ];
   return (
@@ -560,7 +560,7 @@ function Endpoints(props: { baseUrl: string; ex: Example }) {
 
 // --- The screen ------------------------------------------------------------------------------------------
 
-const TOC: { id: string; text: string; needsFeature?: boolean }[] = [
+const TOC: { id: string; text: string }[] = [
   { id: "how", text: "How a change is recorded" },
   { id: "example", text: "One change, start to finish" },
   { id: "tinyfish", text: "How TinyFish is used" },
@@ -650,7 +650,7 @@ export function About(props: AboutProps) {
               ) : (
                 <>
                   <p class="section-lede">
-                    The change on the home screen, followed through the record: what found it, what differed, what was captured and
+                    A change from the home screen, followed through the record: what found it, what differed, what was captured and
                     what was published.
                   </p>
                   <StartToFinish featured={featured} />

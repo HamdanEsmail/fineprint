@@ -1,6 +1,6 @@
 // Fineprint's one optional script: comfort only, never the content. Every screen works without it.
-// - A screenshot link (a[data-full]) opens the full image in a <dialog> over the page instead of leaving it;
-//   without <dialog> support, or with a modifier key held, the link works as a plain link.
+// - A screenshot link (a[data-full]) to this site opens the full image in a <dialog> over the page instead of
+//   leaving it; without <dialog> support, with a modifier key held, or to another origin, it is a plain link.
 // - A command on About (pre[data-copy]) gets a Copy button that writes its text to the clipboard and says
 //   "Copied"; without the Clipboard API no button is added.
 // Both do nothing on a screen without their elements. Motion lives in site.css, off under reduced motion.
@@ -78,6 +78,14 @@
       if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       var link = event.target instanceof Element ? event.target.closest("a[data-full]") : null;
       if (link === null || !link.getAttribute("href")) return;
+      // Only an image on this site opens over the page; any other link is left to the browser.
+      var target;
+      try {
+        target = new URL(link.getAttribute("href"), location.href);
+      } catch (err) {
+        return;
+      }
+      if (target.origin !== location.origin) return;
       event.preventDefault();
       openLightbox(link);
     });
@@ -90,10 +98,18 @@
   if (commands.length === 0 || !clipboard || typeof clipboard.writeText !== "function") return;
 
   Array.prototype.forEach.call(commands, function (pre) {
+    // Each button is named by its endpoint ("Copy command: GET /api/changes"), so a list of buttons can tell them apart.
+    var item = pre.closest("li");
+    var heading = item ? item.querySelector("h3") : null;
+    var what = heading ? (heading.textContent || "").replace(/\s+/g, " ").trim() : "";
+    var name = function (verb) {
+      return what === "" ? verb + " command" : verb + " command: " + what;
+    };
     var button = document.createElement("button");
     button.type = "button";
     button.className = "copy";
     button.textContent = "Copy";
+    button.setAttribute("aria-label", name("Copy"));
     var status = document.createElement("span");
     status.className = "vh";
     status.setAttribute("role", "status");
@@ -103,11 +119,13 @@
       clipboard.writeText(pre.textContent || "").then(
         function () {
           button.textContent = "Copied";
+          button.setAttribute("aria-label", name("Copied"));
           button.classList.add("is-done");
           status.textContent = "Copied to the clipboard";
           clearTimeout(timer);
           timer = setTimeout(function () {
             button.textContent = "Copy";
+            button.setAttribute("aria-label", name("Copy"));
             button.classList.remove("is-done");
             status.textContent = "";
           }, 2000);
@@ -125,11 +143,11 @@
       );
     });
 
+    // site.css reserves the button's place beside (or, on a phone, under) the command, so nothing moves when it appears.
     var box = pre.parentElement;
     if (box) {
       box.appendChild(button);
       box.appendChild(status);
-      box.classList.add("has-copy");
     }
   });
 })();

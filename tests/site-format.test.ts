@@ -97,8 +97,10 @@ describe("site formatters", () => {
     expect(triggerLabel("pull")).toBe("Monitor (pulled)");
   });
 
-  it("stamps the header RECORDING, or PAUSED at the budget line", () => {
+  it("stamps the header RECORDING while any Monitor is active, at the budget line too, and PAUSED when none is", () => {
     expect(stampFor({ monitors: { active: 20 }, spend_paused: false } as Stats)).toEqual({ text: "RECORDING", live: true });
-    expect(stampFor({ monitors: { active: 20 }, spend_paused: true } as Stats)).toEqual({ text: "PAUSED", live: false });
+    expect(stampFor({ monitors: { active: 20 }, spend_paused: true } as Stats)).toEqual({ text: "RECORDING", live: true });
+    expect(stampFor({ monitors: { active: 0 }, spend_paused: false } as Stats)).toEqual({ text: "PAUSED", live: false });
+    expect(stampFor({ monitors: { active: 0 }, spend_paused: true } as Stats)).toEqual({ text: "PAUSED", live: false });
   });
 });

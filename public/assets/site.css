@@ -574,15 +574,17 @@ section.add, section.find { padding-top: 64px; }
 .endpoints p { max-width: 68ch; margin-top: 4px; font-size: 15px; line-height: 1.55; color: var(--ink-soft); }
 .endpoints p code, .endpoints-note code { padding: 1px 4px; font-size: 12.5px; color: var(--ink); background: var(--paper-sunken); border-radius: var(--r); }
 .cmd { position: relative; max-width: 860px; margin-top: 10px; }
-.cmd pre { margin: 0; padding: 10px 14px; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--t-mono); color: var(--ink); background: var(--paper-sunken); border: var(--hairline); border-radius: var(--r); }
-.cmd.has-copy pre { padding-right: 82px; }
+/* The Copy button (enhance.js) has its place kept from the first paint, beside the command, so nothing moves
+   when it is added. */
+.cmd pre { margin: 0; padding: 10px 82px 10px 14px; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--t-mono); color: var(--ink); background: var(--paper-sunken); border: var(--hairline); border-radius: var(--r); }
 .copy { position: absolute; top: 5px; right: 5px; padding: 7px 10px; font: 500 12px/1 var(--font-body); color: var(--ink); background: var(--paper-raised); border: var(--border); border-radius: var(--r); cursor: pointer; transition: background-color var(--dur-fast) var(--ease); }
 .copy:hover { background: var(--paper); }
 .copy.is-done { color: var(--paper); background: var(--ink); }
-/* On a phone the command keeps the whole width, and its button sits under it. */
+/* On a phone the command keeps the whole width, and the row under it is kept for its button. */
 @media (max-width: 699.98px) {
-  .cmd.has-copy pre { padding-right: 14px; }
-  .copy { position: static; margin-top: 6px; }
+  .cmd { padding-bottom: 36px; }
+  .cmd pre { padding-right: 14px; }
+  .copy { top: auto; right: auto; bottom: 0; left: 0; }
 }
 .endpoints-note { max-width: 68ch; margin: 16px 0 0; }
 

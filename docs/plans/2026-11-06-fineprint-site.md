@@ -52,7 +52,8 @@ Task 15 of the recorder work is committed on `main` and deployed (it changes `sr
 | Layout-only change | tag `Layout only`, line `Same words and figures, different structure.` |
 | Retired pages have changes | under the feed: `{n} page was retired for unreliable reads. Its history is kept.` (plural: `{n} pages were retired for unreliable reads. Their history is kept.`), linking to `/watchlist#retired` |
 | No changes yet | `No changes recorded yet. {n} pages are checked twice a day.` |
-| Spend pause reached | stamp reads `PAUSED`; banner `Recording is paused at the budget line.` |
+| Spend pause reached | banner `Spending is paused at the budget line. Changes the Monitors report are still recorded, without screenshots or price tables.`; the stamp keeps reading `RECORDING` while any Monitor is active |
+| No Monitor active | stamp reads `PAUSED` (it follows the Monitors, not the spend) |
 | Unknown page, version or route | title `No such page in the ledger.` with a link home, status 404 |
 
 ## Review Focus
