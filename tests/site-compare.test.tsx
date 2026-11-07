@@ -1,7 +1,8 @@
 import { applyD1Migrations, createExecutionContext, reset, SELF, waitOnExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Delta } from "../src/core/diff";
+import { structuredDiff, type Delta } from "../src/core/diff";
+import { normalize } from "../src/core/normalize";
 import { insertPage, updatePage, type NewPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { RunRow, TriggerKind } from "../src/db/types";
@@ -9,7 +10,7 @@ import { diffsToWarm, insertVersion, type NewVersion } from "../src/db/versions"
 import type { Env } from "../src/env";
 import worker from "../src/index";
 import { getDiff, listChanges } from "../src/readModel";
-import { BlockText, plainText } from "../src/site/blockText";
+import { BlockText, blockWork, parseCacheState, PARSED_MAX, PARSED_MAX_CHARS, plainText } from "../src/site/blockText";
 import { formatUtc } from "../src/site/format";
 import { BLOCKS_PER_GROUP, placesFromDiff, WORD_DIFF_CHARS, WORD_DIFF_PAIRS } from "../src/site/views/compare";
 import { FEATURE_TEXT_CAP, featuredCatch } from "../src/site/views/home";
@@ -157,6 +158,28 @@ beforeEach(async () => {
 // --- BlockText and wordDiff ---------------------------------------------------------------------
 
 describe("BlockText", () => {
+  it("keeps its parse cache within a bound on characters and on count, the oldest parses going first", () => {
+    const words = (n: number) => "word ".repeat(n).trim();
+    // 1.5 million characters through the cache, 50,000 at a time.
+    for (let i = 0; i < 30; i++) blockWork(`big-${i} ${words(10_000)}`);
+    let state = parseCacheState();
+    expect(state.chars).toBeLessThanOrEqual(PARSED_MAX_CHARS);
+    expect(state.chars).toBeGreaterThan(PARSED_MAX_CHARS - 60_000);
+    expect(state.oldest).toMatch(/^big-(1[0-9]|2[0-9]) /); // the first ten went first
+
+    // More small blocks than the count allows: the oldest go first, the newest stay.
+    for (let i = 0; i < 1500; i++) blockWork(`small-${i} ${words(3)}`);
+    state = parseCacheState();
+    expect(state.entries).toBe(PARSED_MAX);
+    expect(state.oldest).toMatch(/^small-500 /);
+    expect(state.chars).toBeLessThanOrEqual(PARSED_MAX_CHARS);
+
+    // A text longer than the whole bound is read, and not kept.
+    const huge = `huge ${words(PARSED_MAX_CHARS / 4)}`;
+    expect(blockWork(huge)).toBeGreaterThan(0);
+    expect(parseCacheState()).toEqual(state);
+  });
+
   it("renders a recorded block as text, never as markup", () => {
     expect(render(<BlockText text={"### Pro plan"} />)).not.toContain("#");
     expect(render(<BlockText text={"### Pro plan"} />)).toContain("Pro plan");
@@ -857,6 +880,25 @@ describe("the fix round's smaller items", () => {
     const html = await get("/pages/spaces/compare");
     const sections = [...html.matchAll(/<h3 class="diff-section"[^>]*>([^<]+)<\/h3>/g)].map((m) => m[1]);
     expect(sections).toEqual(["Team", "Legacy", "Pro"]);
+  });
+
+  it("leaves the section order to the search when a section comes back in a list after another", () => {
+    const c = (section: string) => ({ section, before: "x", after: "y" });
+    const b = (section: string) => ({ section, text: section });
+    const order = (places: ReturnType<typeof placesFromDiff>) => (places === null ? null : [...places.keys()]);
+    // A, then B, then A again: the page has two headings A; the search orders A by its first, the diff cannot tell.
+    expect(placesFromDiff({ changed: [c("A"), c("B"), c("A")], added: [], removed: [] })).toBeNull();
+    expect(placesFromDiff({ changed: [c("B")], added: [b("A"), b("B"), b("A")], removed: [] })).toBeNull();
+    // A run of blocks in one section is that section once.
+    expect(order(placesFromDiff({ changed: [c("A"), c("A"), c("B"), c("B")], added: [], removed: [] }))).toEqual(["A", "B"]);
+
+    // From real texts: A (unchanged), then B changed, A changed and B changed again. The changed blocks' sections
+    // are B, A, B, so the diff alone does not settle where B goes, and the search decides.
+    const before = ["# A", "Alpha one stays as it was.", "# B", "Beta one, the first words.", "# A", "Alpha two, the first words.", "# B", "Beta two, the first words."].join("\n\n");
+    const after = before.replaceAll("the first words", "the new words");
+    const diff = structuredDiff(normalize(before, []).text, normalize(after, []).text);
+    expect(diff.changed.map((block) => block.section)).toEqual(["B", "A", "B"]);
+    expect(placesFromDiff(diff)).toBeNull();
   });
 
   it("reads the section order from the diff when its lists settle it, without searching the texts", async () => {

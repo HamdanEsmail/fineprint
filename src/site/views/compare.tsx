@@ -89,10 +89,19 @@ export type SectionPlaces = Map<string, { newer: number; older: number }>;
  * `added` are each in the newer text's order, so each lists its sections in page order; when the two lists
  * together leave one way to line every section up, and every section of `removed` is among them (so it stands
  * in the newer text too), that is the page order. A diff of changed blocks only, the usual case for a large
- * page, is always settled. The blocks above the first heading ("") go first whatever the places say.
+ * page, is settled unless a section comes back in it after another (A, then B, then A again: the page has two
+ * headings A, and the search orders A by its first). The blocks above the first heading ("") go first
+ * whatever the places say.
  */
 export function placesFromDiff(blocks: StructuredDiff): SectionPlaces | null {
-  const lists = [blocks.changed ?? [], blocks.added ?? []].map((list) => [...new Set(list.map((b) => b.section).filter((s) => s !== ""))]);
+  // Each list's sections in its order, a run of blocks in one section counted once.
+  const lists = [blocks.changed ?? [], blocks.added ?? []].map((list) =>
+    list.map((b) => b.section).filter((s, i, all) => s !== "" && s !== all[i - 1]),
+  );
+  // A section that comes back after another stands at two places in the page: the diff cannot say which one
+  // its group goes by, and the search goes by the first. (A repeated heading whose earlier part did not change
+  // is not in the lists at all, so the diff cannot see it.)
+  if (lists.some((list) => new Set(list).size !== list.length)) return null;
   const named = new Set(lists.flat());
   for (const b of blocks.removed ?? []) if (b.section !== "" && !named.has(b.section)) return null;
   // Each list's neighbours are an edge; the order is settled when, step by step, exactly one section has no

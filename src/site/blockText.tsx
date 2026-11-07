@@ -228,18 +228,34 @@ type Parsed = { lines: Line[]; work: number };
 
 // A block is parsed to be weighed (blockWork), for its plain text (the word marks) and to be drawn; the parses
 // are kept, keyed by the text itself, so each is done once. Room for every block of the largest screen (the
-// compare view's 400 with all=1, a changed pair being two texts) and then some; cleared whole when it fills.
+// compare view's 400 with all=1, a changed pair being two texts, and at most ALL_CHARS of them) and then some.
+// The memory is bounded by the characters kept as well as by the count, since the parse of a block holds about
+// as much again as its text: when either would run over, the oldest parses go first. A text longer than the
+// whole character bound is parsed each time and not kept.
 const PARSED = new Map<string, Parsed>();
-const PARSED_MAX = 1000;
+export const PARSED_MAX = 1000;
+export const PARSED_MAX_CHARS = 1_000_000;
+let parsedChars = 0;
 
 function parseBlock(text: string): Parsed {
-  let parsed = PARSED.get(text);
-  if (parsed === undefined) {
-    if (PARSED.size >= PARSED_MAX) PARSED.clear();
-    parsed = parseLines(text);
-    PARSED.set(text, parsed);
+  const kept = PARSED.get(text);
+  if (kept !== undefined) return kept;
+  const parsed = parseLines(text);
+  if (text.length > PARSED_MAX_CHARS) return parsed;
+  // Oldest first: a Map keeps its keys in the order they were set.
+  for (const old of PARSED.keys()) {
+    if (PARSED.size < PARSED_MAX && parsedChars + text.length <= PARSED_MAX_CHARS) break;
+    PARSED.delete(old);
+    parsedChars -= old.length;
   }
+  PARSED.set(text, parsed);
+  parsedChars += text.length;
   return parsed;
+}
+
+/** The parse cache's size, for the tests: the parses kept, their texts' characters, and the oldest text. */
+export function parseCacheState(): { entries: number; chars: number; oldest: string | undefined } {
+  return { entries: PARSED.size, chars: parsedChars, oldest: PARSED.keys().next().value };
 }
 
 /**
