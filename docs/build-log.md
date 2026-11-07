@@ -211,12 +211,17 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 - **Unattended safeguards (R78):** a page health marks failed is still pulled and is un-failed when its Monitor reads active again; facts runs stop at $6 total spend while checks and captures continue to $8; `/api/stats` shows `spend_paused` and `facts_paused`.
 - **Day-2 check:** compare `versions - 20` with `runs_by_trigger.pull` plus `runs_by_trigger.webhook` in `/api/stats`. A page that produces a version on most checks needs `ignore_patterns` (see the runbook).
 
+## Recorder updates and the site going live, 6-7 Nov 2026
+
+- **Task 15, 6 Nov.** Migration 0006 applied at 19:25:12 UTC after a full export (restore point 19:24:54), deployed at 19:25:40 (version `430e45fa`), diff cache emptied once after the deploy, summary backfill to `remaining` 0 (15 filled, 3 of them one at a time). The 20 curated pages and the retired one were promoted to `added_by` "curated" (database only).
+- **Site Task 2 (recorder fields), 7 Nov.** Full export at 08:36:53 UTC, migration 0007 at 08:37:03, deployed at 08:37:35 (version `aa6d2544`, site off). Delta backfill: 16 of 16 changes; the layout-only label landed on exactly GitHub pricing 5 Nov 14:38 and the OpenAI privacy policy 3 Nov 18:06; the diff summaries were rebuilt under the line rule. Thumbnails: a one-image trial, then 36 more in four browser sessions (37 of 37, $0.01). The first scheduled webhook after the deploy (Anthropic pricing, 09:03 UTC) was recorded.
+- **The site, 7 Nov.** `SITE_ENABLED` set to "1" (commit `4f697e5`) and deployed at 10:51:17 UTC (version `4429b6e6`). On production: `/`, a page view, a compare, `/watchlist` and `/about` answer 200 with the site; the ledger 404 answers 404; `/api/stats`, `/api/pages/nope` (JSON 404) and `/api/export.json` answer as before; a wrong webhook secret still reaches the webhook handler (empty 404). The hourly cron ran at 11:00 UTC (outcome ok, 14 ms CPU, no pull needed), and the next scheduled webhook (Cursor pricing, 11:17:02 UTC) was recorded (unchanged; 9 ms CPU).
+- **CPU on production (7 Nov, `wrangler tail`, ten requests per screen; a preview's requests do not show in a tail, so this was measured after the switch).** Median and maximum CPU per request: home 20 / 65 ms, the busiest page view (Claude release notes) 19 / 65 ms, the two largest compares 26 / 78 ms, About 23 / 70 ms, watchlist 14 / 58 ms, the ledger 404 2 / 23 ms; for comparison the JSON API: `/api/stats` 2 / 6 ms, `/api/changes` 3 / 9 ms, `/api/pages/:id` 3 / 14 ms. Every request ended `ok`. The plan's target (median under 5 ms, none over 8 ms) is not met by the HTML screens; the shell alone (the 404) is cheap, so the cost is in rendering each screen's content. Recording is not affected: webhooks, pulls and the cron are separate invocations that render no HTML.
+
 ## Open before submission (17 Nov)
 
-Items 1 to 7 of the 5 Nov list are done in code (Tasks 14b and 15, see the Task 15 bullets above), with summaries added. What is left:
-
-1. Ship Task 15: `npm run migrate:remote` (0006), deploy, then `POST /api/admin/backfill-summaries` until `remaining` is 0 (runbook step 12).
-2. `added_by` "curated" for the 20 pages: one admin PATCH each (`{"promote": true}`), done live; it touches nothing on TinyFish.
+1. The site's render cost (above): bring the HTML screens back under the free plan's per-request CPU allowance, or decide to accept it.
+2. The first public add, once the site is on (about $0.08 over its 7 days).
 
 ## Live TinyFish calls during the build
 

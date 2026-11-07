@@ -2,7 +2,7 @@
 
 Fineprint keeps the version history of pricing pages, terms of service, privacy policies, visa rules and fee tables. It watches each page with TinyFish Monitor. When a page really changes, it stores the text, a full-page screenshot and the HTML source, so you can ask what a page said on a given date and what changed between two dates.
 
-Live: https://fineprint.hamdanesmail12-7a9.workers.dev (one Cloudflare Worker with D1 and R2; the JSON API answers at `/api/stats`).
+Live: https://fineprint.hamdanesmail12-7a9.workers.dev: the site (the change feed, each page's history with as-of and compare, the watchlist and About) and the JSON API (`/api/stats`), from one Cloudflare Worker with D1 and R2. The site has been on since 7 Nov 2026.
 
 ## Status
 
