@@ -21,137 +21,206 @@ type Line =
   | { kind: "row"; segs: Seg[] }
   | { kind: "text"; segs: Seg[] };
 
-const HEADING_RE = /^#{1,6}[ \t]+/;
-const CLOSING_HASHES_RE = /[ \t]+#+[ \t]*$/;
-const BULLET_RE = /^[ \t]*[*+-][ \t]+/;
-const NUMBER_RE = /^[ \t]*(\d{1,9})[.)][ \t]+/;
-const ROW_RE = /^[ \t]*\|.*\|[ \t]*$/;
-// A table's rule row ("| --- | :-: |"), or a horizontal rule ("---"): no words in it.
-const RULE_RE = /^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$/;
+// Every step below is linear in the line, whatever the line holds: a block is text from any page, a public
+// page included, and one line of 25,000 "[" must cost no more than 25,000 letters. No regex here can
+// backtrack (each is anchored on a trimmed line, or a single character class), brackets and code spans are
+// matched once per line, and links are walked without recursion.
 
-const MARKED_LINE_RE = /^[ \t]*[#|*+\-:\d]/;
-// The characters that can start a mark: an escape, code, an image or a link, emphasis.
-const SPECIAL_RE = /[\\`![*_]/g;
+/** On a trimmed line: a heading's marks and the space after them. */
+const HEADING_RE = /^(#{1,6})[ \t]+/;
+const NUMBER_RE = /^(\d{1,9})[.)][ \t]+/;
+const BULLET_RE = /^[*+-][ \t]+/;
+/** A table's rule row ("|:--|--:|") or a horizontal rule ("---") holds nothing but these. */
+const RULE_CHARS_RE = /^[|:\- \t]+$/;
+// The characters that can start a mark by themselves: an escape, code, emphasis. A link or an image starts
+// only where matchLine found one, so a "[" or a "!" that starts nothing is plain text, taken in a slice.
+const SPECIAL_RE = /[\\`*_]/g;
+// What an image's alt text drops.
+const ALT_MARKS_RE = /[\\`*_[\]]/g;
 
 const ESCAPABLE = new Set("\\`*_{}[]()#+-.!|<>~$\"'");
 const isSpace = (c: string | undefined): boolean => c === undefined || /\s/.test(c);
 const isWordChar = (c: string | undefined): boolean => c !== undefined && /[\p{L}\p{N}]/u.test(c);
 
 /**
- * The end of a `[label](url)` starting at `open` (the "["): the label and the index after the ")", or null.
- * Brackets and parentheses may nest; a line break or an unclosed bracket ends the search.
+ * One pass over a line: for each "[" and "(", the index of the "]" or ")" that closes it (-1 when none),
+ * with a stack each, escaped characters skipped; the places where a link or an image can start (a "[" whose
+ * "]" is followed by a "(" that closes; the "!" before it too), in order; and for each "`", the next "`"
+ * after it. Finding a link or a code span is then a lookup.
  */
-function linkAt(text: string, open: number): { label: string; end: number } | null {
-  let depth = 0;
-  let i = open;
-  for (; i < text.length; i++) {
-    const c = text[i];
-    if (c === "\\") {
-      i++;
-      continue;
+type Matches = { close: Int32Array | null; starts: number[]; tick: Int32Array | null };
+
+function matchLine(text: string): Matches {
+  const n = text.length;
+  let close: Int32Array | null = null;
+  const starts: number[] = [];
+  if (text.includes("[")) {
+    close = new Int32Array(n).fill(-1);
+    const brackets: number[] = [];
+    const parens: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 92 /* \ */) {
+        if (i + 1 < n && ESCAPABLE.has(text[i + 1]!)) i++;
+      } else if (c === 91 /* [ */) brackets.push(i);
+      else if (c === 93 /* ] */) {
+        const open = brackets.pop();
+        if (open !== undefined) close[open] = i;
+      } else if (c === 40 /* ( */) parens.push(i);
+      else if (c === 41 /* ) */) {
+        const open = parens.pop();
+        if (open !== undefined) close[open] = i;
+      }
     }
-    if (c === "\n") return null;
-    if (c === "[") depth++;
-    else if (c === "]" && --depth === 0) break;
+    for (let i = 0; i < n; i++) {
+      if (text.charCodeAt(i) !== 91) continue;
+      const label = close[i]!;
+      if (label < 0 || text.charCodeAt(label + 1) !== 40 || close[label + 1]! < 0) continue;
+      if (i > 0 && text.charCodeAt(i - 1) === 33 /* ! */) starts.push(i - 1);
+      starts.push(i);
+    }
   }
-  if (i >= text.length || text[i + 1] !== "(") return null;
-  const label = text.slice(open + 1, i);
-  depth = 0;
-  for (let j = i + 1; j < text.length; j++) {
-    const c = text[j];
-    if (c === "\n") return null;
-    if (c === "(") depth++;
-    else if (c === ")" && --depth === 0) return { label, end: j + 1 };
+  let tick: Int32Array | null = null;
+  if (text.includes("`")) {
+    tick = new Int32Array(n).fill(-1);
+    let next = -1;
+    for (let i = n - 1; i >= 0; i--) {
+      tick[i] = next;
+      if (text.charCodeAt(i) === 96 /* ` */) next = i;
+    }
   }
-  return null;
+  return { close, starts, tick };
 }
 
-/** The inline text of one line as segments: emphasis and link marks gone, code spans kept apart. */
+/** A `[label](target)` whose "[" is at `open` and which closes before `bound`: where its label is and where it ends. */
+function linkAt(text: string, m: Matches, open: number, bound: number): { from: number; to: number; end: number } | null {
+  if (m.close === null || text.charCodeAt(open) !== 91) return null;
+  const label = m.close[open]!;
+  if (label < 0 || label + 1 >= bound || text.charCodeAt(label + 1) !== 40 /* ( */) return null;
+  const target = m.close[label + 1]!;
+  return target < 0 || target >= bound ? null : { from: open + 1, to: label, end: target + 1 };
+}
+
+/**
+ * The inline text of one line as segments: emphasis and link marks gone, code spans kept apart. A link's
+ * label is walked where it stands and its target skipped when the walk reaches the label's end: a stack of
+ * open labels instead of recursion, so any depth of nesting costs the same as none, and no target is ever
+ * read, at any depth. The cursor only moves forward; the next character that can start a mark is looked
+ * for once from it, and the link starts are a list it moves along, so the walk is one pass, and the text
+ * between marks (a "[" that opens nothing included) is taken in slices.
+ */
 function inline(text: string): Seg[] {
+  const m = matchLine(text);
   const segs: Seg[] = [];
   let buf = "";
   const flush = (): void => {
     if (buf !== "") segs.push({ text: buf, code: false });
     buf = "";
   };
-  const append = (more: Seg[]): void => {
-    for (const s of more) {
-      if (s.code) {
-        flush();
-        segs.push(s);
-      } else buf += s.text;
-    }
-  };
+  const open: { to: number; end: number }[] = [];
+  let bound = text.length;
+  let nextSpecial = -1;
+  let nextStart = 0; // index into m.starts
   let i = 0;
-  while (i < text.length) {
-    // Plain characters are taken in one slice up to the next one that can start a mark.
-    SPECIAL_RE.lastIndex = i;
-    const next = SPECIAL_RE.exec(text);
-    if (next === null) {
-      buf += text.slice(i);
-      break;
+  for (;;) {
+    if (i >= bound) {
+      const label = open.pop();
+      if (label === undefined) break;
+      i = label.end;
+      bound = open.length > 0 ? open[open.length - 1]!.to : text.length;
+      continue;
     }
-    if (next.index > i) {
-      buf += text.slice(i, next.index);
-      i = next.index;
+    if (nextSpecial < i) {
+      SPECIAL_RE.lastIndex = i;
+      nextSpecial = SPECIAL_RE.exec(text)?.index ?? text.length;
+    }
+    while (nextStart < m.starts.length && m.starts[nextStart]! < i) nextStart++;
+    const start = nextStart < m.starts.length ? m.starts[nextStart]! : text.length;
+    const at = Math.min(nextSpecial, start, bound);
+    if (at > i) {
+      buf += text.slice(i, at);
+      i = at;
+      continue;
     }
     const c = text[i]!;
-    if (c === "\\" && i + 1 < text.length && ESCAPABLE.has(text[i + 1]!)) {
-      buf += text[i + 1];
-      i += 2;
+    if (i === start) {
+      // An image, "![alt](src)": its alt text in words.
+      if (c === "!") {
+        const image = linkAt(text, m, i + 1, bound);
+        if (image !== null) {
+          const alt = text.slice(image.from, image.to).replace(ALT_MARKS_RE, "").trim();
+          buf += alt === "" ? "[image]" : `[image: ${alt}]`;
+          i = image.end;
+          continue;
+        }
+      } else {
+        // A link: its label is walked, its target skipped.
+        const link = linkAt(text, m, i, bound);
+        if (link !== null) {
+          open.push({ to: link.to, end: link.end });
+          bound = link.to;
+          i = link.from;
+          continue;
+        }
+      }
+      // It does not close inside the label the walk is in: plain text.
+      buf += c;
+      i++;
+      continue;
+    }
+    if (c === "\\") {
+      if (i + 1 < bound && ESCAPABLE.has(text[i + 1]!)) {
+        buf += text[i + 1];
+        i += 2;
+      } else {
+        buf += c;
+        i++;
+      }
       continue;
     }
     if (c === "`") {
-      const close = text.indexOf("`", i + 1);
-      if (close > i + 1) {
+      const close = m.tick?.[i] ?? -1;
+      if (close > i + 1 && close < bound) {
         flush();
         segs.push({ text: text.slice(i + 1, close), code: true });
         i = close + 1;
         continue;
       }
-    }
-    if (c === "!" && text[i + 1] === "[") {
-      const link = linkAt(text, i + 1);
-      if (link !== null) {
-        const alt = inline(link.label)
-          .map((s) => s.text)
-          .join("")
-          .trim();
-        buf += alt === "" ? "[image]" : `[image: ${alt}]`;
-        i = link.end;
-        continue;
-      }
-    }
-    if (c === "[") {
-      const link = linkAt(text, i);
-      if (link !== null) {
-        append(inline(link.label));
-        i = link.end;
-        continue;
-      }
-    }
-    if (c === "*" || c === "_") {
-      let end = i;
-      while (end < text.length && text[end] === c) end++;
-      const run = end - i;
-      const before = text[i - 1];
-      const after = text[end];
-      // A mark opens or closes a stretch: whitespace (or the line's end) on exactly one side, or punctuation
-      // beside it. Between two spaces it is a lone star; between two letters it is part of a word.
-      const flanking = isSpace(before) !== isSpace(after) || (!isSpace(before) && !isSpace(after) && (!isWordChar(before) || !isWordChar(after)));
-      if (run <= 3 && flanking) {
-        i = end;
-        continue;
-      }
+      // Not a span: this backtick, and the ones right after it that open nothing either, as text.
+      let end = i + 1;
+      while (end < bound && text.charCodeAt(end) === 96 && m.tick![end] === end + 1) end++;
       buf += text.slice(i, end);
       i = end;
       continue;
     }
-    buf += c;
-    i++;
+    // "*" or "_": a run of marks, taken one same-character run at a time. A run opens or closes a stretch,
+    // and goes, when it has whitespace (or the line's end) on exactly one side, or punctuation beside it;
+    // between two spaces it is a lone star and between two letters part of a word, and it stays.
+    let j = i;
+    while (j < bound && (text[j] === "*" || text[j] === "_")) {
+      const mark = text[j];
+      let end = j;
+      while (end < bound && text[end] === mark) end++;
+      const before = text[j - 1];
+      const after = text[end];
+      const flanking = isSpace(before) !== isSpace(after) || (!isSpace(before) && !isSpace(after) && (!isWordChar(before) || !isWordChar(after)));
+      if (!(end - j <= 3 && flanking)) buf += text.slice(j, end);
+      j = end;
+    }
+    i = j;
   }
   flush();
   return segs;
+}
+
+/** A heading's text without its closing run of "#" (one preceded by a space, or the whole text), scanned from the end. */
+function withoutClosingHashes(s: string): string {
+  let end = s.length;
+  while (end > 0 && (s[end - 1] === " " || s[end - 1] === "\t")) end--;
+  let hashes = end;
+  while (hashes > 0 && s[hashes - 1] === "#") hashes--;
+  if (hashes < end && (hashes === 0 || s[hashes - 1] === " " || s[hashes - 1] === "\t")) end = hashes;
+  return s.slice(0, end).trimEnd();
 }
 
 // A block is parsed once for its plain text (the word marks) and again to be drawn; the last few parses are
@@ -169,37 +238,39 @@ function parseBlock(text: string): Line[] {
   return lines;
 }
 
+/** Whether a trimmed line's first character can start anything but text: # | * + - : or a digit. */
+const mayBeMarked = (c: number): boolean => c === 35 || c === 124 || c === 42 || c === 43 || c === 45 || c === 58 || (c >= 48 && c <= 57);
+
 /** A block's lines, each with its kind and its inline segments; rule rows are dropped. */
 function parseLines(text: string): Line[] {
   const lines: Line[] = [];
   for (const raw of text.split(/\r?\n/)) {
-    // Only a line that starts (after spaces) with one of # | - * + : or a digit can be anything but text.
-    if (!MARKED_LINE_RE.test(raw)) {
-      lines.push({ kind: "text", segs: inline(raw.trim()) });
+    const line = raw.trim();
+    if (!mayBeMarked(line.charCodeAt(0))) {
+      lines.push({ kind: "text", segs: inline(line) });
       continue;
     }
-    if (RULE_RE.test(raw)) continue;
-    const heading = HEADING_RE.exec(raw);
+    if (RULE_CHARS_RE.test(line) && line.includes("-") && (line.includes("|") || line.includes("---"))) continue;
+    const heading = HEADING_RE.exec(line);
     if (heading) {
-      const level = heading[0].trim().length;
-      lines.push({ kind: "heading", level, segs: inline(raw.slice(heading[0].length).replace(CLOSING_HASHES_RE, "")) });
+      lines.push({ kind: "heading", level: heading[1]!.length, segs: inline(withoutClosingHashes(line.slice(heading[0].length))) });
       continue;
     }
-    if (ROW_RE.test(raw)) {
-      lines.push({ kind: "row", segs: inline(raw.trim()) });
+    if (line.length > 1 && line.startsWith("|") && line.endsWith("|")) {
+      lines.push({ kind: "row", segs: inline(line) });
       continue;
     }
-    const number = NUMBER_RE.exec(raw);
+    const number = NUMBER_RE.exec(line);
     if (number) {
-      lines.push({ kind: "number", n: Number(number[1]), segs: inline(raw.slice(number[0].length)) });
+      lines.push({ kind: "number", n: Number(number[1]), segs: inline(line.slice(number[0].length)) });
       continue;
     }
-    const bullet = BULLET_RE.exec(raw);
+    const bullet = BULLET_RE.exec(line);
     if (bullet) {
-      lines.push({ kind: "bullet", segs: inline(raw.slice(bullet[0].length)) });
+      lines.push({ kind: "bullet", segs: inline(line.slice(bullet[0].length)) });
       continue;
     }
-    lines.push({ kind: "text", segs: inline(raw.trim()) });
+    lines.push({ kind: "text", segs: inline(line) });
   }
   return lines;
 }

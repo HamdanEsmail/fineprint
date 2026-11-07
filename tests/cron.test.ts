@@ -867,6 +867,48 @@ describe("runCron", () => {
     expect(await version(repairable)).toMatchObject({ capture_status: "complete" });
   });
 
+  it("asks for at most one large diff to be stored a tick, as its last step, taken in turn by the hour", async () => {
+    mockMonitors();
+    const big = (n: number) => Array.from({ length: 800 }, (_, i) => `Paragraph ${i} of page ${n}, long enough to fill the page.`).join("\n\n");
+    const pairs: string[] = [];
+    for (const n of [1, 2]) {
+      const pageId = await seedPage();
+      await seedVersion(pageId, { text: big(n), capture_status: "complete" });
+      pairs.push(
+        await seedVersion(pageId, {
+          is_baseline: 0,
+          text: `${big(n)}\n\nOne more.`,
+          capture_status: "complete",
+          summary: "One more.",
+          summary_source: "diff",
+          delta_json: JSON.stringify({ blocks: { added: 1, removed: 0, changed: 0 }, facts: null, layout_only: false }),
+        }),
+      );
+    }
+    const asked: string[] = [];
+    const realWarm = cronDeps.warm;
+    const realNow = cronDeps.now;
+    cronDeps.warm = async (_env, versionId) => {
+      asked.push(versionId);
+      return new Response(JSON.stringify({ stored: true }));
+    };
+    try {
+      cronDeps.now = () => new Date("2026-11-07T00:30:00.000Z");
+      await runCron(env);
+      cronDeps.now = () => new Date("2026-11-07T01:30:00.000Z");
+      await runCron(env);
+      // One a tick; newest first, then the next one at the next hour.
+      expect(asked).toEqual([pairs[1], pairs[0]]);
+      // A request that fails is logged and the tick still ends.
+      cronDeps.warm = async () => new Response("no", { status: 500 });
+      const logged = await quietErrors(() => runCron(env));
+      expect(logged).toContain("diff store");
+    } finally {
+      cronDeps.warm = realWarm;
+      cronDeps.now = realNow;
+    }
+  });
+
   it("the scheduled handler hands runCron to waitUntil", async () => {
     mockMonitors();
     mockFetchHtml();

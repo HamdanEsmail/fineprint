@@ -105,3 +105,12 @@ export const SUMMARY_TEXT_BUDGET_CHARS = 60_000;
  * leaves: each costs a read and a write, and the free plan allows 50 D1 queries an invocation.
  */
 export const FILL_DIFFS_PER_CALL = 12;
+/**
+ * A diff whose texts are longer than this (either side, in characters) is never computed on a reader's
+ * request when it can be helped: the home's featured catch reads it only from diff_cache, and the hourly
+ * cron stores it ahead of readers, one pair a tick (`POST /api/admin/warm-diff`). On the 6 Nov texts, in
+ * Node, normalize on both texts plus structuredDiff takes about 1.2 ms at 29 KB and 8 to 11 ms at 228 KB.
+ */
+export const LARGE_DIFF_TEXT_CHARS = 40_000;
+/** The large pairs the cron looks at in a tick; it stores one of them, taken in turn by the hour of day. */
+export const WARM_DIFF_CANDIDATES = 24;

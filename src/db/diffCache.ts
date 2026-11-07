@@ -14,6 +14,15 @@ export async function getCachedDiff(db: D1Database, fromId: string, toId: string
   return row?.json ?? null;
 }
 
+/** Whether a diff of the pair is stored, without reading it. */
+export async function hasCachedDiff(db: D1Database, fromId: string, toId: string): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT 1 AS found FROM diff_cache WHERE from_version_id = ? AND to_version_id = ?")
+    .bind(fromId, toId)
+    .first();
+  return row !== null;
+}
+
 /** Drops every cached diff that starts or ends at a version of the page. */
 export async function deleteCachedDiffsOfPage(db: D1Database, pageId: string): Promise<void> {
   await db

@@ -270,9 +270,20 @@ ol.bt-list { list-style: decimal; }
 .bt-cut { font: 500 15px/1 var(--font-data); letter-spacing: .1em; }
 .bt-more { font: var(--t-small); }
 
-/* Word marks (the comp's del and ins): struck in muted ink on the before side, washed on the after side. */
-del { color: var(--ink-muted); text-decoration: line-through; text-decoration-thickness: 1px; }
-ins { color: var(--ink); text-decoration: none; background: var(--accent-wash); box-shadow: 0 0 0 2px var(--accent-wash); border-radius: 1px; }
+/* Word marks (the comp's del and ins), only inside a changed block's two sides: struck in muted ink on the
+   before side, washed on the after side. */
+.diff-before del { color: var(--ink-muted); text-decoration: line-through; text-decoration-thickness: 1px; }
+.diff-after ins { color: var(--ink); text-decoration: none; background: var(--accent-wash); box-shadow: 0 0 0 2px var(--accent-wash); border-radius: 1px; }
+/* Screen readers mostly do not say that text is struck or inserted, so each mark says it in generated text
+   that is read but not seen (clipped to nothing, the .vh technique): "[removed: … ]", "[added: … ]". It
+   lives here, not in the markup, so a mark holds only its words. */
+.diff-before del::before, .diff-before del::after, .diff-after ins::before, .diff-after ins::after {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.diff-before del::before { content: " [removed: "; }
+.diff-before del::after { content: " ] "; }
+.diff-after ins::before { content: " [added: "; }
+.diff-after ins::after { content: " ] "; }
 
 /* --- Diff view (DESIGN.md "Diff view"): before and after in two columns, stacked on a phone --------- */
 .pair { display: grid; gap: 12px; }
@@ -315,6 +326,8 @@ section.diff-group { padding-top: 32px; }
 .compare-shots .shots { grid-template-columns: minmax(0, 1fr); }
 @media (min-width: 700px) { .compare-shots .shots { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 .compare-links { margin-top: 28px; }
+/* What the screen leaves out, said once under the blocks, with the way to the rest. */
+.diff-rest { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; max-width: 68ch; margin-top: 28px; padding-top: 16px; font: var(--t-small); color: var(--ink-soft); border-top: var(--hairline); }
 
 /* --- Screenshots side by side (the comp's .shots), each a figure; a missing one is said in words ------ */
 .shots { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 24px; }

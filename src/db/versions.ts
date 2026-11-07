@@ -335,6 +335,45 @@ export const PREVIOUS_OF_V = `FROM versions w
     AND (w.captured_at < v.captured_at OR (w.captured_at = v.captured_at AND w.rowid < v.rowid))
   ORDER BY w.captured_at DESC, w.rowid DESC LIMIT 1`;
 
+/** A version's page and the id of the version before it, without either text; null for an unknown id or a first version. */
+export function previousVersionOf(db: D1Database, id: string): Promise<{ page_id: string; previous_id: string } | null> {
+  return db
+    .prepare(`SELECT v.page_id, p.id AS previous_id FROM versions v JOIN versions p ON p.id = (SELECT w.id ${PREVIOUS_OF_V}) WHERE v.id = ?`)
+    .bind(id)
+    .first<{ page_id: string; previous_id: string }>();
+}
+
+/**
+ * A version over alias `t` whose stored copies are final, as SQL: its capture ended (`complete` or `failed`)
+ * and no facts run is in flight for it. The same rule as isFinal in src/readModel.ts, which decides what
+ * diff_cache keeps.
+ */
+const finalSql = (t: string): string =>
+  `${t}.capture_status IN ('complete', 'failed') AND NOT (${t}.agent_run_id IS NOT NULL AND ${t}.facts_json IS NULL)`;
+
+/**
+ * Adjacent pairs (a version that is not a baseline and the one before it) whose diff the hourly job should
+ * store ahead of a reader: both ends final, the newer one with its summary and its delta (so the out-of-band
+ * fill is done and the diff will be kept), either text over `minChars` characters, and no stored diff yet.
+ * Newest first, at most `limit`. Reads no text out (SQLite measures it).
+ */
+export async function diffsToWarm(db: D1Database, minChars: number, limit: number): Promise<{ id: string; previous_id: string }[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT v.id, p.id AS previous_id
+       FROM versions v JOIN versions p ON p.id = (SELECT w.id ${PREVIOUS_OF_V})
+       WHERE v.is_baseline = 0 AND v.summary IS NOT NULL AND v.delta_json IS NOT NULL
+         AND ${finalSql("v")} AND ${finalSql("p")}
+         AND (length(v.text) > ?1 OR length(p.text) > ?1)
+         AND NOT EXISTS (SELECT 1 FROM diff_cache d WHERE d.from_version_id = p.id AND d.to_version_id = v.id)
+       ORDER BY v.captured_at DESC, v.rowid DESC
+       LIMIT ?2`,
+    )
+    .bind(minChars, Math.max(0, Math.trunc(limit)) || 0)
+    .all<{ id: string; previous_id: string }>();
+  return results;
+}
+
 // A NULL text counts as empty here, so one bad row cannot turn a call's text budget into NaN.
 const candidateSelect = (where: string): string => `SELECT v.id, v.page_id, v.captured_at, v.judgment_summary,
     COALESCE(length(v.text), 0) AS text_length,

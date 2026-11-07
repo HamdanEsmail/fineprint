@@ -5,7 +5,7 @@ import type { Delta } from "../src/core/diff";
 import { insertPage, updatePage, type NewPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { RunRow, TriggerKind } from "../src/db/types";
-import { insertVersion, type NewVersion } from "../src/db/versions";
+import { diffsToWarm, insertVersion, type NewVersion } from "../src/db/versions";
 import type { Env } from "../src/env";
 import worker from "../src/index";
 import { getDiff, listChanges } from "../src/readModel";
@@ -381,7 +381,7 @@ describe("GET /pages/:id/compare", () => {
     }
   });
 
-  it("reads the diff once and then from the cache: fourteen queries, then nine", async () => {
+  it("reads the diff once and then from the cache: fifteen queries, then ten (one of them the section order)", async () => {
     await seedPricing();
     const prepare = vi.spyOn(env.DB, "prepare");
     const queries = async (): Promise<number> => {
@@ -394,8 +394,8 @@ describe("GET /pages/:id/compare", () => {
       return prepare.mock.calls.length;
     };
     try {
-      expect(await queries()).toBe(14);
-      expect(await queries()).toBe(9);
+      expect(await queries()).toBe(15);
+      expect(await queries()).toBe(10);
     } finally {
       prepare.mockRestore();
     }
@@ -633,5 +633,256 @@ describe("the featured catch on the home screen", () => {
   it("is left out of the older screens of the feed", async () => {
     await seedPricing();
     expect(await get(`/?before=${encodeURIComponent(new Date().toISOString())}`)).not.toContain("The latest catch, up close");
+  });
+});
+
+// --- Fix round: bounded work on any recorded text -----------------------------------------------------
+
+/** Milliseconds `work` takes (the Workers test pool's clock does move during synchronous work). */
+function timed(work: () => unknown): number {
+  const start = performance.now();
+  work();
+  return performance.now() - start;
+}
+
+describe("BlockText on hostile text stays linear", () => {
+  const cases: [string, (n: number) => string][] = [
+    ["unclosed [", (n) => "[".repeat(n)],
+    ["[a]( without )", (n) => "[a](".repeat(n / 4)],
+    ["unclosed ![", (n) => "![".repeat(n / 2)],
+    ["[]( without )", (n) => "[](".repeat(n / 3)],
+    ["deep nesting", (n) => `${"[".repeat(n)}a${"](x)".repeat(n)}`],
+    ["backticks", (n) => "`a".repeat(n / 2)],
+    ["emphasis runs", (n) => "*_".repeat(n / 2)],
+    ["heading with trailing spaces", (n) => `# a${" ".repeat(n)}x`],
+    ["rule-like spaces", (n) => `${" ".repeat(n)}-x`],
+  ];
+  for (const [name, make] of cases) {
+    it(`renders ${name} in a few ms, at 4,000 and at 40,000 characters`, () => {
+      const small = make(4000);
+      const large = make(40_000);
+      expect(timed(() => render(<BlockText text={small} />))).toBeLessThan(25);
+      expect(timed(() => plainText(`${small}${name}`))).toBeLessThan(25);
+      // Quadratic work would take seconds here.
+      expect(timed(() => render(<BlockText text={large} />))).toBeLessThan(150);
+      expect(timed(() => plainText(`${large}${name}`))).toBeLessThan(150);
+    });
+  }
+
+  it("never throws on deep nesting, and keeps link targets out at any depth", () => {
+    const deep = `${"[".repeat(20_000)}label${"](javascript:alert(1))".repeat(20_000)}`;
+    expect(() => plainText(deep)).not.toThrow();
+    const shallow = render(<BlockText text={"[[[[a](javascript:x)](javascript:y)](javascript:z)](javascript:w)"} />);
+    expect(shallow).toContain("a");
+    expect(shallow).not.toContain("javascript:");
+  });
+
+  it("still reads ordinary links, images, code and emphasis", () => {
+    expect(plainText("See [the **docs**](https://a.example/x_(y)) and ![chart](c.png), `x[1]` and _this_.")).toBe(
+      "See the docs and [image: chart], x[1] and this.",
+    );
+    expect(plainText("# Title ##")).toBe("Title");
+    expect(plainText("## C#")).toBe("C#");
+    expect(plainText("  - item")).toBe("item");
+    expect(plainText("| a | b |\n|:--|--:|")).toBe("| a | b |");
+  });
+});
+
+describe("a screen-wide budget for blocks", () => {
+  const sectionText = (n: number, per: number, len: number) =>
+    Array.from({ length: n }, (_, s) =>
+      [`## Section ${s + 1}`, ...Array.from({ length: per }, (_, i) => `Block ${s + 1}.${i + 1} ${"x".repeat(Math.max(0, len - 20))}.`)].join("\n\n"),
+    ).join("\n\n");
+
+  async function seedAdded(id: string, text: string): Promise<void> {
+    await insertPage(db, page(id, { label: id }));
+    await version(`${id}-0`, id, ago(2 * DAY), "create", { text: "# Start" });
+    await version(`${id}-1`, id, ago(DAY), "webhook", { text: `# Start\n\n${text}`, summary: "Many blocks.", summary_source: "diff", delta_json: delta([1, 0, 0]) });
+  }
+
+  it("shows at most 120 blocks on a screen, and says how many more there are", async () => {
+    // Five sections of a heading and 40 blocks: 205 added blocks, 30 a group, and the screen stops at 120.
+    await seedAdded("sections", sectionText(5, 40, 60));
+    const html = await get("/pages/sections/compare");
+    expect(count(html, 'class="diff-added"')).toBe(120);
+    expect(html).toContain("85 more blocks are not shown here.");
+    expect(html).toMatch(/<a[^>]+href="\/pages\/sections\/compare\?from=sections-0&amp;to=sections-1&amp;all=1[^"]*"[^>]*>Show all 205<\/a>/);
+    const all = await get("/pages/sections/compare?all=1");
+    expect(count(all, 'class="diff-added"')).toBe(205);
+    expect(all).not.toContain("more blocks are not shown");
+  });
+
+  it("stops at about 60,000 characters on a screen", async () => {
+    await seedAdded("heavy", sectionText(1, 25, 3000).replace(/^## Section 1\n\n/, ""));
+    const html = await get("/pages/heavy/compare");
+    const shown = count(html, 'class="diff-added"');
+    expect(shown).toBeGreaterThanOrEqual(19);
+    expect(shown).toBeLessThanOrEqual(21);
+    expect(html).toContain(`${25 - shown} more blocks are not shown here.`);
+  });
+
+  it("gives all=1 a ceiling too, and points to the JSON past it", async () => {
+    await seedAdded("ceiling", Array.from({ length: 450 }, (_, i) => `Line ${i + 1} of the list.`).join("\n\n"));
+    const html = await get("/pages/ceiling/compare?all=1");
+    expect(count(html, 'class="diff-added"')).toBe(400);
+    expect(html).toContain("50 more blocks are past what one page shows.");
+    expect(html).toMatch(/href="\/api\/pages\/ceiling\/diff\?from=[^"]+">This diff as JSON<\/a> has every block\./);
+  });
+
+  it("renders a release-notes-sized diff (300 added, 100 changed, 50 sections) quickly", async () => {
+    const para = (i: number) => `Release ${i}: the model now supports **longer** context, see [docs](https://example.com/docs/${i}) and \`api\` details. `.repeat(6);
+    const before = Array.from({ length: 50 }, (_, s) => [`## Release ${s}`, ...Array.from({ length: 2 }, (_, i) => `${para(s * 10 + i)} old ${s}.${i}`)].join("\n\n")).join("\n\n");
+    const after = Array.from({ length: 50 }, (_, s) =>
+      [`## Release ${s}`, ...Array.from({ length: 2 }, (_, i) => `${para(s * 10 + i)} new ${s}.${i}`), ...Array.from({ length: 6 }, (_, i) => `${para(s * 100 + i)} added`)].join("\n\n"),
+    ).join("\n\n");
+    await insertPage(db, page("notes2", { label: "Notes", kind: "other" }));
+    await version("nn0", "notes2", ago(2 * DAY), "create", { text: before });
+    await version("nn1", "notes2", ago(DAY), "webhook", { text: after, summary: "A lot.", summary_source: "diff", delta_json: delta([300, 0, 100]) });
+    await get("/pages/notes2/compare"); // stores the diff
+    const start = performance.now();
+    const html = await get("/pages/notes2/compare");
+    expect(performance.now() - start).toBeLessThan(400);
+    expect(count(html, 'class="diff-added"') + count(html, 'class="pair"')).toBeLessThanOrEqual(120);
+  });
+});
+
+describe("the fix round's smaller items", () => {
+  it("tells a screen reader what a mark means, in CSS around the marks only", async () => {
+    // Through the service binding, which reaches the static files as a request from outside does.
+    const css = await (await env.SELF.fetch("https://x/assets/site.css")).text();
+    expect(css).toMatch(/\.diff-before del::before\s*\{[^}]*content:\s*"/);
+    expect(css).toMatch(/\.diff-after ins::before\s*\{[^}]*content:\s*"/);
+    expect(css).toMatch(/\.diff-before del::after/);
+    expect(css).toMatch(/\.diff-after ins::after/);
+    // The marks' own look is scoped to the diff sides too.
+    expect(css).not.toMatch(/(^|\n)del\s*\{/);
+    expect(css).not.toMatch(/(^|\n)ins\s*\{/);
+    // And the mark itself stays bare, so the price is the whole of its text.
+    await seedPricing();
+    expect(await get("/pages/pricing/compare")).toMatch(/<del>\$20<\/del>/);
+  });
+
+  it("survives a stored diff without blocks", async () => {
+    await seedPricing();
+    await db
+      .prepare("INSERT INTO diff_cache (from_version_id, to_version_id, json, created_at) VALUES ('v0', 'v1', ?, ?)")
+      .bind(JSON.stringify({ cached: true }), ago(HOUR))
+      .run();
+    const html = await get("/pages/pricing/compare?from=v0&to=v1");
+    expect(html).toContain("The cleaned text is the same in both versions.");
+  });
+
+  it("puts the accent on the first changed price only", async () => {
+    await insertPage(db, page("twoprices", { label: "Two prices" }));
+    const f = (pro: string, team: string) =>
+      JSON.stringify([
+        { name: "Pro", price: pro, unit: null, notes: null },
+        { name: "Team", price: team, unit: null, notes: null },
+      ]);
+    await version("tp0", "twoprices", ago(2 * DAY), "create", { text: "Pro $20. Team $40.", facts_json: f("$20", "$40"), facts_status: "ok" });
+    await version("tp1", "twoprices", ago(DAY), "webhook", { text: "Pro $25. Team $45.", facts_json: f("$25", "$45"), facts_status: "ok", summary: "Both moved.", summary_source: "diff" });
+    const html = await get("/pages/twoprices/compare");
+    expect(count(html, "is-key")).toBe(1);
+    expect(html).toMatch(/<td class="price is-key">\$25<\/td>/);
+  });
+
+  it("orders sections as the page does, a removed section where it was", async () => {
+    const proOld = "The Pro plan costs $20 per month for every seat on the team.";
+    const proNew = "The Pro plan costs $25 per month for every seat on the team.";
+    const teamOld = "The Team plan includes ten projects and a shared workspace for all.";
+    const teamNew = "The Team plan includes twelve projects and a shared workspace for all.";
+    const before = ["# Plans", "## Pro", proOld, "## Legacy", "The legacy plan is still sold to old customers.", "## Team", teamOld].join("\n\n");
+    const after = ["# Plans", "## Launch", "A launch offer was added for new customers.", "## Pro", proNew, "## Team", teamNew].join("\n\n");
+    await insertPage(db, page("order", { label: "Order page" }));
+    await version("o-0", "order", ago(2 * DAY), "create", { text: before });
+    await version("o-1", "order", ago(DAY), "webhook", { text: after, summary: "Several.", summary_source: "diff" });
+    const html = await get("/pages/order/compare");
+    const sections = [...html.matchAll(/<h3 class="diff-section"[^>]*>([^<]+)<\/h3>/g)].map((m) => m[1]);
+    expect(sections).toEqual(["Launch", "Pro", "Legacy", "Team"]);
+  });
+
+  it("reads no text on the home for a large page whose diff is not stored", async () => {
+    const filler = Array.from({ length: 700 }, (_, i) => `Paragraph ${i} of the release notes, with enough words to fill the page.`).join("\n\n");
+    await insertPage(db, page("bigtext", { label: "Big text", kind: "other" }));
+    await version("bt0", "bigtext", ago(2 * DAY), "create", { text: `Pro costs $20 per month.\n\n${filler}` });
+    await version("bt1", "bigtext", ago(DAY), "webhook", { text: `Pro costs $25 per month.\n\n${filler}`, summary: "Pro went to $25.", summary_source: "tinyfish", delta_json: delta([0, 0, 1]) });
+    const prepare = vi.spyOn(env.DB, "prepare");
+    try {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request("https://x/"), env, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(await res.text()).not.toContain("The latest catch, up close");
+      const sql = prepare.mock.calls.map((call) => String(call[0]));
+      expect(sql.some((q) => /SELECT\s+\*\s+FROM\s+versions/i.test(q))).toBe(false);
+      expect(sql.some((q) => /FROM pages WHERE id = \?/.test(q))).toBe(false);
+    } finally {
+      prepare.mockRestore();
+    }
+  });
+
+  it("keeps a hostile changed block out of the featured catch, and the home fast", async () => {
+    await insertPage(db, page("brackets", { label: "Brackets" }));
+    await version("br0", "brackets", ago(2 * DAY), "create", { text: `Price $20 ${"[".repeat(25_000)}` });
+    await version("br1", "brackets", ago(DAY), "webhook", { text: `Price $25 ${"[".repeat(25_000)}`, summary: "Price.", summary_source: "diff", delta_json: delta([0, 0, 1]) });
+    for (let i = 0; i < 2; i++) {
+      const start = performance.now();
+      const home = await get("/");
+      expect(performance.now() - start).toBeLessThan(500);
+      expect(home).not.toContain("The latest catch, up close");
+    }
+    const start = performance.now();
+    const compare = await get("/pages/brackets/compare");
+    expect(performance.now() - start).toBeLessThan(500);
+    expect(compare).toMatch(/<del>\$20<\/del>/);
+  });
+});
+
+describe("large diffs are stored by the hourly job", () => {
+  const big = (tag: string) => Array.from({ length: 800 }, (_, i) => `Paragraph ${i} of the ${tag} notes, long enough to fill the page.`).join("\n\n");
+
+  async function pair(id: string, over: Partial<NewVersion> = {}, text = big(id)): Promise<void> {
+    await insertPage(db, page(id, { label: id }));
+    await version(`${id}-0`, id, ago(2 * DAY), "create", { text });
+    await version(`${id}-1`, id, ago(DAY), "webhook", {
+      text: `${text}\n\nOne more paragraph.`,
+      summary: "One more.",
+      summary_source: "diff",
+      delta_json: delta([1, 0, 0]),
+      ...over,
+    });
+  }
+
+  it("lists the large adjacent pairs whose ends are final and whose diff is not stored", async () => {
+    await pair("warm-a");
+    await pair("warm-pending", { capture_status: "pending" });
+    await pair("warm-facts", { agent_run_id: "run-in-flight", facts_json: null });
+    await pair("warm-nodelta", { delta_json: null });
+    await pair("warm-nosummary", { summary: null, summary_source: null });
+    await pair("warm-small", {}, "Short text.");
+    await pair("warm-cached");
+    await db
+      .prepare("INSERT INTO diff_cache (from_version_id, to_version_id, json, created_at) VALUES ('warm-cached-0', 'warm-cached-1', '{}', ?)")
+      .bind(ago(HOUR))
+      .run();
+    expect(await diffsToWarm(db, FEATURE_TEXT_CAP, 10)).toEqual([{ id: "warm-a-1", previous_id: "warm-a-0" }]);
+  });
+
+  it("stores one pair's diff through the admin route, the text the JSON route then serves", async () => {
+    await pair("warm-b");
+    const post = (path: string, token?: string) =>
+      SELF.fetch(`https://x${path}`, { method: "POST", headers: token === undefined ? {} : { Authorization: `Bearer ${token}` } });
+    expect((await post("/api/admin/warm-diff?version=warm-b-1")).status).toBe(401);
+    expect((await post("/api/admin/warm-diff", "test-admin")).status).toBe(400);
+    expect((await post("/api/admin/warm-diff?version=nope", "test-admin")).status).toBe(404);
+    expect((await post("/api/admin/warm-diff?version=warm-b-0", "test-admin")).status).toBe(404); // a baseline has no pair
+    const res = await post("/api/admin/warm-diff?version=warm-b-1", "test-admin");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ version_id: "warm-b-1", from_version_id: "warm-b-0", stored: true });
+    const row = await db.prepare("SELECT json FROM diff_cache WHERE from_version_id = 'warm-b-0' AND to_version_id = 'warm-b-1'").first<{ json: string }>();
+    const t0 = (await db.prepare("SELECT captured_at FROM versions WHERE id = 'warm-b-0'").first<{ captured_at: string }>())!.captured_at;
+    const t1 = (await db.prepare("SELECT captured_at FROM versions WHERE id = 'warm-b-1'").first<{ captured_at: string }>())!.captured_at;
+    const served = await (await fetchPath(`/api/pages/warm-b/diff?from=${encodeURIComponent(t0)}&to=${encodeURIComponent(t1)}`)).text();
+    expect(served).toBe(row!.json);
+    expect(await diffsToWarm(db, FEATURE_TEXT_CAP, 10)).toEqual([]);
   });
 });

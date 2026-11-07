@@ -9,7 +9,7 @@ import { factsDiff, structuredDiff, type Delta, type FactsDiff, type StructuredD
 import { FACTS_PAUSE_USD, PUBLIC_SLOTS, SPEND_PAUSE_USD } from "./core/limits";
 import { normalize } from "./core/normalize";
 import { PRICES, type SpendKind } from "./core/spend";
-import { getCachedDiff, putCachedDiff } from "./db/diffCache";
+import { getCachedDiff, hasCachedDiff, putCachedDiff } from "./db/diffCache";
 import { getPage, getPageWithNoiseCount, publicSlotUsage } from "./db/pages";
 import { countNoiseBetween, countNoiseByReason, countRunsByTrigger, listRunsOfPage } from "./db/runs";
 import type { CaptureStatus, FactsStatus, PageKind, PageRow, PageStatus, SummarySource, TriggerKind } from "./db/types";
@@ -24,6 +24,7 @@ import {
   listVersions,
   NOT_RETIRED_SQL,
   PREVIOUS_OF_V,
+  previousVersionOf,
   versionAsOf,
   type VersionSummary,
   type WithTrigger,
@@ -434,6 +435,12 @@ export type Diff = {
   noise_suppressed_between: number;
 };
 
+/**
+ * How far a diff may go to answer: `maxTextChars` refuses to diff texts longer than that, `storedOnly`
+ * answers only from the cache (null when the diff is not stored), so not even the texts are read.
+ */
+export type DiffOptions = { maxTextChars?: number; storedOnly?: boolean };
+
 /** A version as a diff reads it: every column but the text, with its run's trigger. */
 export type DiffSide = WithTrigger<VersionSummary>;
 
@@ -530,15 +537,16 @@ function freshAnswer(diff: Diff): DiffAnswer {
  * them, the compare view picks them from the page's versions). `from` is the older of the two; the cache is
  * keyed by the pair in that order. A stored answer is served as it was stored (the viewer never recomputes);
  * an answer for a version still being captured is computed fresh, so it shows the screenshots and facts that
- * have arrived, and is not kept. Null when a version is gone, or when it is not stored and `maxTextChars` is
- * given and either text is longer (the home's featured catch never diffs a large page on its own request).
+ * have arrived, and is not kept. Null when a version is gone, or when it is not stored and either
+ * `storedOnly` is set or `maxTextChars` is given and either text is longer (the home's featured catch never
+ * diffs a large page on its own request: the hourly job stores those, see warmDiff).
  */
 export async function diffVersions(
   env: Env,
   page: DiffPage,
   from: DiffSide,
   to: DiffSide,
-  opts: { maxTextChars?: number } = {},
+  opts: DiffOptions = {},
 ): Promise<DiffAnswer | null> {
   const db = env.DB;
   // The `to` version's summary is part of the answer, so a change whose summary is not filled yet waits too.
@@ -548,6 +556,7 @@ export async function diffVersions(
     if (cached !== null) return storedAnswer(cached);
   }
 
+  if (opts.storedOnly === true) return null;
   const diff = await buildDiff(env, page, from, to, opts.maxTextChars);
   if (diff === null) return null;
   const answer = freshAnswer(diff);
@@ -572,7 +581,7 @@ export async function getDiff(
   pageId: string,
   fromVersionId: string,
   toVersionId: string,
-  opts: { maxTextChars?: number } = {},
+  opts: DiffOptions = {},
 ): Promise<Diff | null> {
   const db = env.DB;
   const [page, from, to] = await Promise.all([
@@ -582,6 +591,62 @@ export async function getDiff(
   ]);
   if (!page || !from || !to) return null;
   return (await diffVersions(env, pageToJson(page), from, to, opts))?.diff ?? null;
+}
+
+/**
+ * Stores the diff of a version and the one before it (`POST /api/admin/warm-diff`, which the hourly cron
+ * calls for one large pair a tick, src/cron.ts): diffVersions, the same function and the same rule for what
+ * is kept as every reader, run in a request of its own so the first diff of a 228 KB pair never shares a
+ * reader's CPU. Null for an unknown version or one with no version before it (a baseline). `stored` says
+ * whether the diff is in the cache afterwards (not when either end is still being captured).
+ */
+export async function warmDiff(env: Env, versionId: string): Promise<{ version_id: string; from_version_id: string; stored: boolean } | null> {
+  const db = env.DB;
+  const pair = await previousVersionOf(db, versionId);
+  if (pair === null) return null;
+  const [page, from, to] = await Promise.all([
+    getPage(db, pair.page_id),
+    getVersionOfPage(db, pair.page_id, pair.previous_id, false),
+    getVersionOfPage(db, pair.page_id, versionId, false),
+  ]);
+  if (!page || !from || !to) return null;
+  // The answer is not read: a stored diff is not even parsed.
+  if ((await diffVersions(env, pageToJson(page), from, to)) === null) return null;
+  return { version_id: to.id, from_version_id: from.id, stored: await hasCachedDiff(db, from.id, to.id) };
+}
+
+/** At most this many sections are placed by sectionPlaces (D1 binds at most 100 values a query). */
+export const SECTION_PLACES_MAX = 90;
+
+/**
+ * Where each named section's heading stands in the two texts of a diff, by character position (0 when not
+ * found): the compare view puts its section groups in page order with them. One query, and the search runs
+ * in D1 (`instr`), so no text is read out: for each section, the first "# {section}" that ends its line
+ * (a heading of any level), else the first "# {section}" at all. At most SECTION_PLACES_MAX sections.
+ */
+export async function sectionPlaces(
+  env: Env,
+  fromVersionId: string,
+  toVersionId: string,
+  sections: string[],
+): Promise<Map<string, { newer: number; older: number }>> {
+  const named = [...new Set(sections.filter((s) => s !== ""))].slice(0, SECTION_PLACES_MAX);
+  const places = new Map<string, { newer: number; older: number }>();
+  if (named.length === 0) return places;
+  const columns = named.map((_, k) => `COALESCE(NULLIF(instr(text, ?${k + 1} || char(10)), 0), instr(text, ?${k + 1})) AS p${k}`);
+  const { results } = await env.DB.prepare(
+    `SELECT id, ${columns.join(", ")} FROM versions WHERE id IN (?${named.length + 1}, ?${named.length + 2})`,
+  )
+    .bind(...named.map((s) => `# ${s}`), fromVersionId, toVersionId)
+    .all<Record<string, unknown>>();
+  const newer = results.find((r) => r.id === toVersionId);
+  const older = results.find((r) => r.id === fromVersionId);
+  const at = (row: Record<string, unknown> | undefined, k: number): number => {
+    const n = Number(row?.[`p${k}`] ?? 0);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  named.forEach((s, k) => places.set(s, { newer: at(newer, k), older: at(older, k) }));
+  return places;
 }
 
 /**

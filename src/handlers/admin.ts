@@ -13,6 +13,7 @@ import { clearPullFailures, getPage, listPages, notePullFailure, setPageStatusIf
 import type { VersionRow } from "../db/types";
 import { baselineVersion, countVersionsWithoutThumb, getVersion, insertVersion, latestVersion, versionsWithoutThumb } from "../db/versions";
 import type { Env } from "../env";
+import { warmDiff } from "../readModel";
 import { recordMonitorRun, type MonitorRun } from "../record";
 import { fillDeltas, fillSummaries, requestSummary } from "../summary";
 import { thumbnailFromScreenshot } from "../thumbs";
@@ -357,6 +358,21 @@ adminRouter.post("/admin/rotate-webhook", adminOnly, async (c) => {
     }
   }
   return c.json({ updated, failed });
+});
+
+// --- Store a large diff ---------------------------------------------------------------------------
+
+/**
+ * Stores the diff of `?version=<id>` and the version before it in diff_cache (src/readModel.ts warmDiff,
+ * the same diffVersions every reader uses), and answers `{version_id, from_version_id, stored}`. The hourly
+ * cron calls it for one large pair a tick, in an invocation of its own, so the first diff of a 228 KB pair
+ * never runs inside a reader's request. 400 without `version`, 404 for an unknown version or a first one.
+ */
+adminRouter.post("/admin/warm-diff", adminOnly, async (c) => {
+  const versionId = c.req.query("version");
+  if (versionId === undefined || versionId === "") return c.json({ error: "invalid_version" }, 400);
+  const warmed = await warmDiff(c.env, versionId);
+  return warmed === null ? c.json({ error: "not_found" }, 404) : c.json(warmed);
 });
 
 // --- Pull an overdue check ------------------------------------------------------------------------

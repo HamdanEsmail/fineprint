@@ -36,7 +36,8 @@ app.notFound(notFound);
 
 // The hourly cron (wrangler.jsonc `triggers.crons`): facts upkeep, overdue Monitor checks pulled
 // with run-now (with the pull backoff), public page expiry, Monitor health, capture repair, and
-// missing summaries asked for through the SELF binding. runCron never throws.
+// missing summaries and deltas asked for, and one large diff stored, through the SELF binding. runCron
+// never throws.
 async function scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
   ctx.waitUntil(runCron(env));
 }

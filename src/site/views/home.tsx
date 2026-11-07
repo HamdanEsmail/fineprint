@@ -9,6 +9,7 @@
 // (see featuredCatch): it never diffs a large page on the home's own request.
 import type { ChangedBlock } from "../../core/diff";
 import type { CaptureStatus } from "../../db/types";
+import { LARGE_DIFF_TEXT_CHARS } from "../../core/limits";
 import type { Env } from "../../env";
 import { featureCandidates, getDiff, type ChangeItem, type Stats } from "../../readModel";
 import { BlockText, plainText } from "../blockText";
@@ -31,14 +32,19 @@ export const FEATURE_BLOCK_CHARS = 1200;
  * On the recorded texts of 6 Nov, in Node, normalize on both texts plus structuredDiff takes about 1.2 ms for
  * the 29 KB privacy policy, 2.4 ms for the 95 KB Gemini pricing, 5 to 6 ms for the 96 KB release notes and
  * 8 to 11 ms for the 228 KB ones: at this cap a cold home stays near 2 ms in all, and every pricing, fees and
- * policy page fits but Gemini's; the larger pages are left to the cache, which the compare view and the JSON
- * diff fill when they are first opened.
+ * policy page fits but Gemini's; a larger page's diff is read only from the cache, which the hourly job fills
+ * ahead of readers (src/cron.ts, LARGE_DIFF_TEXT_CHARS), as do the compare view and the JSON diff.
  */
-export const FEATURE_TEXT_CAP = 40_000;
+export const FEATURE_TEXT_CAP = LARGE_DIFF_TEXT_CHARS;
 /** The longest stored diff (characters of JSON) the home reads and parses for the featured catch. */
 export const FEATURE_CACHED_CAP = 64_000;
 /** Diffs looked at on one home request, at most; of them at most one is computed rather than read from the cache. */
 const FEATURE_TRIES = 3;
+/**
+ * A changed block's differing lines, as recorded, longer than this are not looked at: what the featured catch
+ * shows is under FEATURE_BLOCK_CHARS once its marks are gone, and links rarely more than treble a line.
+ */
+const FEATURE_RAW_CHARS = 4 * FEATURE_BLOCK_CHARS;
 /** Changed blocks of one diff looked at, at most. */
 const FEATURE_BLOCKS = 12;
 
@@ -95,6 +101,8 @@ function pickBlock(changed: ChangedBlock[]): { beforeText: string; afterText: st
   const budget = { steps: 60_000 };
   for (const block of changed.slice(0, FEATURE_BLOCKS)) {
     const cut = cutToChangedLines(block);
+    // The raw lines first, before any work on them: a stored block can be a whole page, or 25,000 "[".
+    if (cut.before.length > FEATURE_RAW_CHARS || cut.after.length > FEATURE_RAW_CHARS) continue;
     const before = plainText(cut.before);
     const after = plainText(cut.after);
     if (before.length >= FEATURE_BLOCK_CHARS || after.length >= FEATURE_BLOCK_CHARS) continue;
@@ -115,8 +123,10 @@ function pickBlock(changed: ChangedBlock[]): { beforeText: string; afterText: st
  * for all of them, the version before, the two text lengths and the length of the stored diff. A candidate
  * is read only when its diff is stored (and at most FEATURE_CACHED_CAP long) or both its texts are at most
  * FEATURE_TEXT_CAP long; at most FEATURE_TRIES are read, and at most one of them diffed fresh (which stores
- * it for the next home, once both versions are final). A large page's change is featured once its diff is
- * stored: the compare view and the JSON diff store it when they are first opened.
+ * it for the next home, once both versions are final). A large page's change is read from the cache only
+ * and featured once its diff is stored: the hourly job stores one such diff a tick, and the compare view and
+ * the JSON diff store it when they are first opened. A changed block whose differing lines are over
+ * FEATURE_RAW_CHARS as recorded is passed over before any work is done on it.
  */
 export async function featuredCatch(env: Env, changes: ChangeItem[]): Promise<Featured | null> {
   const candidates = changes.slice(0, FEATURE_CHANGES).filter((c) => {
@@ -137,8 +147,9 @@ export async function featuredCatch(env: Env, changes: ChangeItem[]): Promise<Fe
     if (!stored && !(small && fresh === 0)) continue;
     tries++;
     if (!stored) fresh++;
-    // The cap holds even if the stored diff turns out not to be usable (a version no longer final).
-    const diff = await getDiff(env, change.page_id, row.from.id, change.version_id, { maxTextChars: FEATURE_TEXT_CAP });
+    // A large pair is read from the cache only (not even its texts are read when that misses); a small one may
+    // be diffed, and the cap holds whatever the cache said.
+    const diff = await getDiff(env, change.page_id, row.from.id, change.version_id, small ? { maxTextChars: FEATURE_TEXT_CAP } : { storedOnly: true });
     if (diff === null) continue;
     const block = pickBlock(diff.blocks?.changed ?? []);
     if (block === null) continue;

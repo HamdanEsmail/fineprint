@@ -2,8 +2,8 @@
 // the serial facts queue moving (stale claims, runs whose callback was lost, rate-limited
 // starts), pulls Monitor checks whose scheduled run never arrived (with a backoff for pages whose
 // pulls keep failing), retires public pages at the end of their week, flags pages whose Monitor
-// TinyFish no longer runs, retries captures that did not finish, and asks for any missing summaries
-// and deltas.
+// TinyFish no longer runs, retries captures that did not finish, asks for any missing summaries
+// and deltas, and, last, has the diff of one large version pair stored ahead of readers.
 //
 // Repair comes after the cheap steps and is capped (REPAIR_PER_TICK): each capture makes several
 // outbound requests, the free plan allows 50 per invocation, and a backlog must never starve the
@@ -16,9 +16,11 @@ import { lastTickAtOrBefore } from "./core/cronTick";
 import {
   CAPTURE_MAX_ATTEMPTS,
   CONFIRM_WINDOW_MS,
+  LARGE_DIFF_TEXT_CHARS,
   MONITOR_LOOKUPS_PER_TICK,
   PULLS_PER_TICK,
   REPAIR_PER_TICK,
+  WARM_DIFF_CANDIDATES,
 } from "./core/limits";
 import { clearStalePending, expiredPublicPages, monitoredPages, pendingConfirmPages, setPageStatusIf } from "./db/pages";
 import { pullCandidates } from "./db/runs";
@@ -26,6 +28,7 @@ import {
   countFactsDeltas,
   countMissingDeltas,
   countMissingSummaries,
+  diffsToWarm,
   inFlightFactsRuns,
   listFactsClaims,
   pendingCaptures,
@@ -47,6 +50,14 @@ export const cronDeps = {
   pull: (env: Env, pageId: string): Promise<Response> =>
     env.SELF.fetch(
       new Request(`https://fineprint.internal/api/admin/pull/${encodeURIComponent(pageId)}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` },
+      }),
+    ),
+  /** Stores the diff of one large pair in an invocation of its own (POST /api/admin/warm-diff). */
+  warm: (env: Env, versionId: string): Promise<Response> =>
+    env.SELF.fetch(
+      new Request(`https://fineprint.internal/api/admin/warm-diff?version=${encodeURIComponent(versionId)}`, {
         method: "POST",
         headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` },
       }),
@@ -89,6 +100,7 @@ export async function runCron(env: Env): Promise<CronResult> {
   await step("repair", () => repair(env, result));
   await step("summaries", () => fillMissingSummaries(env));
   await step("deltas", () => fillMissingDeltas(env));
+  await step("large diffs", () => warmLargeDiff(env));
   console.log("cron", {
     repaired: result.repaired,
     expired: result.expired,
@@ -379,4 +391,26 @@ async function fillMissingDeltas(env: Env): Promise<void> {
   await requestDeltas(env);
   const oversized = await oversizedForTick(env.DB, "deltas", cronDeps.now());
   if (oversized !== null) await requestDeltas(env, oversized);
+}
+
+// --- 7. Large diffs -------------------------------------------------------------------------
+
+/**
+ * The last step: stores the diff of at most one large adjacent pair a tick (either text over
+ * LARGE_DIFF_TEXT_CHARS, both ends final, its summary and delta done, no stored diff yet), through the
+ * SELF binding, so the first diff of a 228 KB pair (about 10 ms of CPU) runs in a request of its own, never
+ * in a reader's or in this tick's. Taken in turn by the hour of day among the newest WARM_DIFF_CANDIDATES,
+ * so a pair whose request runs out of CPU holds no other back. Never throws: a failed request is logged.
+ */
+async function warmLargeDiff(env: Env): Promise<void> {
+  const pairs = await diffsToWarm(env.DB, LARGE_DIFF_TEXT_CHARS, WARM_DIFF_CANDIDATES);
+  if (pairs.length === 0) return;
+  const pick = pairs[cronDeps.now().getUTCHours() % pairs.length]!;
+  try {
+    const res = await cronDeps.warm(env, pick.id);
+    await res.arrayBuffer().catch(() => undefined);
+    if (!res.ok) console.error(`diff store for version ${pick.id} failed`, `status=${res.status}`);
+  } catch (err) {
+    logError(`diff store for version ${pick.id} failed`, err);
+  }
 }

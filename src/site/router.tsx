@@ -17,11 +17,12 @@ import {
   listChanges,
   listVersionsForDiff,
   parseTime,
+  sectionPlaces,
   versionInForce,
   type VersionItem,
 } from "../readModel";
 import { parseAsOfInput } from "./format";
-import { CompareView, type CompareState } from "./views/compare";
+import { CompareView, diffSections, type CompareState } from "./views/compare";
 import { FEED_SIZE, featuredCatch, Home } from "./views/home";
 import { NotFound, ServerError } from "./views/notFound";
 import { PageView, type AsOf } from "./views/page";
@@ -186,5 +187,10 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   const answer = await diffVersions(c.env, head.page, from.row, to.row);
   // A version deleted between the two reads.
   if (answer === null) return render(c, <NotFound />, 404);
-  return render(c, view({ kind: "diff", from: from.item, to: to.item, diff: answer.diff, all: c.req.query("all") === "1" }));
+  const diff = answer.diff;
+  // Where the sections stand in the two texts, so the groups go in page order: one more query, searched in
+  // D1, only when there are two sections or more to order.
+  const sections = diff.blocks ? diffSections(diff.blocks) : [];
+  const places = sections.length > 1 ? await sectionPlaces(c.env, from.row.id, to.row.id, sections) : null;
+  return render(c, view({ kind: "diff", from: from.item, to: to.item, diff, all: c.req.query("all") === "1", places }));
 });
