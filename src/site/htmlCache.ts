@@ -5,6 +5,8 @@ import type { Env } from "../env";
 
 export const CACHE_HEADER = "x-fineprint-cache";
 const PREFIX = "html/";
+/** A stored copy older than this is not served. */
+export const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /** The headers a fresh render sends, replayed from the stored copy. */
 const KEPT_HEADERS = ["content-type", "content-security-policy", "x-content-type-options", "referrer-policy", "cache-control"];
 
@@ -27,6 +29,9 @@ export async function readCached(env: Env, key: string): Promise<Response | null
   try {
     const object = await env.STORE.get(PREFIX + key);
     if (object === null) return null;
+    // A copy older than a day is a miss (rendered, served and stored again): the bound on any change the drops miss.
+    const wrote = Number(object.customMetadata?.at) || object.uploaded.getTime();
+    if (Date.now() - wrote > MAX_AGE_MS) return null;
     const headers = new Headers(JSON.parse(object.customMetadata?.headers ?? "{}") as Record<string, string>);
     headers.set(CACHE_HEADER, "hit");
     return new Response(object.body, { status: 200, headers });
@@ -60,7 +65,7 @@ export function markMiss(
   schedule(
     copy
       .text()
-      .then((html) => env.STORE.put(PREFIX + key, html, { customMetadata: { headers: JSON.stringify(headers) } }))
+      .then((html) => env.STORE.put(PREFIX + key, html, { customMetadata: { headers: JSON.stringify(headers), at: String(Date.now()) } }))
       .catch((err) => console.error("html cache write failed", err instanceof Error ? err.name : "unknown error")),
   );
   return out;

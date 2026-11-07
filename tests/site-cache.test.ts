@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { captureDeps } from "../src/capture";
 import { cronDeps, runCron } from "../src/cron";
 import { addPage } from "../src/handlers/pages";
-import { fillSummaries } from "../src/summary";
+import { fillDeltas, fillSummaries, summaryDeps } from "../src/summary";
 import { fetchMock } from "./helpers/fetch-mock";
 import fetchFixture from "./fixtures/tinyfish/fetch.json";
 import monitorCreate from "./fixtures/tinyfish/monitor-create.json";
@@ -474,5 +474,92 @@ describe("the hourly tick's rebuild", () => {
     const result = await runCron(cacheOn);
     expect(result).toEqual({ repaired: 0, expired: 0, unhealthy: [], pulled: 0 });
     expect(asked.slice(0, 3)).toEqual(["home", "about", "watchlist"]);
+  });
+});
+
+// --- Follow-ups: status changes, late price tables, the age bound, the tick budget ----------------------
+
+const put = (key: string, meta: Record<string, string> = {}) =>
+  env.STORE.put(`html/${key}`, `<p>${key}</p>`, { customMetadata: { headers: "{}", ...meta } });
+
+describe("stored screens follow status changes and late price tables", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("the health step moving a page to failed drops its view and the watchlist screens", async () => {
+    await insertPage(db, page("beta"));
+    await version("b-1", "beta", ago(3 * HOUR), "create");
+    for (const key of ["page/beta", "page/other", "watchlist", "home", "about"]) await put(key);
+    vi.spyOn(cronDeps, "rebuild").mockResolvedValue(new Response("{}"));
+    fetchMock.activate();
+    fetchMock.intercept({
+      method: "GET",
+      url: "https://agent.tinyfish.ai/v1/monitors",
+      times: Infinity,
+      reply: { json: { monitors: [{ id: "mon-beta", status: "paused", name: "beta" }, { id: "mon-alpha", status: "active", name: "alpha" }] } },
+    });
+    try {
+      const result = await runCron(cacheOn);
+      expect(result.unhealthy).toEqual(["beta"]);
+    } finally {
+      fetchMock.reset();
+    }
+    const rest = await left();
+    for (const key of ["page/beta", "watchlist"]) expect(rest).not.toContain(key);
+    expect(rest).toContain("page/other");
+  });
+
+  it("a price table that lands late drops the page's view and compares", async () => {
+    await insertPage(db, page("gamma"));
+    const facts = (price: string) => JSON.stringify([{ name: "Pro", price, unit: "per month", notes: null }]);
+    await version("g-1", "gamma", ago(3 * HOUR), "create", { facts_json: facts("$1") });
+    await version("g-2", "gamma", ago(2 * HOUR), "webhook", {
+      facts_json: facts("$2"),
+      summary: "Price changed.",
+      summary_source: "diff",
+      delta_json: JSON.stringify({ blocks: { added: 0, removed: 0, changed: 1 }, facts: null, layout_only: false }),
+    });
+    for (const key of ["page/gamma", "compare/gamma/g-1/g-2", "page/alpha", "home"]) await put(key);
+    const answer = await fillDeltas(cacheOn);
+    expect(answer.facts_filled).toBe(1);
+    const rest = await left();
+    for (const key of ["page/gamma", "compare/gamma/g-1/g-2", "home"]) expect(rest).not.toContain(key);
+    expect(rest).toContain("page/alpha");
+  });
+
+  it("a copy older than a day is a miss that is served and stored again", async () => {
+    await put("about", { at: String(Date.now() - 25 * HOUR) });
+    const stale = await callWorker("/about");
+    expect(stale.headers.get("x-fineprint-cache")).toBe("miss");
+    expect(await stale.text()).toContain("<html");
+    const again = await callWorker("/about");
+    expect(again.headers.get("x-fineprint-cache")).toBe("hit");
+    expect(Number((await env.STORE.head("html/about"))?.customMetadata?.at)).toBeGreaterThan(Date.now() - HOUR);
+    await put("about", { at: String(Date.now() - 23 * HOUR) });
+    expect((await callWorker("/about")).headers.get("x-fineprint-cache")).toBe("hit");
+  });
+
+  it("a tick that has already made many invocations rebuilds only the three fixed screens", async () => {
+    const asked: string[] = [];
+    vi.spyOn(cronDeps, "rebuild").mockImplementation(async (_env: unknown, key: string) => (asked.push(key), new Response("{}")));
+    const realFill = summaryDeps.fill;
+    // alpha has versions without a summary, so the tick asks for a fill; this one makes 13 calls of its own.
+    summaryDeps.fill = async (e) => {
+      for (let i = 0; i < 13; i++) await (await e.SELF.fetch("https://fineprint.internal/api/stats")).arrayBuffer();
+      return new Response("{}");
+    };
+    fetchMock.activate();
+    fetchMock.intercept({ method: "GET", url: "https://agent.tinyfish.ai/v1/monitors", times: Infinity, reply: { json: { monitors: [] } } });
+    try {
+      await runCron(cacheOn);
+    } finally {
+      summaryDeps.fill = realFill;
+      fetchMock.reset();
+    }
+    expect(asked).toEqual(["home", "about", "watchlist"]);
   });
 });

@@ -21,6 +21,7 @@ import {
   LARGE_DIFF_TEXT_CHARS,
   MONITOR_LOOKUPS_PER_TICK,
   PULLS_PER_TICK,
+  REBUILD_BUSY_TICK_CALLS,
   REBUILD_CALLS_PER_TICK,
   REBUILD_FIXED_SCREENS,
   REBUILD_WINDOW_HOURS,
@@ -111,7 +112,13 @@ export type CronResult = {
   pulled: number;
 };
 
-export async function runCron(env: Env): Promise<CronResult> {
+export async function runCron(realEnv: Env): Promise<CronResult> {
+  // Counts the tick's own invocations (SELF calls: pulls, fills, the large diff), so the last step can stay inside the budget.
+  const calls = { n: 0 };
+  const env = {
+    ...realEnv,
+    SELF: { fetch: (...args: Parameters<Fetcher["fetch"]>) => (calls.n++, realEnv.SELF.fetch(...args)) } as unknown as Fetcher,
+  } as Env;
   const result: CronResult = { repaired: 0, expired: 0, unhealthy: [], pulled: 0 };
   await step("facts upkeep", () => factsUpkeep(env));
   await step("overdue pulls", () => pullOverdue(env, result));
@@ -121,7 +128,7 @@ export async function runCron(env: Env): Promise<CronResult> {
   await step("summaries", () => fillMissingSummaries(env));
   await step("deltas", () => fillMissingDeltas(env));
   await step("large diffs", () => warmLargeDiff(env));
-  await step("stored screens", () => rebuildScreens(env));
+  await step("stored screens", () => rebuildScreens(env, calls.n));
   console.log("cron", {
     repaired: result.repaired,
     expired: result.expired,
@@ -141,11 +148,12 @@ export async function runCron(env: Env): Promise<CronResult> {
  * are more than fit. Never throws: a failed rebuild is logged and the copy is rebuilt on the next tick or the
  * next change.
  */
-async function rebuildScreens(env: Env): Promise<void> {
+async function rebuildScreens(env: Env, callsSoFar: number): Promise<void> {
   const now = cronDeps.now();
   const since = new Date(now.getTime() - REBUILD_WINDOW_HOURS * 60 * MINUTE_MS).toISOString();
   const room = REBUILD_CALLS_PER_TICK - REBUILD_FIXED_SCREENS.length;
-  const candidates = await prewarmKeys(env.DB, since).catch((err: unknown) => {
+  // A tick that has already made many invocations rebuilds only the fixed screens.
+  const candidates = callsSoFar > REBUILD_BUSY_TICK_CALLS ? [] : await prewarmKeys(env.DB, since).catch((err: unknown) => {
     logError("cron could not list the screens to pre-warm", err);
     return [] as string[];
   });
@@ -396,9 +404,11 @@ async function health(env: Env, result: CronResult): Promise<void> {
     if (status === "active") {
       if (page.status === "failed" && (await setPageStatusIf(env.DB, page.id, "active", ["failed"]))) {
         console.warn(`cron health: the Monitor of page ${page.id} reads active again, so the page is active`);
+        await dropCachedWatchlist(env, page.id);
       }
     } else if (await setPageStatusIf(env.DB, page.id, "failed", ["active"])) {
       result.unhealthy.push(page.id);
+      await dropCachedWatchlist(env, page.id);
     }
   }
 }

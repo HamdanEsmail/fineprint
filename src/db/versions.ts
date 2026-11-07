@@ -557,13 +557,13 @@ const FACTS_DELTA_WHERE = `v.is_baseline = 0 AND v.delta_json IS NOT NULL AND js
     AND json_type(v.delta_json, '$.facts') = 'null'
     AND v.facts_json IS NOT NULL AND p.facts_json IS NOT NULL`;
 
-export type FactsDeltaCandidate = { id: string; delta_json: string; facts_json: string; previous_facts_json: string };
+export type FactsDeltaCandidate = { id: string; page_id: string; delta_json: string; facts_json: string; previous_facts_json: string };
 
 /** The oldest deltas whose facts part can be filled now, at most `limit`. */
 export async function factsDeltaCandidates(db: D1Database, limit: number): Promise<FactsDeltaCandidate[]> {
   const { results } = await db
     .prepare(
-      `SELECT v.id, v.delta_json, v.facts_json, p.facts_json AS previous_facts_json ${FACTS_DELTA_FROM}
+      `SELECT v.id, v.page_id, v.delta_json, v.facts_json, p.facts_json AS previous_facts_json ${FACTS_DELTA_FROM}
        WHERE ${FACTS_DELTA_WHERE} ORDER BY v.captured_at, v.rowid LIMIT ?`,
     )
     .bind(Math.max(0, Math.trunc(limit)) || 0)

@@ -334,7 +334,9 @@ export async function fillDeltas(env: Env, opts: { versionId?: string } = {}): P
     const one = await versionMissingDelta(db, opts.versionId);
     if (one !== null) add(await fillVersion(db, one.id, one.ignore_patterns));
   } else {
-    answer.facts_filled = await fillFactsDeltas(db);
+    const facts = await fillFactsDeltas(db);
+    answer.facts_filled = facts.filled;
+    for (const pageId of facts.pageIds) changed.note({ ...NOTHING, delta: true, pageId });
     answer.oversized = await fillBatch(db, await versionsMissingDelta(db, DIFF_CANDIDATES_PER_CALL), () => false, add);
   }
   await changed.drop(env);
@@ -343,8 +345,9 @@ export async function fillDeltas(env: Env, opts: { versionId?: string } = {}): P
 }
 
 /** Adds the facts part to the deltas whose two versions now both have stored facts; returns how many. */
-async function fillFactsDeltas(db: D1Database): Promise<number> {
+async function fillFactsDeltas(db: D1Database): Promise<{ filled: number; pageIds: string[] }> {
   const rows: { id: string; from: string; to: string }[] = [];
+  const pageIds = new Set<string>();
   for (const c of await factsDeltaCandidates(db, FACTS_DELTAS_PER_CALL)) {
     let delta: Delta;
     try {
@@ -355,8 +358,10 @@ async function fillFactsDeltas(db: D1Database): Promise<number> {
     const facts = factCounts(factsDiff(parseFacts(c.previous_facts_json), parseFacts(c.facts_json)));
     if (facts === null) continue;
     rows.push({ id: c.id, from: c.delta_json, to: JSON.stringify({ ...delta, facts }) });
+    pageIds.add(c.page_id);
   }
-  return replaceDeltas(db, rows);
+  const filled = await replaceDeltas(db, rows);
+  return { filled, pageIds: filled > 0 ? [...pageIds] : [] };
 }
 
 // --- The cron's one ?version= request a tick ----------------------------------------------------------

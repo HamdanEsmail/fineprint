@@ -222,6 +222,8 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 - **Stored screens, step 3 (8 Nov).** The hourly job's last step rebuilds `home`, `about` and `watchlist` every tick and pre-warms the page view and default compare of pages with a version in the last 24 hours, through `POST /api/admin/rebuild-html` (admin token), one screen per invocation; at most 8 rebuilds a tick (the 3 fixed plus up to 5, in turn by the hour). `HTML_CACHE` is "1" in `wrangler.jsonc`. Not deployed yet.
 - **Stored screens, step 4 (8 Nov).** About's honest limits now say that home, About and the watchlist are served from a copy rebuilt every hour and on each new version, so their counts and the recording or paused state can trail by up to an hour.
 
+- **Stored screens, review fixes (8 Nov).** The health step's status changes and a price table that lands late now drop the screens they touch; a stored copy older than 24 hours is rendered and stored again; and a tick that has already made more than 12 invocations rebuilds only home, About and the watchlist.
+
 ## Open before submission (17 Nov)
 
 1. The site's render cost (above): bring the HTML screens back under the free plan's per-request CPU allowance, or decide to accept it.

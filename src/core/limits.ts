@@ -121,5 +121,7 @@ export const LARGE_DIFF_TEXT_CHARS = 40_000;
 export const REBUILD_CALLS_PER_TICK = 8;
 export const REBUILD_FIXED_SCREENS = ["home", "about", "watchlist"] as const;
 export const REBUILD_WINDOW_HOURS = 24;
+/** A tick that has already made more SELF calls than this (pulls, fills, the large diff) rebuilds only the fixed screens. */
+export const REBUILD_BUSY_TICK_CALLS = 12;
 /** The large pairs the cron looks at in a tick; it stores one of them, taken in turn by the hour of day. */
 export const WARM_DIFF_CANDIDATES = 24;
