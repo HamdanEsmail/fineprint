@@ -401,14 +401,14 @@ export async function versionsMissingSummary(db: D1Database, limit: number): Pro
 }
 
 /** Every non-baseline version without a summary whose run carried a judgment text, id and text only. */
-export async function versionsWithJudgmentMissingSummary(db: D1Database): Promise<Pick<VersionRow, "id" | "judgment_summary">[]> {
+export async function versionsWithJudgmentMissingSummary(db: D1Database): Promise<Pick<VersionRow, "id" | "page_id" | "judgment_summary">[]> {
   const { results } = await db
     .prepare(
-      `SELECT id, judgment_summary FROM versions
+      `SELECT id, page_id, judgment_summary FROM versions
        WHERE is_baseline = 0 AND summary IS NULL AND judgment_summary IS NOT NULL
        ORDER BY captured_at, rowid`,
     )
-    .all<Pick<VersionRow, "id" | "judgment_summary">>();
+    .all<Pick<VersionRow, "id" | "page_id" | "judgment_summary">>();
   return results;
 }
 

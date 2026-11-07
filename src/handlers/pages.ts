@@ -12,6 +12,7 @@ import { MAX_MONITORS, MAX_URL_LENGTH, PUBLIC_ADDS_PER_IP_PER_DAY, PUBLIC_SLOTS,
 import { hashText, normalize } from "../core/normalize";
 import { cronForIndex, PURPOSE } from "../core/schedule";
 import { deleteCachedDiffsOfPage } from "../db/diffCache";
+import { dropCachedWatchlist } from "../site/htmlCache";
 import { countMonitors, getPage, getPageByUrl, insertPage, publicSlotUsage, updatePage, type PagePatch } from "../db/pages";
 import { claimPublicAdd, publicAddsToday, releasePublicAdd } from "../db/publicAdds";
 import { insertRun } from "../db/runs";
@@ -502,6 +503,9 @@ async function createPage(env: Env, ctx: AddContext, req: NewPageRequest): Promi
   // 6. Every page gets a day-zero screenshot and source (spec 4.4).
   ctx.waitUntil(captureVersion(env, versionId).catch((err: unknown) => logError("add: capture failed for " + versionId, err)));
 
+  // The watchlist, the home feed and About now show the new page.
+  await dropCachedWatchlist(env);
+
   const row = await getPage(db, pageId);
   if (!row) return refuse(500, "internal_error");
   return { ok: true, page: pageToJson(row), baseline_version_id: versionId };
@@ -588,5 +592,6 @@ pagesRouter.delete("/:id", adminOnly, async (c) => {
     }
   }
   await updatePage(c.env.DB, page.id, { status: "expired" });
+  c.executionCtx.waitUntil(dropCachedWatchlist(c.env, page.id));
   return c.json({ deleted: true });
 });

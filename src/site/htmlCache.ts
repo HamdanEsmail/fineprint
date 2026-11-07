@@ -66,6 +66,41 @@ export function markMiss(
   return out;
 }
 
+/** R2 deletes at most this many keys in one call. */
+const DELETE_BATCH = 1000;
+
+/** Every key under html/<prefix>, without the html/ (listed up to 1,000 at a time). */
+async function keysUnder(env: Env, prefix: string): Promise<string[]> {
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const listed = await env.STORE.list({ prefix: PREFIX + prefix, cursor });
+    for (const o of listed.objects) keys.push(o.key.slice(PREFIX.length));
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor !== undefined);
+  return keys;
+}
+
+/**
+ * A new summary or delta for versions of these pages: drops the home feed, About, each page's view and every
+ * compare of each page. For one page that is two R2 calls (one list, one delete). Never throws.
+ */
+export async function dropCachedPages(env: Env, pageIds: string[]): Promise<void> {
+  if (pageIds.length === 0) return;
+  try {
+    const keys = [cacheKey.home(), cacheKey.about(), ...pageIds.map(cacheKey.page)];
+    for (const id of pageIds) keys.push(...(await keysUnder(env, `compare/${id}/`)));
+    for (let i = 0; i < keys.length; i += DELETE_BATCH) await env.STORE.delete(keys.slice(i, i + DELETE_BATCH).map((k) => PREFIX + k));
+  } catch (err) {
+    console.error("html cache drop failed", err instanceof Error ? err.name : "unknown error");
+  }
+}
+
+/** The watchlist changed (an add, a retirement, an expiry, a deletion): drops it, the home feed and About, and the page's own view when given. One R2 call. */
+export function dropCachedWatchlist(env: Env, pageId?: string): Promise<void> {
+  return dropCached(env, [cacheKey.watchlist(), cacheKey.home(), cacheKey.about(), ...(pageId === undefined ? [] : [cacheKey.page(pageId)])]);
+}
+
 /** Removes stored copies (the seam for invalidation); a failure is logged, never thrown. */
 export async function dropCached(env: Env, keys: string[]): Promise<void> {
   if (keys.length === 0) return;

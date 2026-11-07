@@ -13,6 +13,7 @@ import { clearPullFailures, getPage, listPages, notePullFailure, setPageStatusIf
 import type { VersionRow } from "../db/types";
 import { baselineVersion, countVersionsWithoutThumb, getVersion, insertVersion, latestVersion, versionsWithoutThumb } from "../db/versions";
 import type { Env } from "../env";
+import { dropCachedWatchlist } from "../site/htmlCache";
 import { warmDiff } from "../readModel";
 import { recordMonitorRun, type MonitorRun } from "../record";
 import { fillDeltas, fillSummaries, requestSummary } from "../summary";
@@ -305,6 +306,7 @@ adminRouter.post("/admin/pages/:id/retire", adminOnly, async (c) => {
   }
   // No read of a retired page is awaited any more.
   await updatePage(db, page.id, { pending_hash: null, pending_run_id: null, pending_at: null });
+  c.executionCtx.waitUntil(dropCachedWatchlist(c.env, page.id));
   const retired = await getPage(db, page.id);
   return c.json({ retired: true, page: pageToJson(retired ?? { ...page, status: "retired" }) });
 });

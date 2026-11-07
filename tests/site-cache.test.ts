@@ -1,6 +1,13 @@
 import { applyD1Migrations, createExecutionContext, reset, waitOnExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { captureDeps } from "../src/capture";
+import { runCron } from "../src/cron";
+import { addPage } from "../src/handlers/pages";
+import { fillSummaries } from "../src/summary";
+import { fetchMock } from "./helpers/fetch-mock";
+import fetchFixture from "./fixtures/tinyfish/fetch.json";
+import monitorCreate from "./fixtures/tinyfish/monitor-create.json";
 import { insertPage, type NewPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { RunRow, TriggerKind } from "../src/db/types";
@@ -238,3 +245,122 @@ describe("the stored copy of the likely screens", () => {
     expect(await stored()).toEqual([]);
   });
 });
+
+// --- Invalidation ------------------------------------------------------------------------------------
+
+const ALL_KEYS = ["home", "about", "watchlist", "page/alpha", "page/beta", "compare/alpha/a-1/a-2", "compare/alpha/a-2/a-3", "compare/beta/b-1/b-2"];
+
+/** Every screen has a stored copy, whatever the pages are. */
+async function fillCache(): Promise<void> {
+  for (const key of ALL_KEYS) await env.STORE.put(`html/${key}`, `<p>${key}</p>`, { customMetadata: { headers: "{}" } });
+}
+
+const left = async (): Promise<string[]> => (await stored()).sort();
+const without = (...gone: string[]): string[] => ALL_KEYS.filter((k) => !gone.includes(k)).sort();
+const WATCHLIST_SCREENS = ["watchlist", "home", "about"];
+
+describe("dropping the stored screens that show a change", () => {
+  let screenshot: ReturnType<typeof vi.spyOn>;
+  let errorLog: ReturnType<typeof vi.spyOn>;
+  beforeEach(async () => {
+    fetchMock.activate();
+    screenshot = vi.spyOn(captureDeps, "screenshotFullPage").mockImplementation(async () => ({
+      bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]).buffer,
+      height: 800,
+      sessionId: "sess-test",
+    }));
+    captureDeps.sleep = async () => {};
+    errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    await insertPage(db, page("beta"));
+    await version("b-1", "beta", ago(3 * HOUR), "create");
+    await fillCache();
+  });
+  afterEach(() => {
+    fetchMock.reset();
+    screenshot.mockRestore();
+    captureDeps.sleep = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it("a new version's summary and delta drop home, about, its page and its compares, and leave other pages alone", async () => {
+    await version("a-4", "alpha", ago(60_000), "webhook");
+    const answer = await fillSummaries(cacheOn, { versionId: "a-4" });
+    expect(answer.filled).toBe(1);
+    expect(await left()).toEqual(without("home", "about", "page/alpha", "compare/alpha/a-1/a-2", "compare/alpha/a-2/a-3"));
+  });
+
+  it("a fill that finds nothing to write drops nothing", async () => {
+    await fillSummaries(cacheOn, { versionId: "a-1" }); // a baseline keeps no summary
+    expect(await left()).toEqual(ALL_KEYS.slice().sort());
+  });
+
+  it("a failed delete is logged and the fill still succeeds", async () => {
+    await version("a-4", "alpha", ago(60_000), "webhook");
+    vi.spyOn(env.STORE, "delete").mockRejectedValue(new Error("r2 down"));
+    const answer = await fillSummaries(cacheOn, { versionId: "a-4" });
+    expect(answer.filled).toBe(1);
+    expect(errorLog).toHaveBeenCalledWith("html cache drop failed", "Error");
+  });
+
+  it("a public add drops the watchlist, home and about; a failed delete does not fail the add", async () => {
+    mockTinyFish();
+    const pending: Promise<unknown>[] = [];
+    const ctx = { waitUntil: (p: Promise<unknown>) => void pending.push(p) };
+    const added = await addPage(cacheOn, ctx, { url: "https://example.com/pricing" }, { admin: false, ipHash: async () => "ip-1" });
+    await Promise.all(pending);
+    expect(added.ok).toBe(true);
+    expect(await left()).toEqual(without(...WATCHLIST_SCREENS));
+
+    await fillCache();
+    vi.spyOn(env.STORE, "delete").mockRejectedValue(new Error("r2 down"));
+    pending.length = 0;
+    const again = await addPage(cacheOn, ctx, { url: "https://example.com/terms" }, { admin: false, ipHash: async () => "ip-2" });
+    await Promise.all(pending);
+    expect(again.ok).toBe(true);
+    expect(errorLog).toHaveBeenCalledWith("html cache delete failed", "Error");
+  });
+
+  it("a retirement drops the watchlist, home, about and the page's own view", async () => {
+    fetchMock.intercept({ method: "DELETE", url: /\/v1\/monitors\/mon-alpha$/, reply: { status: 204 } });
+    const res = await callWorker("/api/admin/pages/alpha/retire", { method: "POST", headers: { Authorization: "Bearer test-admin" } });
+    expect(res.status).toBe(200);
+    expect(await left()).toEqual(without(...WATCHLIST_SCREENS, "page/alpha"));
+  });
+
+  it("an expiry drops the watchlist, home, about and the page's own view", async () => {
+    await insertPage(db, { ...page("old"), added_by: "public", expires_at: ago(1000) });
+    fetchMock.intercept({ method: "DELETE", url: /\/v1\/monitors\/mon-old$/, reply: { status: 204 } });
+    fetchMock.intercept({ method: "GET", url: "https://agent.tinyfish.ai/v1/monitors", times: Infinity, reply: { json: { monitors: [] } } });
+    await env.STORE.put("html/page/old", "<p>old</p>");
+    const result = await runCron(cacheOn);
+    expect(result.expired).toBe(1);
+    // (The same tick also asks for the missing summaries, which drops alpha's screens: only these are checked.)
+    const rest = await left();
+    for (const key of [...WATCHLIST_SCREENS, "page/old"]) expect(rest).not.toContain(key);
+    expect(rest).toContain("page/beta");
+  });
+
+  it("a deletion drops the watchlist, home, about and the page's own view", async () => {
+    fetchMock.intercept({ method: "DELETE", url: /\/v1\/monitors\/mon-beta$/, reply: { status: 204 } });
+    const res = await callWorker("/api/pages/beta", { method: "DELETE", headers: { Authorization: "Bearer test-admin" } });
+    expect(res.status).toBe(200);
+    expect(await left()).toEqual(without(...WATCHLIST_SCREENS, "page/beta"));
+  });
+});
+
+/** TinyFetch reads any url; a Monitor create gets mon-N; deletes are answered. */
+let monitorSeq = 0;
+function mockTinyFish(): void {
+  fetchMock.intercept({ method: "POST", url: "https://api.fetch.tinyfish.ai", times: Infinity, reply: () => Response.json(fetchFixture) });
+  fetchMock.intercept({
+    method: "POST",
+    url: "https://agent.tinyfish.ai/v1/monitors",
+    times: Infinity,
+    reply: () => {
+      const body = structuredClone(monitorCreate);
+      body.monitor.id = `mon-n${++monitorSeq}`;
+      body.run.id = `mrun-n${monitorSeq}`;
+      return Response.json(body, { status: 201 });
+    },
+  });
+}

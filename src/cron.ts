@@ -37,6 +37,7 @@ import {
   updateIfFactsHolder,
 } from "./db/versions";
 import type { Env } from "./env";
+import { dropCachedWatchlist } from "./site/htmlCache";
 import { oversizedForTick, requestDeltas, requestSummary } from "./summary";
 import { getRun } from "./tinyfish/agent";
 import { TinyFishError } from "./tinyfish/client";
@@ -288,7 +289,10 @@ async function expire(env: Env, result: CronResult): Promise<void> {
   for (const page of await expiredPublicPages(env.DB, new Date().toISOString())) {
     try {
       if (page.monitor_id !== null) await deleteMonitor(env, page.monitor_id);
-      if (await setPageStatusIf(env.DB, page.id, "expired", ["active", "paused", "failed"])) result.expired += 1;
+      if (await setPageStatusIf(env.DB, page.id, "expired", ["active", "paused", "failed"])) {
+        result.expired += 1;
+        await dropCachedWatchlist(env, page.id);
+      }
     } catch (err) {
       logError(`cron could not expire page ${page.id}`, err);
     }

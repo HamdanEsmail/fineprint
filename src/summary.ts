@@ -41,6 +41,7 @@ import {
   type SummaryCandidate,
 } from "./db/versions";
 import type { Env } from "./env";
+import { dropCachedPages } from "./site/htmlCache";
 import { parseFacts } from "./handlers/versionJson";
 
 /** Which fill route a request goes to. */
@@ -136,9 +137,24 @@ const deltaOf = (diff: StructuredDiff, v: Facts, previous: Facts | null): Delta 
 });
 
 /** What filling one version wrote; `failed` when its summary was written but its delta could not be. */
-type Filled = { summary: boolean; delta: boolean; rebuilt: boolean; failed: boolean };
+type Filled = { summary: boolean; delta: boolean; rebuilt: boolean; failed: boolean; pageId: string };
 
-const NOTHING: Filled = { summary: false, delta: false, rebuilt: false, failed: false };
+const NOTHING: Filled = { summary: false, delta: false, rebuilt: false, failed: false, pageId: "" };
+
+/**
+ * The pages whose stored screens a fill made stale: a version that gained a summary or a delta changes the
+ * home feed, About, the page view and its compares. Collected as versions are filled and dropped once at the
+ * end (src/site/htmlCache.ts), so the work stays out of the webhook and a failure never fails the fill.
+ */
+function changedPages(): { note: (f: Filled) => void; drop: (env: Env) => Promise<void> } {
+  const pages = new Set<string>();
+  return {
+    note: (f) => {
+      if ((f.summary || f.delta) && f.pageId !== "") pages.add(f.pageId);
+    },
+    drop: (env) => dropCachedPages(env, [...pages]),
+  };
+}
 
 /**
  * Fills what one non-baseline version is missing, from one read of it and the version before it:
@@ -158,13 +174,13 @@ async function fillVersion(db: D1Database, id: string, ignorePatterns: string): 
   const previous = v.previous_id === null ? null : { text: v.previous_text, facts_json: v.previous_facts_json };
   if (v.summary === null) {
     const fromTinyFish = oneLine(v.judgment_summary);
-    if (fromTinyFish !== null) return { ...NOTHING, summary: await setSummaryIfMissing(db, id, fromTinyFish, "tinyfish") };
+    if (fromTinyFish !== null) return { ...NOTHING, pageId: v.page_id, summary: await setSummaryIfMissing(db, id, fromTinyFish, "tinyfish") };
   } else if (v.delta_json !== null) {
     return NOTHING;
   }
 
   const d = diffVersion(v, previous, ignorePatterns);
-  const out: Filled = { ...NOTHING };
+  const out: Filled = { ...NOTHING, pageId: v.page_id };
   if (v.summary === null) out.summary = await setSummaryIfMissing(db, id, diffSummary(d.diff, d.next), "diff");
   if (v.delta_json !== null) return out;
   try {
@@ -190,7 +206,11 @@ export async function computeDelta(env: Env, versionId: string): Promise<boolean
     .bind(versionId)
     .first<{ ignore_patterns: string }>();
   if (row === null) return false;
-  return (await fillVersion(env.DB, versionId, row.ignore_patterns)).delta;
+  const filled = await fillVersion(env.DB, versionId, row.ignore_patterns);
+  const changed = changedPages();
+  changed.note(filled);
+  await changed.drop(env);
+  return filled.delta;
 }
 
 // --- A batch, within the per-call budget -----------------------------------------------------------
@@ -258,22 +278,28 @@ export async function fillSummaries(env: Env, opts: { versionId?: string } = {})
   const db = env.DB;
   let filled = 0;
   let oversized: string[] = [];
+  const changed = changedPages();
   const add = (f: Filled): void => {
     if (f.summary) filled++;
+    changed.note(f);
   };
   if (opts.versionId !== undefined) {
     const one = await versionMissingSummary(db, opts.versionId);
     if (one !== null) add(await fillVersion(db, one.id, one.ignore_patterns));
   } else {
-    const fromTinyFish = (await versionsWithJudgmentMissingSummary(db)).flatMap((v) => {
+    const judged = await versionsWithJudgmentMissingSummary(db);
+    const fromTinyFish = judged.flatMap((v) => {
       const summary = oneLine(v.judgment_summary);
       return summary === null ? [] : [{ id: v.id, summary }];
     });
-    filled += await setTinyFishSummaries(db, fromTinyFish);
+    const written = await setTinyFishSummaries(db, fromTinyFish);
+    filled += written;
+    if (written > 0) for (const v of judged) changed.note({ ...NOTHING, summary: true, pageId: v.page_id });
     const candidates = await versionsMissingSummary(db, DIFF_CANDIDATES_PER_CALL);
     // Versions with TinyFish's summary were stored just above (or by another call).
     oversized = await fillBatch(db, candidates, (c) => oneLine(c.judgment_summary) !== null, add);
   }
+  await changed.drop(env);
   return { filled, remaining: await countMissingSummaries(db), oversized };
 }
 
@@ -298,9 +324,11 @@ export type DeltaAnswer = { filled: number; rebuilt: number; facts_filled: numbe
 export async function fillDeltas(env: Env, opts: { versionId?: string } = {}): Promise<DeltaAnswer> {
   const db = env.DB;
   const answer: DeltaAnswer = { filled: 0, rebuilt: 0, facts_filled: 0, remaining: 0, oversized: [] };
+  const changed = changedPages();
   const add = (f: Filled): void => {
     if (f.delta) answer.filled++;
     if (f.rebuilt) answer.rebuilt++;
+    changed.note(f);
   };
   if (opts.versionId !== undefined) {
     const one = await versionMissingDelta(db, opts.versionId);
@@ -309,6 +337,7 @@ export async function fillDeltas(env: Env, opts: { versionId?: string } = {}): P
     answer.facts_filled = await fillFactsDeltas(db);
     answer.oversized = await fillBatch(db, await versionsMissingDelta(db, DIFF_CANDIDATES_PER_CALL), () => false, add);
   }
+  await changed.drop(env);
   answer.remaining = await countMissingDeltas(db);
   return answer;
 }
