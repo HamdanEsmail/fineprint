@@ -193,6 +193,21 @@ export function noiseReasonWords(reason: string): string {
   return NOISE_WORDS[reason] ?? reason.replaceAll("_", " ");
 }
 
+/**
+ * A fact's unit as it is shown after its price: left out when the price already says it ("$1 per 1,000" with
+ * "per 1,000", "1M / month included" with "per month"), so a cell never reads "per month" twice. The unit is
+ * still in the version's JSON as recorded.
+ */
+export function unitBeside(price: string, unit: string): string {
+  const u = unit.trim();
+  if (u === "") return "";
+  const p = price.toLowerCase();
+  const lower = u.toLowerCase();
+  const per = lower.startsWith("per ") ? lower.slice(4).trim() : null;
+  if (p.includes(lower) || (per !== null && per !== "" && (p.includes(`/ ${per}`) || p.includes(`/${per}`)))) return "";
+  return u;
+}
+
 /** Where a change's one-line summary came from, as the cards say it. */
 export const SUMMARY_ORIGIN = { tinyfish: "TinyFish's summary", diff: "From the diff" } as const;
 

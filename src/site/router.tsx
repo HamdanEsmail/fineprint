@@ -28,10 +28,10 @@ import {
 } from "../readModel";
 import { parseAsOfInput, webHref } from "./format";
 import { About } from "./views/about";
-import { CompareView, diffSections, type CompareState } from "./views/compare";
+import { CompareView, diffSections, placesFromDiff, type CompareState } from "./views/compare";
 import { FEATURE_CHANGES, FEED_SIZE, featuredCatch, Home } from "./views/home";
 import { NotFound, ServerError } from "./views/notFound";
-import { PageView, type AsOf } from "./views/page";
+import { isGone, PageView, refreshes, type AsOf } from "./views/page";
 import { Watchlist, type FindState, type Refusal, type WatchlistProps } from "./views/watchlist";
 
 type AppContext = Context<{ Bindings: Env }>;
@@ -46,10 +46,22 @@ const SECURITY_HEADERS = {
   "referrer-policy": "strict-origin-when-cross-origin",
 } as const;
 
+/**
+ * A screen of recorded data: a browser may keep it a minute. The Worker keeps no copy of its own: Cloudflare
+ * documents working Cache API operations for Workers on custom domains, and the site runs on workers.dev.
+ */
+const KEEP_A_MINUTE = { "cache-control": "public, max-age=60" } as const;
+/** A screen that answers a form or a search: never kept. */
+const NEVER_KEEP = { "cache-control": "max-age=0, no-store" } as const;
+
 export const siteEnabled = (env: Env): boolean => env.SITE_ENABLED === "1";
 
-const render = (c: AppContext, page: Child, status: ContentfulStatusCode = 200): Response | Promise<Response> =>
-  c.html(page as string | Promise<string>, status, SECURITY_HEADERS);
+const render = (
+  c: AppContext,
+  page: Child,
+  status: ContentfulStatusCode = 200,
+  headers: Record<string, string> = {},
+): Response | Promise<Response> => c.html(page as string | Promise<string>, status, { ...SECURITY_HEADERS, ...headers });
 
 const isApiPath = (path: string): boolean =>
   path === "/api" || path.startsWith("/api/") || path === "/hooks" || path.startsWith("/hooks/");
@@ -99,6 +111,8 @@ siteRouter.get("/", async (c) => {
       retiredWithChanges={retiredWithChanges}
       featured={featured}
     />,
+    200,
+    KEEP_A_MINUTE,
   );
 });
 
@@ -108,9 +122,9 @@ siteRouter.get("/pages/:id", async (c) => {
   if (!siteEnabled(c.env)) return c.notFound();
   const pageId = c.req.param("id");
   // The page row (with its noise count) first: a page that is not there is the ledger's 404 after that one
-  // read, without the stats. Then nine in all: the stats every screen's stamp and spend meter need (six)
-  // beside the page's versions and runs (two), none with a text. v= and at= are resolved from the
-  // versions already read.
+  // read, without the stats. Then two batches side by side, one round trip each: the stats every screen's
+  // stamp and spend meter need (six statements) and the page's versions and runs (two), none with a text.
+  // v= and at= are resolved from the versions already read.
   const head = await findPage(c.env, pageId);
   if (head === null) return render(c, <NotFound />, 404);
   const [stats, detail] = await Promise.all([getStats(c.env), getPageRecord(c.env, head)]);
@@ -152,7 +166,15 @@ siteRouter.get("/pages/:id", async (c) => {
       ? ((await getVersion(c.env, pageId, selected.id, { withText: true }))?.text ?? null)
       : null;
 
-  return render(c, <PageView stats={stats} detail={detail} selected={selected} asOf={asOf} text={text} nowMs={nowMs} />);
+  // Kept a minute, unless the page reloads itself for a screenshot being taken, or has no version yet (a page
+  // just added, whose baseline is on its way).
+  const kept = selected !== null && !refreshes(selected, isGone(head.page.status), nowMs);
+  return render(
+    c,
+    <PageView stats={stats} detail={detail} selected={selected} asOf={asOf} text={text} nowMs={nowMs} />,
+    200,
+    kept ? KEEP_A_MINUTE : {},
+  );
 });
 
 // --- Compare view: the diff between two versions -------------------------------------------------
@@ -161,7 +183,7 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   if (!siteEnabled(c.env)) return c.notFound();
   const pageId = c.req.param("id");
   // As the page view: the page first, so an unknown page is the ledger's 404 after one query. Then the
-  // stats (six) and the page's versions (one, no text); from= and to= are found among those versions, so a
+  // stats (one batch of six) and the page's versions (one, no text); from= and to= are found among those versions, so a
   // version this page does not have is the 404 too, and only then is the diff read (one query when it is
   // stored, or the two texts and two counts and the cache write when it is not).
   const head = await findPage(c.env, pageId);
@@ -179,13 +201,13 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   if (fromIndex === -1 || toIndex === -1) return render(c, <NotFound />, 404);
 
   const view = (state: CompareState) => <CompareView stats={stats} page={head.page} versions={items} state={state} />;
-  if (versions.length < 2) return render(c, view({ kind: "single" }));
+  if (versions.length < 2) return render(c, view({ kind: "single" }), 200, KEEP_A_MINUTE);
 
   // Versions are newest first. Without to=, the latest; without from=, the one just before `to` (the one
   // just after it when `to` is the first version).
   toIndex ??= 0;
   fromIndex ??= toIndex + 1 < versions.length ? toIndex + 1 : toIndex - 1;
-  if (fromIndex === toIndex) return render(c, view({ kind: "same", at: items[toIndex]! }));
+  if (fromIndex === toIndex) return render(c, view({ kind: "same", at: items[toIndex]! }), 200, KEEP_A_MINUTE);
   // `from` is the older: a reversed pair is swapped, so the cache key is the one the JSON route uses.
   if (fromIndex < toIndex) [fromIndex, toIndex] = [toIndex, fromIndex];
 
@@ -195,18 +217,20 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   // A version deleted between the two reads.
   if (answer === null) return render(c, <NotFound />, 404);
   const diff = answer.diff;
-  // Where the sections stand in the two texts, so the groups go in page order: one more query, searched in
-  // D1, only when there are two sections or more to order.
-  const sections = diff.blocks ? diffSections(diff.blocks) : [];
-  const places = sections.length > 1 ? await sectionPlaces(c.env, from.row.id, to.row.id, sections) : null;
-  return render(c, view({ kind: "diff", from: from.item, to: to.item, diff, all: c.req.query("all") === "1", places }));
+  // Where the sections stand, so the groups go in page order: from the diff itself when its lists settle it
+  // (placesFromDiff), else one more query, searched in D1, and only when there are two sections or more.
+  const blocks = diff.blocks;
+  const sections = blocks ? diffSections(blocks) : [];
+  const places =
+    blocks && sections.length > 1 ? (placesFromDiff(blocks) ?? (await sectionPlaces(c.env, from.row.id, to.row.id, sections))) : null;
+  return render(c, view({ kind: "diff", from: from.item, to: to.item, diff, all: c.req.query("all") === "1", places }), 200, KEEP_A_MINUTE);
 });
 
 // --- About: how Fineprint works ---------------------------------------------------------------------
 
 siteRouter.get("/about", async (c) => {
   if (!siteEnabled(c.env)) return c.notFound();
-  // Nine queries, then the featured catch's: the stats (six); the newest changes outside retired pages, which
+  // Four round trips, then the featured catch's: the stats (one batch of six); the newest changes outside retired pages, which
   // the featured catch picks from as the home does (the same change, under the same caps); the newest
   // layout-only change, for the one linked example; and the page list, for the retired pages it names.
   const [stats, changes, layoutOnly, pages] = await Promise.all([
@@ -227,6 +251,8 @@ siteRouter.get("/about", async (c) => {
       baseUrl={c.env.PUBLIC_BASE_URL.replace(/\/+$/, "")}
       repoUrl={webHref(c.env.REPO_URL ?? "")}
     />,
+    200,
+    KEEP_A_MINUTE,
   );
 });
 
@@ -290,14 +316,16 @@ async function readAddForm(c: AppContext): Promise<FormRead> {
   return { ok: true, url: text("url"), label: text("label") };
 }
 
-/** The watchlist screen over the stats (six queries) and the page list (one), with `status`. */
+/** The watchlist screen over the stats (one batch of six) and the page list (one query), with `status`. */
 function watchlist(
   c: AppContext,
   read: { stats: WatchlistProps["stats"]; pages: WatchlistProps["pages"] },
   rest: Omit<WatchlistProps, "stats" | "pages" | "nowMs">,
   status: ContentfulStatusCode = 200,
 ): Response | Promise<Response> {
-  return render(c, <Watchlist stats={read.stats} pages={read.pages} nowMs={Date.now()} {...rest} />, status);
+  // A screen that answers the add form or the search is never kept: it is that visitor's answer, once.
+  const answered = rest.refusal !== null || rest.find !== null;
+  return render(c, <Watchlist stats={read.stats} pages={read.pages} nowMs={Date.now()} {...rest} />, status, answered ? NEVER_KEEP : {});
 }
 
 siteRouter.get("/watchlist", async (c) => {

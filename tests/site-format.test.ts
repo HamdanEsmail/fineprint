@@ -11,10 +11,22 @@ import {
   spendMeter,
   stampFor,
   triggerLabel,
+  unitBeside,
   webHref,
 } from "../src/site/format";
 
 describe("site formatters", () => {
+  it("leaves out a unit the price already says", () => {
+    expect(unitBeside("$20", "per month")).toBe("per month");
+    expect(unitBeside("$1 per 1,000", "per 1,000")).toBe("");
+    expect(unitBeside("1M / month included", "per month")).toBe("");
+    expect(unitBeside("$0.25 / million tokens", "per million tokens")).toBe("");
+    expect(unitBeside("$10 / project / month", "per month")).toBe("");
+    expect(unitBeside("$20/month", "per month")).toBe("");
+    expect(unitBeside("$20", "")).toBe("");
+    expect(unitBeside("Custom", "per seat")).toBe("per seat");
+  });
+
   it("writes times as UTC, day first, with no relative time", () => {
     expect(formatUtc("2026-11-05T09:12:44.120Z")).toBe("5 Nov 2026, 09:12 UTC");
     expect(formatUtc("2026-01-30T23:59:59.999Z")).toBe("30 Jan 2026, 23:59 UTC");

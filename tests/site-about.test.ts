@@ -410,7 +410,8 @@ describe("about", () => {
       expect(warm.length).toBe(14);
       // The warm screen never reads a version's text.
       expect(warm.some((sql) => /SELECT\s+\*\s+FROM\s+versions/i.test(sql))).toBe(false);
-      expect(batch).not.toHaveBeenCalled();
+      // One batch a screen, one round trip: the stats' six aggregates (prepared, so counted above).
+      expect(batch.mock.calls.map((call) => call[0].length)).toEqual([6, 6, 6]);
     } finally {
       prepare.mockRestore();
       batch.mockRestore();

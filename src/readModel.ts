@@ -10,8 +10,16 @@ import { FACTS_PAUSE_USD, PUBLIC_SLOTS, SPEND_PAUSE_USD } from "./core/limits";
 import { normalize } from "./core/normalize";
 import { PRICES, type SpendKind } from "./core/spend";
 import { getCachedDiff, hasCachedDiff, putCachedDiff } from "./db/diffCache";
-import { getPage, getPageWithNoiseCount, listPages as listPageRows, publicSlotUsage, type PageListRow } from "./db/pages";
-import { countNoiseBetween, countNoiseByReason, countRunsByTrigger, listRunsOfPage } from "./db/runs";
+import { getPage, getPageWithNoiseCount, listPages as listPageRows, publicSlotUsageFrom, publicSlotUsageStatement, type PageListRow } from "./db/pages";
+import {
+  countNoiseBetween,
+  noiseByReasonFrom,
+  noiseByReasonStatement,
+  runsByTriggerFrom,
+  runsByTriggerStatement,
+  runsOfPageStatement,
+  type PageRunRow,
+} from "./db/runs";
 import type { CaptureStatus, FactsStatus, PageKind, PageRow, PageStatus, SummarySource, TriggerKind } from "./db/types";
 import {
   baselineVersion,
@@ -26,6 +34,7 @@ import {
   PREVIOUS_OF_V,
   previousVersionOf,
   versionAsOf,
+  versionsOfPageStatement,
   type VersionSummary,
   type WithTrigger,
 } from "./db/versions";
@@ -171,11 +180,11 @@ export type Stats = {
   public_slots: { total: number; used: number; next_free_at: string | null };
 };
 
+/** The record so far: six aggregates, sent to D1 as one batch (one round trip). */
 export async function getStats(env: Env): Promise<Stats> {
   const db = env.DB;
-  const [totals, spendRows, statusRows, runsByTrigger, noiseReasons, slots] = await Promise.all([
-    db
-      .prepare(
+  const [totalsResult, spendResult, statusResult, triggerResult, noiseResult, slotsResult] = await db.batch<Record<string, unknown>>([
+    db.prepare(
         `SELECT
            (SELECT COUNT(*) FROM pages) AS pages,
            (SELECT COUNT(*) FROM runs) AS runs,
@@ -188,9 +197,15 @@ export async function getStats(env: Env): Promise<Stats> {
            (SELECT MIN(created_at) FROM pages) AS recording_since,
            (SELECT COUNT(*) FROM runs WHERE noise_suppressed = 1) AS noise_suppressed,
            (SELECT COUNT(*) FROM versions WHERE facts_status = 'unavailable') AS facts_unavailable,
-           (SELECT COALESCE(SUM(amount_usd), 0) FROM spend) AS spend_usd`,
-      )
-      .first<{
+           (SELECT COALESCE(SUM(amount_usd), 0) FROM spend) AS spend_usd`),
+    db.prepare("SELECT kind, SUM(amount_usd) AS usd FROM spend GROUP BY kind"),
+    db.prepare("SELECT status, COUNT(*) AS n FROM pages GROUP BY status"),
+    runsByTriggerStatement(db),
+    noiseByReasonStatement(db),
+    publicSlotUsageStatement(db),
+  ]);
+  const totals = totalsResult?.results[0] as
+    | {
         pages: number;
         runs: number;
         versions: number;
@@ -201,13 +216,13 @@ export async function getStats(env: Env): Promise<Stats> {
         noise_suppressed: number;
         facts_unavailable: number;
         spend_usd: number;
-      }>(),
-    db.prepare("SELECT kind, SUM(amount_usd) AS usd FROM spend GROUP BY kind").all<{ kind: string; usd: number | null }>(),
-    db.prepare("SELECT status, COUNT(*) AS n FROM pages GROUP BY status").all<{ status: string | null; n: number }>(),
-    countRunsByTrigger(db),
-    countNoiseByReason(db),
-    publicSlotUsage(db),
-  ]);
+      }
+    | undefined;
+  const spendRows = { results: (spendResult?.results ?? []) as { kind: string; usd: number | null }[] };
+  const statusRows = { results: (statusResult?.results ?? []) as { status: string | null; n: number }[] };
+  const runsByTrigger = runsByTriggerFrom((triggerResult?.results ?? []) as { trigger_kind: string; n: number }[]);
+  const noiseReasons = noiseByReasonFrom((noiseResult?.results ?? []) as { noise_reason: string | null; n: number }[]);
+  const slots = publicSlotUsageFrom(slotsResult?.results[0] as { used: number; next_free_at: string | null } | undefined);
 
   const spendByKind = Object.fromEntries(SPEND_KINDS.map((kind) => [kind, 0])) as Record<SpendKind, number>;
   for (const row of spendRows.results) {
@@ -337,10 +352,18 @@ export async function findPage(env: Env, pageId: string): Promise<PageHead | nul
   return { page: pageToJson(page), noiseCount };
 }
 
-/** The rest of a page detail for a page findPage found: its versions and its newest runs, two queries, neither reads a text. */
+/**
+ * The rest of a page detail for a page findPage found: its versions and its newest runs, two queries sent to D1
+ * as one batch (one round trip), neither reads a text.
+ */
 export async function getPageRecord(env: Env, head: PageHead): Promise<PageDetail> {
   const db = env.DB;
-  const [versions, runs] = await Promise.all([listVersions(db, head.page.id), listRunsOfPage(db, head.page.id, MAX_RUNS_SHOWN)]);
+  const [versionsResult, runsResult] = await db.batch<Record<string, unknown>>([
+    versionsOfPageStatement(db, head.page.id),
+    runsOfPageStatement(db, head.page.id, MAX_RUNS_SHOWN),
+  ]);
+  const versions = (versionsResult?.results ?? []) as unknown as WithTrigger<VersionSummary>[];
+  const runs = (runsResult?.results ?? []) as unknown as PageRunRow[];
   const versionByRun: Record<string, string> = {};
   for (const v of versions) if (v.run_id !== null) versionByRun[v.run_id] = v.id;
   return {
@@ -629,9 +652,11 @@ export const SECTION_PLACES_MAX = 90;
 
 /**
  * Where each named section's heading stands in the two texts of a diff, by character position (0 when not
- * found): the compare view puts its section groups in page order with them. One query, and the search runs
- * in D1 (`instr`), so no text is read out: for each section, the first "# {section}" that ends its line
- * (a heading of any level), else the first "# {section}" at all. At most SECTION_PLACES_MAX sections.
+ * found): the compare view puts its section groups in page order with them, when the diff's own lists do not
+ * settle it. One query, and the search runs in D1 (`instr`), so no text is read out: for each section, the
+ * first "# {section}" that ends its line (a heading of any level), else the first that ends it after one or
+ * two trailing spaces, else the first with a closing "#", else the first at all. At most SECTION_PLACES_MAX
+ * sections.
  */
 export async function sectionPlaces(
   env: Env,
@@ -642,7 +667,11 @@ export async function sectionPlaces(
   const named = [...new Set(sections.filter((s) => s !== ""))].slice(0, SECTION_PLACES_MAX);
   const places = new Map<string, { newer: number; older: number }>();
   if (named.length === 0) return places;
-  const columns = named.map((_, k) => `COALESCE(NULLIF(instr(text, ?${k + 1} || char(10)), 0), instr(text, ?${k + 1})) AS p${k}`);
+  const columns = named.map(
+    (_, k) =>
+      `COALESCE(NULLIF(instr(text, ?${k + 1} || char(10)), 0), NULLIF(instr(text, ?${k + 1} || ' ' || char(10)), 0), ` +
+      `NULLIF(instr(text, ?${k + 1} || '  ' || char(10)), 0), NULLIF(instr(text, ?${k + 1} || ' #'), 0), instr(text, ?${k + 1})) AS p${k}`,
+  );
   const { results } = await env.DB.prepare(
     `SELECT id, ${columns.join(", ")} FROM versions WHERE id IN (?${named.length + 1}, ?${named.length + 2})`,
   )

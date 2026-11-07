@@ -513,7 +513,10 @@ describe("GET /pages/:id", () => {
       expect(asOfText.length).toBe(plain.length + 1);
       for (const sql of [...plain, ...byVersion, ...byTime]) expect(readsText(sql), sql).toBe(false);
       expect(withText.filter(readsText)).toHaveLength(1);
-      expect(batch).not.toHaveBeenCalled();
+      // Two batches a view, each one round trip: the stats' six aggregates, and the page's versions and runs.
+      // Their statements are prepared like any other, so they are among those checked for text above.
+      expect(batch).toHaveBeenCalledTimes(2 * 5);
+      expect(batch.mock.calls.map((call) => call[0].length)).toEqual(Array.from({ length: 5 }, () => [6, 2]).flat());
       expect(exec).not.toHaveBeenCalled();
     } finally {
       for (const spy of [prepare, batch, exec]) spy.mockRestore();
@@ -635,6 +638,45 @@ describe("the version card's honest states", () => {
     expect(left).toContain("Screenshot unavailable.");
     expect(left).not.toContain("Taking the screenshot");
     expect(left).not.toContain('http-equiv="refresh"');
+  });
+
+  it("is kept a minute by a browser, but not while it reloads itself for a screenshot", async () => {
+    await seedHistory();
+    const settled = await fetchPath("/pages/pricing");
+    expect(settled.headers.get("cache-control")).toBe("public, max-age=60");
+    await settled.text();
+    const compare = await fetchPath("/pages/pricing/compare");
+    expect(compare.headers.get("cache-control")).toBe("public, max-age=60");
+    await compare.text();
+    await seedState("fresh", { at: ago(30_000), screenshot_key: null, html_key: null, capture_status: "pending" });
+    const fresh = await fetchPath("/pages/fresh");
+    expect(fresh.headers.get("cache-control")).toBeNull();
+    expect(await fresh.text()).toContain('<meta http-equiv="refresh" content="5"');
+    // A page with no version yet (just added, its baseline on the way) is not kept either.
+    await insertPage(db, page("empty"));
+    const empty = await fetchPath("/pages/empty");
+    expect(empty.headers.get("cache-control")).toBeNull();
+    await empty.text();
+  });
+
+  it("lists the newest 200 versions, the one on screen always among them, and points to the JSON for the rest", async () => {
+    await insertPage(db, page("many", { label: "Many" }));
+    const at = (i: number) => new Date(Date.parse(ago(30 * DAY)) + i * HOUR).toISOString();
+    for (let i = 0; i < 205; i++) await version(`many-${String(i).padStart(3, "0")}`, "many", at(i), i === 0 ? "create" : "webhook", { summary: `Change ${i}.`, summary_source: "diff" });
+    const html = await get("/pages/many");
+    expect(count(html, '<a class="vrow')).toBe(200);
+    expect(count(html, '<a class="dot')).toBe(200);
+    expect(count(html, "<option ")).toBe(400); // From and To
+    expect(html).toContain("The newest 200 of 205 versions are listed.");
+    expect(html).toContain('<a href="/api/pages/many">The page as JSON</a> has every one.');
+    // The oldest version, picked, is listed after the newest 200, in the list, on the track and in the picks.
+    const oldest = await get("/pages/many?v=many-000");
+    expect(count(oldest, '<a class="vrow')).toBe(201);
+    expect(oldest).toContain('class="vrow is-on" href="/pages/many?v=many-000#version"');
+    expect(oldest).toMatch(/<option value="many-000" selected/);
+    // The page's JSON still lists every version.
+    const json = (await (await fetchPath("/api/pages/many")).json()) as Json;
+    expect(json.versions).toHaveLength(205);
   });
 
   it("says where the price table stands", async () => {

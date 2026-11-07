@@ -657,7 +657,8 @@ describe("the watchlist's reads", () => {
     expect(invalid).toHaveLength(plain.length);
     // A path under the watchlist that does not exist is the ledger's 404, without a read.
     expect(await queries("/watchlist/nope", {}, 404)).toEqual([]);
-    expect(batch).not.toHaveBeenCalled();
+    // One batch a screen, one round trip: the stats' six aggregates (prepared, so counted above).
+    expect(batch.mock.calls.map((call) => call[0].length)).toEqual([6, 6, 6, 6, 6]);
   });
 });
 

@@ -65,11 +65,17 @@ export async function pullCandidates(db: D1Database, nowIso: string): Promise<Pu
 
 /** How many runs arrived each way. */
 export async function countRunsByTrigger(db: D1Database): Promise<Record<TriggerKind, number>> {
+  return runsByTriggerFrom((await runsByTriggerStatement(db).all<{ trigger_kind: string; n: number }>()).results);
+}
+
+/** countRunsByTrigger's statement, for a caller that sends it in a batch (src/readModel.ts getStats). */
+export const runsByTriggerStatement = (db: D1Database): D1PreparedStatement =>
+  db.prepare("SELECT trigger_kind, COUNT(*) AS n FROM runs GROUP BY trigger_kind");
+
+/** runsByTriggerStatement's rows as countRunsByTrigger answers: every trigger, 0 when it has no run. */
+export function runsByTriggerFrom(rows: { trigger_kind: string; n: number }[]): Record<TriggerKind, number> {
   const counts: Record<TriggerKind, number> = { create: 0, webhook: 0, pull: 0 };
-  const { results } = await db
-    .prepare("SELECT trigger_kind, COUNT(*) AS n FROM runs GROUP BY trigger_kind")
-    .all<{ trigger_kind: string; n: number }>();
-  for (const row of results) {
+  for (const row of rows) {
     if (Object.hasOwn(counts, row.trigger_kind)) counts[row.trigger_kind as TriggerKind] = row.n;
   }
   return counts;
@@ -145,29 +151,36 @@ export async function countNoise(db: D1Database): Promise<number> {
 
 /** Runs the change gate suppressed as noise, counted by `noise_reason` (a missing reason counts as "unknown"). */
 export async function countNoiseByReason(db: D1Database): Promise<Record<string, number>> {
-  const { results } = await db
-    .prepare("SELECT noise_reason, COUNT(*) AS n FROM runs WHERE noise_suppressed = 1 GROUP BY noise_reason")
-    .all<{ noise_reason: string | null; n: number }>();
+  return noiseByReasonFrom((await noiseByReasonStatement(db).all<{ noise_reason: string | null; n: number }>()).results);
+}
+
+/** countNoiseByReason's statement, for a caller that sends it in a batch (src/readModel.ts getStats). */
+export const noiseByReasonStatement = (db: D1Database): D1PreparedStatement =>
+  db.prepare("SELECT noise_reason, COUNT(*) AS n FROM runs WHERE noise_suppressed = 1 GROUP BY noise_reason");
+
+/** noiseByReasonStatement's rows as countNoiseByReason answers. */
+export function noiseByReasonFrom(rows: { noise_reason: string | null; n: number }[]): Record<string, number> {
   const counts: Record<string, number> = {};
-  for (const row of results) counts[row.noise_reason ?? "unknown"] = (counts[row.noise_reason ?? "unknown"] ?? 0) + row.n;
+  for (const row of rows) counts[row.noise_reason ?? "unknown"] = (counts[row.noise_reason ?? "unknown"] ?? 0) + row.n;
   return counts;
 }
 
 /** A page's newest runs (any trigger), newest first, for the page's detail answer. */
-export async function listRunsOfPage(
-  db: D1Database,
-  pageId: string,
-  limit: number,
-): Promise<Pick<RunRow, "id" | "monitor_run_id" | "trigger_kind" | "outcome" | "received_at" | "noise_suppressed" | "noise_reason">[]> {
-  const { results } = await db
+export async function listRunsOfPage(db: D1Database, pageId: string, limit: number): Promise<PageRunRow[]> {
+  return (await runsOfPageStatement(db, pageId, limit).all<PageRunRow>()).results;
+}
+
+/** A run as listRunsOfPage reads it. */
+export type PageRunRow = Pick<RunRow, "id" | "monitor_run_id" | "trigger_kind" | "outcome" | "received_at" | "noise_suppressed" | "noise_reason">;
+
+/** listRunsOfPage's statement, for a caller that sends it in a batch (src/readModel.ts getPageRecord). */
+export const runsOfPageStatement = (db: D1Database, pageId: string, limit: number): D1PreparedStatement =>
+  db
     .prepare(
       `SELECT id, monitor_run_id, trigger_kind, outcome, received_at, noise_suppressed, noise_reason
        FROM runs WHERE page_id = ? ORDER BY received_at DESC, rowid DESC LIMIT ?`,
     )
-    .bind(pageId, limit)
-    .all<Pick<RunRow, "id" | "monitor_run_id" | "trigger_kind" | "outcome" | "received_at" | "noise_suppressed" | "noise_reason">>();
-  return results;
-}
+    .bind(pageId, limit);
 
 /** Runs of one page suppressed as noise that were received after `afterIso` and at or before `uptoIso`. */
 export async function countNoiseBetween(

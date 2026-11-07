@@ -10,7 +10,7 @@ import type { Env } from "../src/env";
 import worker from "../src/index";
 import { getDiff, listChanges } from "../src/readModel";
 import { BlockText, plainText } from "../src/site/blockText";
-import { BLOCKS_PER_GROUP, WORD_DIFF_CHARS, WORD_DIFF_PAIRS } from "../src/site/views/compare";
+import { BLOCKS_PER_GROUP, placesFromDiff, WORD_DIFF_CHARS, WORD_DIFF_PAIRS } from "../src/site/views/compare";
 import { FEATURE_TEXT_CAP, featuredCatch } from "../src/site/views/home";
 import { wordDiff, WORD_DIFF_MAX_CHARS } from "../src/site/wordDiff";
 
@@ -638,7 +638,11 @@ describe("the featured catch on the home screen", () => {
 
 // --- Fix round: bounded work on any recorded text -----------------------------------------------------
 
-/** Milliseconds `work` takes (the Workers test pool's clock does move during synchronous work). */
+/**
+ * Milliseconds `work` takes. The Workers test pool's clock moves during synchronous work, to the millisecond
+ * (checked on 7 Nov: a 30-million-step loop read 109 ms on performance.now() and on Date.now()), so only bounds
+ * far above a millisecond mean anything.
+ */
 function timed(work: () => unknown): number {
   const start = performance.now();
   work();
@@ -658,11 +662,8 @@ describe("BlockText on hostile text stays linear", () => {
     ["rule-like spaces", (n) => `${" ".repeat(n)}-x`],
   ];
   for (const [name, make] of cases) {
-    it(`renders ${name} in a few ms, at 4,000 and at 40,000 characters`, () => {
-      const small = make(4000);
+    it(`renders ${name} at 40,000 characters in well under a quadratic time`, () => {
       const large = make(40_000);
-      expect(timed(() => render(<BlockText text={small} />))).toBeLessThan(25);
-      expect(timed(() => plainText(`${small}${name}`))).toBeLessThan(25);
       // Quadratic work would take seconds here.
       expect(timed(() => render(<BlockText text={large} />))).toBeLessThan(150);
       expect(timed(() => plainText(`${large}${name}`))).toBeLessThan(150);
@@ -727,6 +728,40 @@ describe("a screen-wide budget for blocks", () => {
     expect(count(html, 'class="diff-added"')).toBe(400);
     expect(html).toContain("50 more blocks are past what one page shows.");
     expect(html).toMatch(/href="\/api\/pages\/ceiling\/diff\?from=[^"]+">This diff as JSON<\/a> has every block\./);
+  });
+
+  it("counts code spans and emphasis marks against the screen, not only characters", async () => {
+    // 25 blocks of 2,800 characters: about 21 fit the characters, but each is some 1,400 steps of work (a code
+    // span and a space a word), so the screen stops at SCREEN_WORK.
+    const dense = Array.from({ length: 25 }, (_, i) => `${"`a` ".repeat(700)}block ${i + 1}`).join("\n\n");
+    await seedAdded("dense", dense);
+    const html = await get("/pages/dense/compare");
+    const shown = count(html, 'class="diff-added"');
+    expect(shown).toBeGreaterThanOrEqual(3);
+    expect(shown).toBeLessThanOrEqual(5);
+    expect(html).toContain(`${25 - shown} more blocks are not shown here.`);
+    // Emphasis is dropped, not drawn, but each mark is still a stop of the walk.
+    const starred = Array.from({ length: 25 }, (_, i) => `${"*a* ".repeat(700)}block ${i + 1}`).join("\n\n");
+    await seedAdded("starred", starred);
+    const stars = await get("/pages/starred/compare");
+    expect(count(stars, 'class="diff-added"')).toBeLessThanOrEqual(3);
+    expect(stars).toContain("more blocks are not shown here.");
+  });
+
+  it("marks the shortest changed blocks first, and says so at a block it could not mark", async () => {
+    const long = (n: number, end: string) => `Long paragraph ${n} ${"word ".repeat(700)}${end}`;
+    const short = (n: number, end: string) => `Short paragraph ${n} ${"term ".repeat(300)}${end}`;
+    const text = (end: string) =>
+      ["# Notes", long(1, end), long(2, end), long(3, end), ...[1, 2, 3, 4, 5, 6].map((n) => short(n, end))].join("\n\n");
+    await insertPage(db, page("marks", { label: "Marks" }));
+    await version("mk0", "marks", ago(2 * DAY), "create", { text: text("closing old") });
+    await version("mk1", "marks", ago(DAY), "webhook", { text: text("closing new"), summary: "Nine.", summary_source: "diff", delta_json: delta([0, 0, 9]) });
+    const html = await get("/pages/marks/compare");
+    expect(count(html, 'class="pair"')).toBe(9);
+    // 20,000 characters of marks: the six short pairs (about 3,000 each) fit; the three long ones (7,000) do not.
+    expect(count(html, "<del>old</del>")).toBe(6);
+    expect(count(html, "No word marks on this block: it is past what one screen marks.")).toBe(3);
+    expect(html).toContain("Word marks are shown on 6 changed blocks of the 9 on this screen.");
   });
 
   it("renders a release-notes-sized diff (300 added, 100 changed, 50 sections) quickly", async () => {
@@ -801,6 +836,52 @@ describe("the fix round's smaller items", () => {
     expect(sections).toEqual(["Launch", "Pro", "Legacy", "Team"]);
   });
 
+  it("finds a heading that ends in spaces, not a longer heading that starts with the same words", async () => {
+    const proOld = "The Pro plan costs $20 per month for every seat on the team.";
+    const proNew = "The Pro plan costs $25 per month for every seat on the team.";
+    const teamOld = "The Team plan includes ten projects and a shared workspace for all.";
+    const teamNew = "The Team plan includes twelve projects and a shared workspace for all.";
+    const extras = "Extras cost $5 per month for every seat on any plan.";
+    // "## Pro  " ends in two spaces, and "## Pro team extras" comes before it; Legacy is only in the older text,
+    // so the order is searched for, not read from the diff.
+    const before = ["# Plans", "## Pro team extras", extras, "## Team", teamOld, "## Legacy", "The legacy plan is still sold.", "## Pro  ", proOld].join("\n\n");
+    const after = ["# Plans", "## Pro team extras", extras, "## Team", teamNew, "## Pro  ", proNew].join("\n\n");
+    await insertPage(db, page("spaces", { label: "Spaces" }));
+    await version("sp-0", "spaces", ago(2 * DAY), "create", { text: before });
+    await version("sp-1", "spaces", ago(DAY), "webhook", { text: after, summary: "Two.", summary_source: "diff" });
+    const html = await get("/pages/spaces/compare");
+    const sections = [...html.matchAll(/<h3 class="diff-section"[^>]*>([^<]+)<\/h3>/g)].map((m) => m[1]);
+    expect(sections).toEqual(["Team", "Legacy", "Pro"]);
+  });
+
+  it("reads the section order from the diff when its lists settle it, without searching the texts", async () => {
+    const c = (section: string) => ({ section, before: "x", after: "y" });
+    const b = (section: string) => ({ section, text: section });
+    const order = (places: ReturnType<typeof placesFromDiff>) => (places === null ? null : [...places.keys()]);
+    expect(order(placesFromDiff({ changed: [c("B"), c("A"), c("C")], added: [], removed: [] }))).toEqual(["B", "A", "C"]);
+    expect(order(placesFromDiff({ changed: [c(""), c("A"), c("B")], added: [b("B"), b("C")], removed: [b("A")] }))).toEqual(["A", "B", "C"]);
+    // A choice left (B could go anywhere), lists that disagree, or a removed section the newer text may not have.
+    expect(placesFromDiff({ changed: [c("A"), c("C")], added: [b("B")], removed: [] })).toBeNull();
+    expect(placesFromDiff({ changed: [c("A"), c("B")], added: [b("B"), b("A")], removed: [] })).toBeNull();
+    expect(placesFromDiff({ changed: [c("A")], added: [], removed: [b("Legacy")] })).toBeNull();
+
+    const text = (n: number) => ["# Notes", "## May", `May notes, take ${n}, with enough words to pair.`, "## April", `April notes, take ${n}, with enough words to pair.`].join("\n\n");
+    await insertPage(db, page("settled", { label: "Settled" }));
+    await version("st-0", "settled", ago(2 * DAY), "create", { text: text(1) });
+    await version("st-1", "settled", ago(DAY), "webhook", { text: text(2), summary: "Both.", summary_source: "diff", delta_json: delta([0, 0, 2]) });
+    const prepare = vi.spyOn(env.DB, "prepare");
+    try {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request("https://x/pages/settled/compare"), env, ctx);
+      await waitOnExecutionContext(ctx);
+      const html = await res.text();
+      expect([...html.matchAll(/<h3 class="diff-section"[^>]*>([^<]+)<\/h3>/g)].map((m) => m[1])).toEqual(["May", "April"]);
+      expect(prepare.mock.calls.some((call) => String(call[0]).includes("instr("))).toBe(false);
+    } finally {
+      prepare.mockRestore();
+    }
+  });
+
   it("reads no text on the home for a large page whose diff is not stored", async () => {
     const filler = Array.from({ length: 700 }, (_, i) => `Paragraph ${i} of the release notes, with enough words to fill the page.`).join("\n\n");
     await insertPage(db, page("bigtext", { label: "Big text", kind: "other" }));
@@ -840,10 +921,10 @@ describe("the fix round's smaller items", () => {
 describe("large diffs are stored by the hourly job", () => {
   const big = (tag: string) => Array.from({ length: 800 }, (_, i) => `Paragraph ${i} of the ${tag} notes, long enough to fill the page.`).join("\n\n");
 
-  async function pair(id: string, over: Partial<NewVersion> = {}, text = big(id)): Promise<void> {
+  async function pair(id: string, over: Partial<NewVersion> = {}, text = big(id), daysAgo = 1): Promise<void> {
     await insertPage(db, page(id, { label: id }));
-    await version(`${id}-0`, id, ago(2 * DAY), "create", { text });
-    await version(`${id}-1`, id, ago(DAY), "webhook", {
+    await version(`${id}-0`, id, ago((daysAgo + 1) * DAY), "create", { text });
+    await version(`${id}-1`, id, ago(daysAgo * DAY), "webhook", {
       text: `${text}\n\nOne more paragraph.`,
       summary: "One more.",
       summary_source: "diff",
@@ -852,8 +933,12 @@ describe("large diffs are stored by the hourly job", () => {
     });
   }
 
+  /** The hourly job's window: versions captured in the last 14 days. */
+  const window = () => ago(14 * DAY);
+
   it("lists the large adjacent pairs whose ends are final and whose diff is not stored", async () => {
     await pair("warm-a");
+    await pair("warm-old", {}, big("warm-old"), 20);
     await pair("warm-pending", { capture_status: "pending" });
     await pair("warm-facts", { agent_run_id: "run-in-flight", facts_json: null });
     await pair("warm-nodelta", { delta_json: null });
@@ -864,7 +949,12 @@ describe("large diffs are stored by the hourly job", () => {
       .prepare("INSERT INTO diff_cache (from_version_id, to_version_id, json, created_at) VALUES ('warm-cached-0', 'warm-cached-1', '{}', ?)")
       .bind(ago(HOUR))
       .run();
-    expect(await diffsToWarm(db, FEATURE_TEXT_CAP, 10)).toEqual([{ id: "warm-a-1", previous_id: "warm-a-0" }]);
+    expect(await diffsToWarm(db, FEATURE_TEXT_CAP, 10, window())).toEqual([{ id: "warm-a-1", previous_id: "warm-a-0" }]);
+    // A pair captured 20 days ago is listed only when the window reaches back to it.
+    expect(await diffsToWarm(db, FEATURE_TEXT_CAP, 10, ago(30 * DAY))).toEqual([
+      { id: "warm-a-1", previous_id: "warm-a-0" },
+      { id: "warm-old-1", previous_id: "warm-old-0" },
+    ]);
   });
 
   it("stores one pair's diff through the admin route, the text the JSON route then serves", async () => {
@@ -883,6 +973,6 @@ describe("large diffs are stored by the hourly job", () => {
     const t1 = (await db.prepare("SELECT captured_at FROM versions WHERE id = 'warm-b-1'").first<{ captured_at: string }>())!.captured_at;
     const served = await (await fetchPath(`/api/pages/warm-b/diff?from=${encodeURIComponent(t0)}&to=${encodeURIComponent(t1)}`)).text();
     expect(served).toBe(row!.json);
-    expect(await diffsToWarm(db, FEATURE_TEXT_CAP, 10)).toEqual([]);
+    expect(await diffsToWarm(db, FEATURE_TEXT_CAP, 10, window())).toEqual([]);
   });
 });

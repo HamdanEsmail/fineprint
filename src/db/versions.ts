@@ -232,14 +232,14 @@ export async function setVersionHash(db: D1Database, id: string, hash: string): 
 
 /** Every version of a page, newest first (the baseline is last), without `text`, with its run's trigger. */
 export async function listVersions(db: D1Database, pageId: string): Promise<WithTrigger<VersionSummary>[]> {
-  const { results } = await db
-    .prepare(
-      `SELECT ${summaryColumns()}, ${triggerColumn("versions")} FROM versions WHERE page_id = ? ORDER BY captured_at DESC, rowid DESC`,
-    )
-    .bind(pageId)
-    .all<WithTrigger<VersionSummary>>();
-  return results;
+  return (await versionsOfPageStatement(db, pageId).all<WithTrigger<VersionSummary>>()).results;
 }
+
+/** listVersions's statement, for a caller that sends it in a batch (src/readModel.ts getPageRecord). */
+export const versionsOfPageStatement = (db: D1Database, pageId: string): D1PreparedStatement =>
+  db
+    .prepare(`SELECT ${summaryColumns()}, ${triggerColumn("versions")} FROM versions WHERE page_id = ? ORDER BY captured_at DESC, rowid DESC`)
+    .bind(pageId);
 
 async function findAsOf<T>(
   db: D1Database,
@@ -353,23 +353,30 @@ const finalSql = (t: string): string =>
 
 /**
  * Adjacent pairs (a version that is not a baseline and the one before it) whose diff the hourly job should
- * store ahead of a reader: both ends final, the newer one with its summary and its delta (so the out-of-band
- * fill is done and the diff will be kept), either text over `minChars` characters, and no stored diff yet.
- * Newest first, at most `limit`. Reads no text out (SQLite measures it).
+ * store ahead of a reader: the newer one captured at or after `sinceIso`, both ends final, the newer one with
+ * its summary and its delta (so the out-of-band fill is done and the diff will be kept), no stored diff yet,
+ * and either text over `minChars` characters. Newest first, at most `limit`. Reads no text out (SQLite
+ * measures it), and measures a text only for a recent pair whose diff is not stored: the cheap terms come
+ * first, `length()` last.
  */
-export async function diffsToWarm(db: D1Database, minChars: number, limit: number): Promise<{ id: string; previous_id: string }[]> {
+export async function diffsToWarm(
+  db: D1Database,
+  minChars: number,
+  limit: number,
+  sinceIso: string,
+): Promise<{ id: string; previous_id: string }[]> {
   const { results } = await db
     .prepare(
       `SELECT v.id, p.id AS previous_id
        FROM versions v JOIN versions p ON p.id = (SELECT w.id ${PREVIOUS_OF_V})
-       WHERE v.is_baseline = 0 AND v.summary IS NOT NULL AND v.delta_json IS NOT NULL
+       WHERE v.captured_at >= ?3 AND v.is_baseline = 0 AND v.summary IS NOT NULL AND v.delta_json IS NOT NULL
          AND ${finalSql("v")} AND ${finalSql("p")}
-         AND (length(v.text) > ?1 OR length(p.text) > ?1)
          AND NOT EXISTS (SELECT 1 FROM diff_cache d WHERE d.from_version_id = p.id AND d.to_version_id = v.id)
+         AND (length(v.text) > ?1 OR length(p.text) > ?1)
        ORDER BY v.captured_at DESC, v.rowid DESC
        LIMIT ?2`,
     )
-    .bind(minChars, Math.max(0, Math.trunc(limit)) || 0)
+    .bind(minChars, Math.max(0, Math.trunc(limit)) || 0, sinceIso)
     .all<{ id: string; previous_id: string }>();
   return results;
 }

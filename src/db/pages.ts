@@ -247,12 +247,21 @@ export async function clearStalePending(db: D1Database, beforeIso: string): Prom
  * and the earliest expiry among them, when the next slot frees (null when none is held). One query.
  */
 export async function publicSlotUsage(db: D1Database): Promise<{ used: number; next_free_at: string | null }> {
-  const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS used, MIN(expires_at) AS next_free_at FROM pages
-       WHERE added_by = 'public' AND status IN ('active', 'paused', 'failed')`,
-    )
-    .first<{ used: number; next_free_at: string | null }>();
+  return publicSlotUsageFrom(await publicSlotUsageStatement(db).first<{ used: number; next_free_at: string | null }>());
+}
+
+/** publicSlotUsage's statement, for a caller that sends it in a batch (src/readModel.ts getStats). */
+export const publicSlotUsageStatement = (db: D1Database): D1PreparedStatement =>
+  db.prepare(
+    `SELECT COUNT(*) AS used, MIN(expires_at) AS next_free_at FROM pages
+     WHERE added_by = 'public' AND status IN ('active', 'paused', 'failed')`,
+  );
+
+/** publicSlotUsageStatement's row (null when none) as publicSlotUsage answers. */
+export function publicSlotUsageFrom(row: { used: number; next_free_at: string | null } | null | undefined): {
+  used: number;
+  next_free_at: string | null;
+} {
   return { used: row?.used ?? 0, next_free_at: row?.next_free_at ?? null };
 }
 

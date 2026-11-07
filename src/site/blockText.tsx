@@ -109,7 +109,7 @@ function linkAt(text: string, m: Matches, open: number, bound: number): { from: 
  * for once from it, and the link starts are a list it moves along, so the walk is one pass, and the text
  * between marks (a "[" that opens nothing included) is taken in slices.
  */
-function inline(text: string): Seg[] {
+function inlineSegs(text: string, work: { n: number }): Seg[] {
   const m = matchLine(text);
   const segs: Seg[] = [];
   let buf = "";
@@ -122,7 +122,7 @@ function inline(text: string): Seg[] {
   let nextSpecial = -1;
   let nextStart = 0; // index into m.starts
   let i = 0;
-  for (;;) {
+  for (;; work.n++) {
     if (i >= bound) {
       const label = open.pop();
       if (label === undefined) break;
@@ -223,27 +223,44 @@ function withoutClosingHashes(s: string): string {
   return s.slice(0, end).trimEnd();
 }
 
-// A block is parsed once for its plain text (the word marks) and again to be drawn; the last few parses are
-// kept, keyed by the text itself. Cleared whole when it fills, so it never grows past a screen's blocks.
-const PARSED = new Map<string, Line[]>();
-const PARSED_MAX = 128;
+/** A block's lines, and the work they cost: one a line, and one for each stop the inline walk makes. */
+type Parsed = { lines: Line[]; work: number };
 
-function parseBlock(text: string): Line[] {
-  let lines = PARSED.get(text);
-  if (lines === undefined) {
+// A block is parsed to be weighed (blockWork), for its plain text (the word marks) and to be drawn; the parses
+// are kept, keyed by the text itself, so each is done once. Room for every block of the largest screen (the
+// compare view's 400 with all=1, a changed pair being two texts) and then some; cleared whole when it fills.
+const PARSED = new Map<string, Parsed>();
+const PARSED_MAX = 1000;
+
+function parseBlock(text: string): Parsed {
+  let parsed = PARSED.get(text);
+  if (parsed === undefined) {
     if (PARSED.size >= PARSED_MAX) PARSED.clear();
-    lines = parseLines(text);
-    PARSED.set(text, lines);
+    parsed = parseLines(text);
+    PARSED.set(text, parsed);
   }
-  return lines;
+  return parsed;
+}
+
+/**
+ * What a block costs to read and draw, in steps: one a line, and one for each stop the inline walk makes (a
+ * run of plain text, an emphasis mark, a code span, a link, an escape). A paragraph of prose is a few steps
+ * a line; a line of `a` `b` `c` code spans or *a* *b* emphasis is one or two steps a word, each a mark to
+ * read and often an element to draw. The compare view counts it against a screen's budget, beside the
+ * characters, so a screen of element-dense blocks costs no more than a screen of prose.
+ */
+export function blockWork(text: string): number {
+  return parseBlock(text).work;
 }
 
 /** Whether a trimmed line's first character can start anything but text: # | * + - : or a digit. */
 const mayBeMarked = (c: number): boolean => c === 35 || c === 124 || c === 42 || c === 43 || c === 45 || c === 58 || (c >= 48 && c <= 57);
 
-/** A block's lines, each with its kind and its inline segments; rule rows are dropped. */
-function parseLines(text: string): Line[] {
+/** A block's lines, each with its kind and its inline segments (rule rows are dropped), and their work. */
+function parseLines(text: string): Parsed {
   const lines: Line[] = [];
+  const work = { n: 0 };
+  const inline = (line: string): Seg[] => inlineSegs(line, work);
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!mayBeMarked(line.charCodeAt(0))) {
@@ -272,7 +289,7 @@ function parseLines(text: string): Line[] {
     }
     lines.push({ kind: "text", segs: inline(line) });
   }
-  return lines;
+  return { lines, work: work.n + lines.length };
 }
 
 const lineText = (line: Line): string => line.segs.map((s) => s.text).join("");
@@ -282,7 +299,7 @@ const lineText = (line: Line): string => line.segs.map((s) => s.text).join("");
  * block are taken over this text (wordDiff), and BlockText lays them back on the block's lines.
  */
 export function plainText(text: string): string {
-  return parseBlock(text).map(lineText).join("\n");
+  return parseBlock(text).lines.map(lineText).join("\n");
 }
 
 type Piece = { text: string; code: boolean; mark: boolean };
@@ -333,7 +350,7 @@ function Inline(props: { pieces: Piece[]; tag: "del" | "ins" }) {
  * went or came are wrapped in `<del>` or `<ins>`; parts that do not spell this block are ignored.
  */
 export function BlockText(props: { text: string; marks?: { parts: Part[]; tag: "del" | "ins" } }) {
-  const lines = parseBlock(props.text);
+  const { lines } = parseBlock(props.text);
   const tag = props.marks?.tag ?? "ins";
   const marked = props.marks === undefined ? null : markLines(lines, props.marks.parts);
   const pieces = (i: number): Piece[] => marked?.[i] ?? lines[i]!.segs.map((s) => ({ ...s, mark: false }));

@@ -5,12 +5,14 @@
 // TinyFish no longer runs, retries captures that did not finish, asks for any missing summaries
 // and deltas, and, last, has the diff of one large version pair stored ahead of readers.
 //
-// Repair comes after the cheap steps and is capped (REPAIR_PER_TICK): each capture makes several
-// outbound requests, the free plan allows 50 per invocation, and a backlog must never starve the
-// steps before it. Pulls are capped too (PULLS_PER_TICK), and each runs in its own Worker
-// invocation, as do the summary and delta fills that come last (one or two requests each). Each step is wrapped on its own, so one failing step never stops the others, and
-// runCron never throws. It logs one summary line; errors are logged by code, never with a
-// secret or page text.
+// The steps run in this order: facts upkeep, overdue pulls, expiry, health, repair, the summary
+// fills, the delta fills, and the large diff. Repair comes after the cheap steps and is capped
+// (REPAIR_PER_TICK): each capture makes several outbound requests, the free plan allows 50 per
+// invocation, and a backlog must never starve the steps before it. Pulls are capped too
+// (PULLS_PER_TICK), and each runs in its own Worker invocation, as do the summary and delta fills
+// after repair (one or two requests each) and the large diff's store. Each step is wrapped on its
+// own, so one failing step never stops the others, and runCron never throws. It logs one summary
+// line; errors are logged by code, never with a secret or page text.
 import { captureVersion, recordFactsResult, spendPaused, startNextFacts } from "./capture";
 import { lastTickAtOrBefore } from "./core/cronTick";
 import {
@@ -76,6 +78,11 @@ const CLAIM_STALE_AFTER_MS = 10 * MINUTE_MS;
 const FOLLOW_UP_AFTER_MS = 15 * MINUTE_MS;
 /** A run not finished this long after it started is given up (runs are capped at 120 s). */
 const RUN_STALE_AFTER_MS = 60 * MINUTE_MS;
+/**
+ * Only versions captured in the last 14 days are looked at for a large diff to store, so the hourly query does
+ * not measure every finished text each tick. An older pair is diffed when a reader first opens it.
+ */
+const WARM_DIFF_WINDOW_MS = 14 * 24 * 60 * MINUTE_MS;
 
 const TERMINAL_AGENT_STATUSES = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
 const CLAIM_PREFIX = "claim:";
@@ -397,13 +404,15 @@ async function fillMissingDeltas(env: Env): Promise<void> {
 
 /**
  * The last step: stores the diff of at most one large adjacent pair a tick (either text over
- * LARGE_DIFF_TEXT_CHARS, both ends final, its summary and delta done, no stored diff yet), through the
+ * LARGE_DIFF_TEXT_CHARS, both ends final, its summary and delta done, no stored diff yet, the newer one
+ * captured in the last WARM_DIFF_WINDOW_MS), through the
  * SELF binding, so the first diff of a 228 KB pair (about 10 ms of CPU) runs in a request of its own, never
  * in a reader's or in this tick's. Taken in turn by the hour of day among the newest WARM_DIFF_CANDIDATES,
  * so a pair whose request runs out of CPU holds no other back. Never throws: a failed request is logged.
  */
 async function warmLargeDiff(env: Env): Promise<void> {
-  const pairs = await diffsToWarm(env.DB, LARGE_DIFF_TEXT_CHARS, WARM_DIFF_CANDIDATES);
+  const since = new Date(cronDeps.now().getTime() - WARM_DIFF_WINDOW_MS).toISOString();
+  const pairs = await diffsToWarm(env.DB, LARGE_DIFF_TEXT_CHARS, WARM_DIFF_CANDIDATES, since);
   if (pairs.length === 0) return;
   const pick = pairs[cronDeps.now().getUTCHours() % pairs.length]!;
   try {

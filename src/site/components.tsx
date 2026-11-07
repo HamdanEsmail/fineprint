@@ -6,7 +6,7 @@ import type { Delta, Fact } from "../core/diff";
 import { CAPTURE_MAX_ATTEMPTS } from "../core/limits";
 import type { CaptureStatus, PageStatus, TriggerKind } from "../db/types";
 import type { VersionItem } from "../readModel";
-import { deltaParts, formatUtc, ownPath, sourceLabel, triggerLabel, webHref } from "./format";
+import { deltaParts, formatUtc, ownPath, sourceLabel, triggerLabel, unitBeside, webHref } from "./format";
 
 /**
  * The last line of every record: `Source: <host/path> · read 5 Nov 2026, 09:12 UTC · Monitor (webhook)`.
@@ -100,16 +100,19 @@ export function FactsTable(props: { facts: Fact[] }) {
         </tr>
       </thead>
       <tbody>
-        {props.facts.map((f) => (
-          <tr>
-            <th scope="row">{text(f.name)}</th>
-            <td class="price">
-              {text(f.price)}
-              {text(f.unit) === "" ? null : <span class="unit"> {text(f.unit)}</span>}
-            </td>
-            {withNotes ? <td>{text(f.notes)}</td> : null}
-          </tr>
-        ))}
+        {props.facts.map((f) => {
+          const unit = unitBeside(text(f.price), text(f.unit));
+          return (
+            <tr>
+              <th scope="row">{text(f.name)}</th>
+              <td class="price">
+                {text(f.price)}
+                {unit === "" ? null : <span class="unit"> {unit}</span>}
+              </td>
+              {withNotes ? <td>{text(f.notes)}</td> : null}
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
@@ -212,13 +215,38 @@ export function ShotFigure(props: { v: ShotOf; pageLabel: string; liveUrl: strin
   );
 }
 
+/** Versions one screen lists (the page view's list and dots, the compare picks), at most: the newest ones. */
+export const VERSIONS_LISTED = 200;
+
+/**
+ * The newest VERSIONS_LISTED of a page's versions (newest first), and after them any of `keep` that are older,
+ * so the version on screen is always among them. Every version stays in the page's JSON.
+ */
+export function listedVersions(versions: VersionItem[], keep: string[]): VersionItem[] {
+  if (versions.length <= VERSIONS_LISTED) return versions;
+  return [...versions.slice(0, VERSIONS_LISTED), ...versions.slice(VERSIONS_LISTED).filter((v) => keep.includes(v.id))];
+}
+
+/** Said under a list of versions cut to VERSIONS_LISTED, with the way to the rest; nothing when none was cut. */
+export function OlderVersions(props: { total: number; json: string }) {
+  if (props.total <= VERSIONS_LISTED) return null;
+  return (
+    <p class="older-note">
+      {`The newest ${VERSIONS_LISTED} of ${props.total.toLocaleString("en-US")} versions are listed. `}
+      <a href={props.json}>The page as JSON</a> has every one.
+    </p>
+  );
+}
+
 /**
  * The GET form to a page's compare view: two labelled selects of the page's version times (`from`, `to`,
- * newest first, the baseline marked) and a Compare button.
+ * newest first, the baseline marked; the newest VERSIONS_LISTED and the two chosen, with a line to the JSON
+ * when that leaves some out) and a Compare button.
  */
-export function CompareForm(props: { action: string; versions: VersionItem[]; fromId: string; toId: string }) {
+export function CompareForm(props: { action: string; versions: VersionItem[]; fromId: string; toId: string; json: string }) {
+  const listed = listedVersions(props.versions, [props.fromId, props.toId]);
   const options = (chosen: string) =>
-    props.versions.map((v) => (
+    listed.map((v) => (
       <option value={v.id} selected={v.id === chosen}>
         {`${formatUtc(v.captured_at)}${v.is_baseline ? " · baseline" : ""}`}
       </option>
@@ -240,6 +268,7 @@ export function CompareForm(props: { action: string; versions: VersionItem[]; fr
       <button class="btn" type="submit">
         Compare
       </button>
+      <OlderVersions total={props.versions.length} json={props.json} />
     </form>
   );
 }

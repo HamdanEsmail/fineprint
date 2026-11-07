@@ -7,7 +7,17 @@
 import { CAPTURE_MAX_ATTEMPTS } from "../../core/limits";
 import type { PageDetail, RunItem, Stats, VersionItem } from "../../readModel";
 import { MAX_RUNS_SHOWN } from "../../readModel";
-import { CompareForm, DeltaBadge, EvidenceLine, FactsTable, hasDeltaBadge, LAYOUT_ONLY_LINE, StatusChip } from "../components";
+import {
+  CompareForm,
+  DeltaBadge,
+  EvidenceLine,
+  FactsTable,
+  hasDeltaBadge,
+  LAYOUT_ONLY_LINE,
+  listedVersions,
+  OlderVersions,
+  StatusChip,
+} from "../components";
 import {
   cronToWords,
   formatUtc,
@@ -55,7 +65,7 @@ export type PageViewProps = {
 // --- What a version and a run amount to ---------------------------------------------------------
 
 /** A page that is no longer watched: retired for unreliable reads, or a public page past its 7 days. */
-const isGone = (status: string | null): boolean => status === "retired" || status === "expired";
+export const isGone = (status: string | null): boolean => status === "retired" || status === "expired";
 
 type ShotState = "ok" | "pending" | "failed";
 
@@ -148,6 +158,8 @@ function dotPositions(timesOldestFirst: number[], startMs: number, endMs: number
 type Ctx = { detail: PageDetail; pageHref: string; label: string };
 
 const versionHref = (ctx: Ctx, id: string, extra = ""): string => `${ctx.pageHref}?v=${encodeURIComponent(id)}${extra}`;
+/** The page's JSON, which lists every version when the screen lists only the newest. */
+const jsonHref = (ctx: Ctx): string => `/api/pages/${encodeURIComponent(ctx.detail.page.id)}`;
 
 function PageHead(props: { ctx: Ctx }) {
   const { page, versions, noiseCount } = props.ctx.detail;
@@ -209,7 +221,7 @@ function asOfNote(asOf: AsOf | null): { text: string; error: boolean } | null {
 
 function Timeline(props: { ctx: Ctx; selected: VersionItem; asOf: AsOf | null; nowMs: number }) {
   const { ctx, selected, asOf, nowMs } = props;
-  const oldestFirst = [...ctx.detail.versions].reverse();
+  const oldestFirst = [...listedVersions(ctx.detail.versions, [selected.id])].reverse();
   const first = oldestFirst[0]!;
   const startMs = Date.parse(first.captured_at);
   const newestMs = Date.parse(oldestFirst[oldestFirst.length - 1]!.captured_at);
@@ -321,7 +333,7 @@ function VersionList(props: { ctx: Ctx; selected: VersionItem }) {
         Versions, newest first
       </h2>
       <ol>
-        {ctx.detail.versions.map((v) => {
+        {listedVersions(ctx.detail.versions, [selected.id]).map((v) => {
           const on = v.id === selected.id;
           return (
             <li>
@@ -339,6 +351,7 @@ function VersionList(props: { ctx: Ctx; selected: VersionItem }) {
           );
         })}
       </ol>
+      <OlderVersions total={ctx.detail.versions.length} json={jsonHref(ctx)} />
     </nav>
   );
 }
@@ -492,7 +505,7 @@ function ComparePick(props: { ctx: Ctx; selected: VersionItem }) {
       ) : (
         <>
           <p class="page-note">Pick any two versions and see exactly which words changed.</p>
-          <CompareForm action={`${ctx.pageHref}/compare`} versions={versions} fromId={fromId} toId={toId} />
+          <CompareForm action={`${ctx.pageHref}/compare`} versions={versions} fromId={fromId} toId={toId} json={jsonHref(ctx)} />
         </>
       )}
     </section>
@@ -613,8 +626,8 @@ export function PageView(props: PageViewProps) {
             <section class="history" aria-label="History">
               <Timeline ctx={ctx} selected={selected} asOf={asOf} nowMs={nowMs} />
               <div class="history-grid">
-                <VersionList ctx={ctx} selected={selected} />
                 <VersionCard ctx={ctx} v={selected} asOf={asOf} text={text} paused={stats.facts_paused} refreshing={refreshing} />
+                <VersionList ctx={ctx} selected={selected} />
               </div>
             </section>
             <ComparePick ctx={ctx} selected={selected} />

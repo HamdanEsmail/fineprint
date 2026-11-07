@@ -5,15 +5,17 @@
 // is the JSON API's (src/readModel.ts diffVersions, from the same cache); nothing here reads the database.
 //
 // Cost: blocks are capped per section group (BLOCKS_PER_GROUP, all=1 lifts it) and on the whole screen
-// (SCREEN_BLOCKS and SCREEN_CHARS, and ALL_BLOCKS and ALL_CHARS with all=1); a block over LONG_BLOCK_CHARS is
-// shown in part (around the change, or from its start); and word marks, the part that grows fastest with
-// the text, are capped by pairs and by characters (WORD_DIFF_PAIRS, WORD_DIFF_CHARS) with a shared step
-// budget. Measured in Node: 0.2 to 2.6 ms to render a default screen, about 5 ms for all=1 at its ceiling.
+// (SCREEN_BLOCKS, SCREEN_CHARS and SCREEN_WORK, and ALL_BLOCKS, ALL_CHARS and ALL_WORK with all=1); a block
+// over LONG_BLOCK_CHARS is shown in part (around the change, or from its start); and word marks, the part
+// that grows fastest with the text, are capped by pairs and by characters (WORD_DIFF_PAIRS, WORD_DIFF_CHARS)
+// with a shared step budget, the shortest pairs marked first. The work budget counts what a block costs to
+// read and draw (src/site/blockText.tsx blockWork), so a screen of `a` code spans or *a* emphasis, an
+// element or a mark a word, stops as soon as a screen of prose costs as much.
 import type { ChangedBlock, FactChange, FactsDiff, StructuredDiff } from "../../core/diff";
 import type { Diff, PageJson, Stats, VersionItem } from "../../readModel";
-import { BlockText, plainText } from "../blockText";
+import { BlockText, blockWork, plainText } from "../blockText";
 import { CompareForm, EvidenceLine, LAYOUT_ONLY_LINE, ShotFigure } from "../components";
-import { formatUtc, plural, SUMMARY_ORIGIN } from "../format";
+import { formatUtc, plural, SUMMARY_ORIGIN, unitBeside } from "../format";
 import { Layout } from "../layout";
 import { hasMarks, wordDiff, type WordDiff, type WordDiffBudget } from "../wordDiff";
 
@@ -22,9 +24,18 @@ export const BLOCKS_PER_GROUP = 30;
 /** Blocks and characters of shown text on one screen, at most (release notes keep a section a release). */
 export const SCREEN_BLOCKS = 120;
 export const SCREEN_CHARS = 60_000;
+/**
+ * The work of the blocks on one screen (blockWork: a line, or a stop of the inline walk, is one), at most. The
+ * largest real diff (Claude release notes, 4 to 5 Nov: 23 changed blocks, 53,500 characters) is about 2,500.
+ * Measured in Node on screens of nothing but dense blocks (`a` code spans, *a* emphasis, a_b, [` runs) with
+ * 40 changed pairs: a median of 0.5 to 2 ms a screen at this cap (it was 4 to 14 ms when only characters were
+ * counted), and 0.5 to 3 ms with all=1 at ALL_WORK.
+ */
+export const SCREEN_WORK = 6000;
 /** The same with all=1: past it, the JSON has every block. */
 export const ALL_BLOCKS = 400;
 export const ALL_CHARS = 120_000;
+export const ALL_WORK = 8000;
 /** Changed blocks that get word marks, at most; the rest show before and after side by side, unmarked. */
 export const WORD_DIFF_PAIRS = 40;
 /**
@@ -71,6 +82,49 @@ type Group = { section: string; items: Item[] };
  * position in the newer and the older text, 0 where it is not found. Null when not read (one section).
  */
 export type SectionPlaces = Map<string, { newer: number; older: number }>;
+
+/**
+ * The page order of a diff's sections when the diff alone settles it, as places (`newer` its rank, from 1);
+ * null when it does not, and the texts must be searched (src/readModel.ts sectionPlaces). `changed` and
+ * `added` are each in the newer text's order, so each lists its sections in page order; when the two lists
+ * together leave one way to line every section up, and every section of `removed` is among them (so it stands
+ * in the newer text too), that is the page order. A diff of changed blocks only, the usual case for a large
+ * page, is always settled. The blocks above the first heading ("") go first whatever the places say.
+ */
+export function placesFromDiff(blocks: StructuredDiff): SectionPlaces | null {
+  const lists = [blocks.changed ?? [], blocks.added ?? []].map((list) => [...new Set(list.map((b) => b.section).filter((s) => s !== ""))]);
+  const named = new Set(lists.flat());
+  for (const b of blocks.removed ?? []) if (b.section !== "" && !named.has(b.section)) return null;
+  // Each list's neighbours are an edge; the order is settled when, step by step, exactly one section has no
+  // section left before it (Kahn's algorithm with a uniqueness check: a cycle or a tie is null).
+  const next = new Map<string, Set<string>>();
+  const before = new Map<string, number>();
+  for (const s of named) {
+    next.set(s, new Set());
+    before.set(s, 0);
+  }
+  for (const list of lists) {
+    for (let i = 1; i < list.length; i++) {
+      const edges = next.get(list[i - 1]!)!;
+      if (edges.has(list[i]!)) continue;
+      edges.add(list[i]!);
+      before.set(list[i]!, before.get(list[i]!)! + 1);
+    }
+  }
+  const places: SectionPlaces = new Map();
+  let ready = [...named].filter((s) => before.get(s) === 0);
+  while (ready.length === 1) {
+    const s = ready[0]!;
+    places.set(s, { newer: places.size + 1, older: 0 });
+    ready = [];
+    for (const t of next.get(s)!) {
+      const left = before.get(t)! - 1;
+      before.set(t, left);
+      if (left === 0) ready.push(t);
+    }
+  }
+  return places.size === named.size ? places : null;
+}
 
 /** The section names of a diff, in the order they first appear among the changed, added and removed blocks. */
 export function diffSections(blocks: StructuredDiff): string[] {
@@ -196,16 +250,21 @@ function blockStart(text: string): string | null {
   return text.length <= LONG_BLOCK_CHARS ? null : text.slice(0, snapOn(text, BLOCK_START_CHARS));
 }
 
-/** Word marks for the changed pairs on screen, in screen order, within the pair, character and step budgets. */
+/**
+ * Word marks for the changed pairs on screen, within the pair, character and step budgets: the shortest pairs
+ * first, so one long pair near the top of a screen does not leave every short pair after it unmarked.
+ */
 function markPairs(shown: PairView[]): Map<PairView, WordDiff> {
   const marks = new Map<PairView, WordDiff>();
   const budget: WordDiffBudget = { steps: WORD_DIFF_STEPS };
+  const sides = shown
+    .map((view) => ({ view, before: plainText(view.before), after: plainText(view.after) }))
+    .sort((x, y) => x.before.length + x.after.length - (y.before.length + y.after.length));
   let chars = 0;
-  for (const view of shown) {
+  for (const { view, before, after } of sides) {
     if (marks.size >= WORD_DIFF_PAIRS) break;
-    const before = plainText(view.before);
-    const after = plainText(view.after);
-    if (chars + before.length + after.length > WORD_DIFF_CHARS) continue;
+    // Shortest first: once one pair is past the characters left, so is every pair after it.
+    if (chars + before.length + after.length > WORD_DIFF_CHARS) break;
     const d = wordDiff(before, after, budget);
     if (d === null) continue;
     chars += before.length + after.length;
@@ -247,6 +306,7 @@ function ChangedPair(props: { view: PairView; marks: WordDiff | undefined }) {
         <p class="diff-note">{`A long block (${view.block.before.length.toLocaleString("en-US")} characters before, ${view.block.after.length.toLocaleString("en-US")} after): only the part around the change is shown.`}</p>
       )}
       {sameWords ? <p class="diff-note">The words are the same; a link or the formatting changed.</p> : null}
+      {marks === undefined ? <p class="diff-note">No word marks on this block: it is past what one screen marks.</p> : null}
     </div>
   );
 }
@@ -270,31 +330,37 @@ function WholeBlock(props: { kind: "added" | "removed"; text: string }) {
 
 /**
  * Which blocks a screen shows: in page order, at most BLOCKS_PER_GROUP a group (not with all=1), and on the
- * whole screen at most SCREEN_BLOCKS blocks or SCREEN_CHARS characters of shown text (ALL_BLOCKS and
- * ALL_CHARS with all=1), whichever comes first; the first block always shows. A long block counts the part
- * of it that is shown. Release notes keep one section a release, so the cap a group alone would not bound
- * a screen.
+ * whole screen at most SCREEN_BLOCKS blocks, SCREEN_CHARS characters of shown text or SCREEN_WORK of their
+ * work (ALL_BLOCKS, ALL_CHARS and ALL_WORK with all=1), whichever comes first; the first block always shows.
+ * A long block counts the part of it that is shown. Release notes keep one section a release, so the cap a
+ * group alone would not bound a screen.
  */
 function chooseBlocks(groups: Group[], all: boolean): { shown: Item[][]; views: Map<ChangedBlock, PairView>; count: number; fullAt: number } {
   const maxBlocks = all ? ALL_BLOCKS : SCREEN_BLOCKS;
   const maxChars = all ? ALL_CHARS : SCREEN_CHARS;
+  const maxWork = all ? ALL_WORK : SCREEN_WORK;
   const views = new Map<ChangedBlock, PairView>();
   const shown: Item[][] = [];
   let count = 0;
   let chars = 0;
+  let work = 0;
   let full = false;
   for (const group of groups) {
     const items: Item[] = [];
     for (const item of all ? group.items : group.items.slice(0, BLOCKS_PER_GROUP)) {
       let size: number;
+      let cost: number;
       let view: PairView | null = null;
       if (item.kind === "changed") {
         view = pairView(item.block);
         size = view.before.length + view.after.length;
+        cost = blockWork(view.before) + blockWork(view.after);
       } else {
-        size = (blockStart(item.text) ?? item.text).length;
+        const text = blockStart(item.text) ?? item.text;
+        size = text.length;
+        cost = blockWork(text);
       }
-      if (count > 0 && (count + 1 > maxBlocks || chars + size > maxChars)) {
+      if (count > 0 && (count + 1 > maxBlocks || chars + size > maxChars || work + cost > maxWork)) {
         full = true;
         break;
       }
@@ -302,6 +368,7 @@ function chooseBlocks(groups: Group[], all: boolean): { shown: Item[][]; views: 
       items.push(item);
       count++;
       chars += size;
+      work += cost;
     }
     shown.push(items);
     if (full) break;
@@ -370,7 +437,8 @@ function Blocks(props: { blocks: StructuredDiff; places: SectionPlaces | null; a
 
 const FIELD_WORDS: Record<FactChange["field"], string> = { price: "price", unit: "unit", notes: "notes" };
 const text = (value: unknown): string => (typeof value === "string" ? value : value == null ? "" : String(value));
-const priced = (f: { price: unknown; unit: unknown }): string => [text(f.price), text(f.unit)].filter((s) => s !== "").join(" ");
+const priced = (f: { price: unknown; unit: unknown }): string =>
+  [text(f.price), unitBeside(text(f.price), text(f.unit))].filter((s) => s !== "").join(" ");
 
 /**
  * The prices that moved: changed fields, then added and removed facts. The new price of the first changed
@@ -534,6 +602,7 @@ function DiffBody(props: { page: PageJson; pageHref: string; state: Extract<Comp
 export function CompareView(props: CompareProps) {
   const { stats, page, versions, state } = props;
   const pageHref = `/pages/${encodeURIComponent(page.id)}`;
+  const jsonHref = `/api/pages/${encodeURIComponent(page.id)}`;
   const title = `${page.label}: what changed`;
   const description =
     state.kind === "diff"
@@ -543,7 +612,10 @@ export function CompareView(props: CompareProps) {
     <Layout title={`${title} · Fineprint`} description={description} stats={stats} current={null}>
       <div class="wrap compare">
         <header class="page-head compare-head">
-          <h1>{title}</h1>
+          {/* The page's name is the way back to its history, from the top of a long comparison. */}
+          <h1>
+            <a href={pageHref}>{page.label}</a>: what changed
+          </h1>
         </header>
         {state.kind === "diff" ? (
           <DiffBody page={page} pageHref={pageHref} state={state} />
@@ -554,7 +626,7 @@ export function CompareView(props: CompareProps) {
               <h2 id="compare-h" class="vh">
                 Compare two versions
               </h2>
-              <CompareForm action={`${pageHref}/compare`} versions={versions} {...pairAround(versions, state.at.id)} />
+              <CompareForm action={`${pageHref}/compare`} versions={versions} {...pairAround(versions, state.at.id)} json={jsonHref} />
             </section>
             <Links pageHref={pageHref} />
           </>
@@ -571,7 +643,7 @@ export function CompareView(props: CompareProps) {
         {state.kind === "diff" ? (
           <section class="pick-section" aria-labelledby="compare-h">
             <h2 id="compare-h">Compare two other versions</h2>
-            <CompareForm action={`${pageHref}/compare`} versions={versions} fromId={state.from.id} toId={state.to.id} />
+            <CompareForm action={`${pageHref}/compare`} versions={versions} fromId={state.from.id} toId={state.to.id} json={jsonHref} />
           </section>
         ) : null}
       </div>

@@ -97,6 +97,41 @@ describe("site routing", () => {
     await miss.text();
   });
 
+  it("lets a browser keep a screen of recorded data a minute, and never a form's answer", async () => {
+    for (const path of ["/", "/about"]) {
+      const res = await SELF.fetch(`https://x${path}`);
+      expect(res.status, path).toBe(200);
+      expect(res.headers.get("cache-control"), path).toBe("public, max-age=60");
+      await res.text();
+    }
+    // A refused add (a body that is not a form) is that visitor's answer: never kept.
+    const refused = await SELF.fetch("https://x/watchlist", { method: "POST", headers: { "content-type": "text/plain" }, body: "url=x" });
+    expect(refused.status).toBe(400);
+    expect(refused.headers.get("cache-control")).toBe("max-age=0, no-store");
+    await refused.text();
+    const plain = await SELF.fetch("https://x/watchlist");
+    expect(plain.headers.get("cache-control")).toBeNull();
+    await plain.text();
+    const miss = await SELF.fetch("https://x/no/such/screen");
+    expect(miss.headers.get("cache-control")).toBeNull();
+    await miss.text();
+  });
+
+  it("reads the stats in one round trip to the database", async () => {
+    const batch = vi.spyOn(env.DB, "batch");
+    try {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request("https://x/about"), env, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(res.status).toBe(200);
+      await res.text();
+      // The stats' six aggregates go as one batch.
+      expect(batch.mock.calls.some((call) => call[0].length === 6)).toBe(true);
+    } finally {
+      batch.mockRestore();
+    }
+  });
+
   it("renders the ledger 404 without a single database read, with the security headers", async () => {
     const reads = [vi.spyOn(env.DB, "prepare"), vi.spyOn(env.DB, "batch"), vi.spyOn(env.DB, "exec")];
     try {
