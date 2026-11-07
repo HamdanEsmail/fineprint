@@ -19,7 +19,8 @@ const NAV: { key: Exclude<Current, null>; href: string; text: string }[] = [
  * A full page. `stats` is null on the 404 and error pages, which render without the database: the
  * stamp and the spend meter are left out there, and the footer keeps only its links. `refreshSeconds`
  * makes the document reload itself (the page view, while a new version's screenshot is being taken);
- * it is a meta tag, so it works with JavaScript off.
+ * it is a meta tag, so it works with JavaScript off. `noindex` keeps a screen out of search engines (the
+ * watchlist answering a form or a search).
  */
 export function Layout(props: {
   title: string;
@@ -27,6 +28,7 @@ export function Layout(props: {
   stats: Stats | null;
   current: Current;
   refreshSeconds?: number;
+  noindex?: boolean;
   children: Child;
 }) {
   const { stats } = props;
@@ -41,6 +43,7 @@ export function Layout(props: {
           {props.refreshSeconds === undefined ? null : <meta http-equiv="refresh" content={String(props.refreshSeconds)} />}
           <title>{props.title}</title>
           <meta name="description" content={props.description} />
+          {props.noindex ? <meta name="robots" content="noindex" /> : null}
           <meta name="theme-color" content="#f3eee4" />
           <link rel="preload" href="/assets/fonts/fraunces-latin-opsz-normal.woff2" as="font" type="font/woff2" crossorigin="anonymous" />
           <link rel="preload" href="/assets/fonts/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin="anonymous" />

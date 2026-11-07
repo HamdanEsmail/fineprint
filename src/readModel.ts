@@ -10,7 +10,7 @@ import { FACTS_PAUSE_USD, PUBLIC_SLOTS, SPEND_PAUSE_USD } from "./core/limits";
 import { normalize } from "./core/normalize";
 import { PRICES, type SpendKind } from "./core/spend";
 import { getCachedDiff, hasCachedDiff, putCachedDiff } from "./db/diffCache";
-import { getPage, getPageWithNoiseCount, publicSlotUsage } from "./db/pages";
+import { getPage, getPageWithNoiseCount, listPages as listPageRows, publicSlotUsage, type PageListRow } from "./db/pages";
 import { countNoiseBetween, countNoiseByReason, countRunsByTrigger, listRunsOfPage } from "./db/runs";
 import type { CaptureStatus, FactsStatus, PageKind, PageRow, PageStatus, SummarySource, TriggerKind } from "./db/types";
 import {
@@ -265,6 +265,14 @@ function parsePatterns(stored: string): string[] {
  */
 export function pageToJson<T extends PageRow>(row: T): PageJson<T> {
   return { ...row, ignore_patterns: parsePatterns(row.ignore_patterns) };
+}
+
+/** A page as `GET /api/pages` lists it: its row as the API gives it, with its version count, noise count and newest version time. */
+export type PageSummary = PageJson<PageListRow>;
+
+/** Every page, ordered by when it was added, as `GET /api/pages` lists them and the watchlist shows them. One query. */
+export async function listPages(env: Env): Promise<PageSummary[]> {
+  return (await listPageRows(env.DB)).map(pageToJson);
 }
 
 // --- One page, one version, as-of -------------------------------------------------------------

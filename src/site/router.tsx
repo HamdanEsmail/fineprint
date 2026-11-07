@@ -5,7 +5,11 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Child } from "hono/jsx";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { MAX_URL_LENGTH } from "../core/limits";
 import type { Env } from "../env";
+import { discover } from "../handlers/discover";
+import { addPage, MAX_LABEL_LENGTH, visitorHash } from "../handlers/pages";
 import {
   countChanges,
   countRetiredPagesWithChanges,
@@ -15,6 +19,7 @@ import {
   getStats,
   getVersion,
   listChanges,
+  listPages,
   listVersionsForDiff,
   parseTime,
   sectionPlaces,
@@ -26,6 +31,7 @@ import { CompareView, diffSections, type CompareState } from "./views/compare";
 import { FEED_SIZE, featuredCatch, Home } from "./views/home";
 import { NotFound, ServerError } from "./views/notFound";
 import { PageView, type AsOf } from "./views/page";
+import { Watchlist, type FindState, type Refusal, type WatchlistProps } from "./views/watchlist";
 
 type AppContext = Context<{ Bindings: Env }>;
 
@@ -41,7 +47,7 @@ const SECURITY_HEADERS = {
 
 export const siteEnabled = (env: Env): boolean => env.SITE_ENABLED === "1";
 
-const render = (c: AppContext, page: Child, status: 200 | 404 | 500 = 200): Response | Promise<Response> =>
+const render = (c: AppContext, page: Child, status: ContentfulStatusCode = 200): Response | Promise<Response> =>
   c.html(page as string | Promise<string>, status, SECURITY_HEADERS);
 
 const isApiPath = (path: string): boolean =>
@@ -193,4 +199,141 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   const sections = diff.blocks ? diffSections(diff.blocks) : [];
   const places = sections.length > 1 ? await sectionPlaces(c.env, from.row.id, to.row.id, sections) : null;
   return render(c, view({ kind: "diff", from: from.item, to: to.item, diff, all: c.req.query("all") === "1", places }));
+});
+
+// --- Watchlist: every page, the public add and discover --------------------------------------------
+
+/** The largest add form read (a 2,048-character url and a 200-character label, percent-encoded, fit with room). */
+const MAX_FORM_BYTES = 16 * 1024;
+
+type FormRead = { ok: true; url: string; label: string } | { ok: false; status: 400 | 413; error: "invalid_body" | "form_too_large" };
+
+/** The request body, read up to `max` bytes; null once it is longer (the rest is not read). */
+async function readCapped(req: Request, max: number): Promise<Uint8Array | null> {
+  if (req.body === null) return new Uint8Array(0);
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return body;
+}
+
+/**
+ * The add form's two fields. Only a browser form is read (urlencoded, or multipart), at most MAX_FORM_BYTES;
+ * a field sent as a file, or twice, counts as its text or its last value. Every other field (a `kind`, an
+ * `admin` or `token` field) is ignored: the site's add is a public add, whatever the request carries.
+ */
+async function readAddForm(c: AppContext): Promise<FormRead> {
+  const contentType = c.req.header("content-type") ?? "";
+  const type = contentType.split(";")[0]!.trim().toLowerCase();
+  if (type !== "application/x-www-form-urlencoded" && type !== "multipart/form-data") return { ok: false, status: 400, error: "invalid_body" };
+  const tooLarge = { ok: false, status: 413, error: "form_too_large" } as const;
+  if (Number(c.req.header("content-length")) > MAX_FORM_BYTES) return tooLarge;
+  let form: FormData;
+  try {
+    const body = await readCapped(c.req.raw, MAX_FORM_BYTES);
+    if (body === null) return tooLarge;
+    form = await new Response(body, { headers: { "content-type": contentType } }).formData();
+  } catch {
+    return { ok: false, status: 400, error: "invalid_body" };
+  }
+  const text = (name: string): string => {
+    const value = form.get(name);
+    return typeof value === "string" ? value : "";
+  };
+  return { ok: true, url: text("url"), label: text("label") };
+}
+
+/** The watchlist screen over the stats (six queries) and the page list (one), with `status`. */
+function watchlist(
+  c: AppContext,
+  read: { stats: WatchlistProps["stats"]; pages: WatchlistProps["pages"] },
+  rest: Omit<WatchlistProps, "stats" | "pages" | "nowMs">,
+  status: ContentfulStatusCode = 200,
+): Response | Promise<Response> {
+  return render(c, <Watchlist stats={read.stats} pages={read.pages} nowMs={Date.now()} {...rest} />, status);
+}
+
+siteRouter.get("/watchlist", async (c) => {
+  if (!siteEnabled(c.env)) return c.notFound();
+  // url= and label= fill the add form (a Watch this page link); they are only shown, so they cost nothing.
+  const url = c.req.query("url") ?? "";
+  const label = c.req.query("label") ?? "";
+  const typed = c.req.query("domain")?.trim() ?? "";
+  const [stats, pages] = await Promise.all([getStats(c.env), listPages(c.env)]);
+
+  // domain= searches, through the discover() of POST /api/discover: the same parsing, the same ten lookups a day
+  // for the visitor, matched against the pages read above. Only the search form sends it; no link on the site does.
+  let find: FindState | null = null;
+  if (typed !== "") {
+    const answer =
+      typed.length > MAX_URL_LENGTH
+        ? ({ ok: false, status: 400, error: "invalid_domain" } as const)
+        : await discover(c.env, typed, { admin: false, ipHash: await visitorHash(c) }, pages);
+    find = { typed: typed.slice(0, MAX_URL_LENGTH), answer };
+  }
+  return watchlist(
+    c,
+    { stats, pages },
+    {
+      form: { url: url.slice(0, MAX_URL_LENGTH), label: label.slice(0, MAX_LABEL_LENGTH) },
+      refusal: null,
+      find,
+      noindex: url !== "" || label !== "" || typed !== "",
+    },
+    find !== null && !find.answer.ok ? find.answer.status : 200,
+  );
+});
+
+siteRouter.post("/watchlist", async (c) => {
+  if (!siteEnabled(c.env)) return c.notFound();
+  const form = await readAddForm(c);
+  let refusal: Refusal;
+  let status: ContentfulStatusCode;
+  if (!form.ok) {
+    refusal = { error: form.error };
+    status = form.status;
+  } else {
+    // Always a public add (`admin: false`), counted by the visitor key POST /api/pages uses: the site never
+    // takes the admin token, whatever header or field arrives. An empty label is no label (the page's title).
+    const result = await addPage(
+      c.env,
+      c.executionCtx,
+      { url: form.url, label: form.label.trim() === "" ? undefined : form.label },
+      { admin: false, ipHash: await visitorHash(c) },
+    );
+    // Task 3's page view takes over: the baseline, then the screenshot, with its pending copy and refresh.
+    if (result.ok) return c.redirect(`/pages/${encodeURIComponent(result.page.id)}`, 303);
+    refusal = result;
+    status = result.status;
+  }
+  // Refused: the screen again, read only now (a successful add reads nothing more), with the add's own status,
+  // the reason beside the form and what was typed kept, cut to the fields' lengths.
+  const [stats, pages] = await Promise.all([getStats(c.env), listPages(c.env)]);
+  return watchlist(
+    c,
+    { stats, pages },
+    {
+      form: form.ok ? { url: form.url.slice(0, MAX_URL_LENGTH), label: form.label.slice(0, MAX_LABEL_LENGTH) } : { url: "", label: "" },
+      refusal,
+      find: null,
+      noindex: true,
+    },
+    status,
+  );
 });

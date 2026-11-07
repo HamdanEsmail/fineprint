@@ -12,16 +12,7 @@ import { MAX_MONITORS, MAX_URL_LENGTH, PUBLIC_ADDS_PER_IP_PER_DAY, PUBLIC_SLOTS,
 import { hashText, normalize } from "../core/normalize";
 import { cronForIndex, PURPOSE } from "../core/schedule";
 import { deleteCachedDiffsOfPage } from "../db/diffCache";
-import {
-  countMonitors,
-  getPage,
-  getPageByUrl,
-  insertPage,
-  listPages,
-  publicSlotUsage,
-  updatePage,
-  type PagePatch,
-} from "../db/pages";
+import { countMonitors, getPage, getPageByUrl, insertPage, publicSlotUsage, updatePage, type PagePatch } from "../db/pages";
 import { claimPublicAdd, publicAddsToday, releasePublicAdd } from "../db/publicAdds";
 import { insertRun } from "../db/runs";
 import type { PageKind, PageRow } from "../db/types";
@@ -30,7 +21,7 @@ import type { Env } from "../env";
 import { TinyFishError } from "../tinyfish/client";
 import { fetchPage } from "../tinyfish/fetch";
 import { createMonitor, deleteMonitor, updateMonitor } from "../tinyfish/monitor";
-import { getPageDetail, pageToJson } from "../readModel";
+import { getPageDetail, listPages, pageToJson, type PageJson } from "../readModel";
 
 type AppContext = Context<{ Bindings: Env }>;
 
@@ -43,7 +34,8 @@ export { pageToJson, type PageJson } from "../readModel";
 // --- Request validation -----------------------------------------------------
 
 const KINDS: readonly PageKind[] = ["pricing", "fees", "policy", "rules", "other"];
-const MAX_LABEL_LENGTH = 200;
+/** The longest label a page may be given (the site's label field is cut to it). */
+export const MAX_LABEL_LENGTH = 200;
 const MAX_PURPOSE_LENGTH = 2000;
 const MAX_IGNORE_PATTERNS = 50;
 const MAX_IGNORE_PATTERN_LENGTH = 500;
@@ -66,7 +58,7 @@ export async function readBody(c: AppContext): Promise<Record<string, unknown> |
 }
 
 /** The fields POST and PATCH share. An absent (missing or null) field is left out of the result. */
-function readFields(body: Record<string, unknown>): Fields | Rejected {
+function readFields(body: { label?: unknown; kind?: unknown; ignore_patterns?: unknown }): Fields | Rejected {
   const fields: Fields = {};
 
   if (!absent(body.kind)) {
@@ -203,6 +195,54 @@ async function rollbackAdd(db: D1Database, pageId: string): Promise<void> {
 
 const isUniqueViolation = (err: unknown): boolean => err instanceof Error && /UNIQUE constraint/i.test(err.message);
 
+// --- Adding a page: POST /api/pages and the site's POST /watchlist ----------
+
+/** Who is adding: the admin (no public slot, no daily limit) or a public visitor, counted by `ipHash` (visitorHash). */
+export type AddCaller = { admin: boolean; ipHash: string };
+
+/** What an add was sent, every field as it arrived: addPage checks them, so both routes refuse the same things alike. */
+export type AddInput = { url?: unknown; label?: unknown; kind?: unknown; ignore_patterns?: unknown };
+
+/** What an add needs of the request's execution context: somewhere to run the baseline's capture after the answer. */
+export type AddContext = Pick<ExecutionContext, "waitUntil">;
+
+/**
+ * A refused add: the status and error code `POST /api/pages` answers with, the reason when it gives one, the
+ * page that already has the url (`already_watched`) and when the next public slot frees (`public_slots_full`).
+ */
+export type AddRefusal = {
+  ok: false;
+  status: 400 | 401 | 409 | 422 | 429 | 500 | 502;
+  error: string;
+  reason?: string;
+  existing_page_id?: string | null;
+  retry_after?: string | null;
+};
+
+/** What an add came to: the new page (as the API gives it) and its baseline version, or the refusal. */
+export type AddResult = { ok: true; page: PageJson; baseline_version_id: string } | AddRefusal;
+
+const refuse = (status: AddRefusal["status"], error: string, reason?: string): AddRefusal =>
+  reason === undefined ? { ok: false, status, error } : { ok: false, status, error, reason };
+
+/** A refusal as `POST /api/pages` has always answered it: `{error}`, with `reason`, `retry_after` or `page_id` where it had them. */
+export function refusalJson(r: AddRefusal): Record<string, unknown> {
+  if (r.error === "already_watched") return { error: r.error, page_id: r.existing_page_id ?? null };
+  const body: Record<string, unknown> = { error: r.error };
+  if (r.reason !== undefined) body.reason = r.reason;
+  if (r.retry_after !== undefined) body.retry_after = r.retry_after;
+  return body;
+}
+
+/**
+ * The key a public visitor's daily add and daily lookups are counted by: sha256 of the connecting address
+ * (CF-Connecting-IP, "unknown" without one) and the webhook secret, so no address is stored. The JSON routes
+ * and the site's forms use this one function; neither the address nor the key is ever put in a page.
+ */
+export function visitorHash(c: AppContext): Promise<string> {
+  return hashText((c.req.header("CF-Connecting-IP") || "unknown") + c.env.WEBHOOK_SECRET);
+}
+
 /** When the next public slot frees up: the earliest expiry among the public pages that hold a slot. */
 async function nextPublicSlotAt(db: D1Database): Promise<string | null> {
   return (await publicSlotUsage(db)).next_free_at;
@@ -221,25 +261,19 @@ async function capHit(db: D1Database, admin: boolean, held: number, extra: 0 | 1
   return null;
 }
 
-/** The 409 for a cap, the same body before and after the Monitor was created. */
-async function capRefusal(c: AppContext, hit: CapHit): Promise<Response> {
-  if (hit === "watchlist_full") {
-    return c.json(
-      { error: "watchlist_full", reason: `Fineprint already watches its maximum of ${MAX_MONITORS} pages` },
-      409,
-    );
-  }
-  const retryAfter = await nextPublicSlotAt(c.env.DB);
-  return c.json(
-    {
-      error: "public_slots_full",
-      reason: `All ${PUBLIC_SLOTS} public slots are in use. Public pages are removed after ${PUBLIC_TTL_DAYS} days${
-        retryAfter ? `; the next slot frees up at ${retryAfter}` : ""
-      }`,
-      retry_after: retryAfter,
-    },
-    409,
-  );
+/** The 409 for a cap, the same before and after the Monitor was created. */
+async function capRefusal(db: D1Database, hit: CapHit): Promise<AddRefusal> {
+  if (hit === "watchlist_full") return refuse(409, "watchlist_full", `Fineprint already watches its maximum of ${MAX_MONITORS} pages`);
+  const retryAfter = await nextPublicSlotAt(db);
+  return {
+    ok: false,
+    status: 409,
+    error: "public_slots_full",
+    reason: `All ${PUBLIC_SLOTS} public slots are in use. Public pages are removed after ${PUBLIC_TTL_DAYS} days${
+      retryAfter ? `; the next slot frees up at ${retryAfter}` : ""
+    }`,
+    retry_after: retryAfter,
+  };
 }
 
 async function releaseQuietly(db: D1Database, ipHash: string): Promise<void> {
@@ -260,8 +294,7 @@ pagesRouter.onError((err, c) => {
 });
 
 pagesRouter.get("/", async (c) => {
-  const pages = await listPages(c.env.DB);
-  return c.json({ pages: pages.map(pageToJson) });
+  return c.json({ pages: await listPages(c.env) });
 });
 
 pagesRouter.get("/:id", async (c) => {
@@ -273,72 +306,81 @@ pagesRouter.get("/:id", async (c) => {
 });
 
 pagesRouter.post("/", async (c) => {
-  const db = c.env.DB;
-
-  // 1. Shape of the request. Nothing here costs anything.
   const body = await readBody(c);
   if (!body) return c.json({ error: "invalid_body" }, 400);
-  // Long urls are refused as sent (before any parsing) and in the form that would be stored.
-  const tooLong = () => c.json({ error: "invalid_url", reason: "url_too_long" }, 400);
-  if (typeof body.url === "string" && body.url.length > MAX_URL_LENGTH) return tooLong();
-  const url = parseWatchUrl(body.url);
-  if (!url) return c.json({ error: "invalid_url" }, 400);
-  if (url.length > MAX_URL_LENGTH) return tooLong();
-  const fields = readFields(body);
-  if ("error" in fields) return c.json({ error: fields.error }, 400);
+  const result = await addPage(c.env, c.executionCtx, body, { admin: isAdmin(c), ipHash: await visitorHash(c) });
+  if (!result.ok) return c.json(refusalJson(result), result.status);
+  return c.json({ page: result.page, baseline_version_id: result.baseline_version_id }, 201);
+});
 
-  const admin = isAdmin(c);
+/**
+ * Adds a page (spec 4.1), for `POST /api/pages` and the site's `POST /watchlist` alike: the checks that cost
+ * nothing (the url, the fields, duplicates, the caps, a public visitor's one add a day) before the first
+ * TinyFish call, then TinyFetch validation, the Monitor and the page. A public visitor's daily add is taken
+ * before TinyFetch and given back unless a page was created, whichever way the rest ends.
+ */
+export async function addPage(env: Env, ctx: AddContext, input: AddInput, caller: AddCaller): Promise<AddResult> {
+  const db = env.DB;
+
+  // 1. Shape of the request. Nothing here costs anything.
+  // Long urls are refused as sent (before any parsing) and in the form that would be stored.
+  if (typeof input.url === "string" && input.url.length > MAX_URL_LENGTH) return refuse(400, "invalid_url", "url_too_long");
+  const url = parseWatchUrl(input.url);
+  if (!url) return refuse(400, "invalid_url");
+  if (url.length > MAX_URL_LENGTH) return refuse(400, "invalid_url", "url_too_long");
+  const fields = readFields(input);
+  if ("error" in fields) return refuse(400, fields.error);
+
+  const { admin, ipHash } = caller;
   // Ignore patterns are regexes that run inside the Worker on every webhook for the page.
   if (!admin && fields.ignorePatterns !== undefined && fields.ignorePatterns.length > 0) {
-    return c.json({ error: "admin_required", reason: "Only the admin can set ignore_patterns" }, 401);
+    return refuse(401, "admin_required", "Only the admin can set ignore_patterns");
   }
 
   // 2. Duplicates and caps (spec 4.1 step 1).
   const existing = await getPageByUrl(db, url);
-  if (existing) return c.json({ error: "already_watched", page_id: existing.id }, 409);
+  if (existing) return { ok: false, status: 409, error: "already_watched", existing_page_id: existing.id };
 
   const held = await countMonitors(db);
   const full = await capHit(db, admin, held, 1);
-  if (full) return capRefusal(c, full);
+  if (full) return capRefusal(db, full);
 
-  if (admin) return createPage(c, { url, fields, admin, held });
+  if (admin) return createPage(env, ctx, { url, fields, admin, held });
 
   // A public visitor gets one add a day. The plain check answers the common case without a
   // write; the claim is the one that holds when several adds arrive at once (it is a single
   // statement, so only one of them can take the last add).
-  const ip = c.req.header("CF-Connecting-IP") || "unknown";
-  const ipHash = await hashText(ip + c.env.WEBHOOK_SECRET);
-  const dailyLimit = () => c.json({ error: "daily_limit", reason: "One public page per day per visitor" }, 429);
-  if ((await publicAddsToday(db, ipHash)) >= PUBLIC_ADDS_PER_IP_PER_DAY) return dailyLimit();
-  if (!(await claimPublicAdd(db, ipHash, PUBLIC_ADDS_PER_IP_PER_DAY))) return dailyLimit();
+  const dailyLimit = refuse(429, "daily_limit", "One public page per day per visitor");
+  if ((await publicAddsToday(db, ipHash)) >= PUBLIC_ADDS_PER_IP_PER_DAY) return dailyLimit;
+  if (!(await claimPublicAdd(db, ipHash, PUBLIC_ADDS_PER_IP_PER_DAY))) return dailyLimit;
 
   // The add is given back unless a page was created, whichever way the rest ends.
-  let res: Response | undefined;
+  let result: AddResult | undefined;
   try {
-    res = await createPage(c, { url, fields, admin, held });
-    return res;
+    result = await createPage(env, ctx, { url, fields, admin, held });
+    return result;
   } finally {
-    if (res?.status !== 201) await releaseQuietly(db, ipHash);
+    if (!result?.ok) await releaseQuietly(db, ipHash);
   }
-});
+}
 
 type NewPageRequest = { url: string; fields: Fields; admin: boolean; held: number };
 
 /** Steps 3 to 6 of the add flow: validate with TinyFetch, create the Monitor, store the page. */
-async function createPage(c: AppContext, req: NewPageRequest): Promise<Response> {
-  const db = c.env.DB;
+async function createPage(env: Env, ctx: AddContext, req: NewPageRequest): Promise<AddResult> {
+  const db = env.DB;
   const { url, fields, admin, held } = req;
 
   // 3. TinyFetch validation (free). A page that cannot be read now cannot be watched.
   let fetched: Awaited<ReturnType<typeof fetchPage>>;
   try {
-    fetched = await fetchPage(c.env, url, "markdown");
+    fetched = await fetchPage(env, url, "markdown");
   } catch (err) {
     logError("add: TinyFetch request failed", err);
-    return c.json({ error: "unfetchable", reason: "fetch_failed" }, 502);
+    return refuse(502, "unfetchable", "fetch_failed");
   }
-  if (!fetched.ok) return c.json({ error: "unfetchable", reason: fetched.error.slice(0, 100) }, 422);
-  if (fetched.text.trim() === "") return c.json({ error: "unfetchable", reason: "empty_page" }, 422);
+  if (!fetched.ok) return refuse(422, "unfetchable", fetched.error.slice(0, 100));
+  if (fetched.text.trim() === "") return refuse(422, "unfetchable", "empty_page");
 
   const title = fetched.title?.replace(/\s+/g, " ").trim();
   const label = fields.label ?? (title ? title.slice(0, MAX_LABEL_LENGTH) : new URL(url).hostname);
@@ -347,16 +389,16 @@ async function createPage(c: AppContext, req: NewPageRequest): Promise<Response>
   //    without first putting the Monitor away again.
   let monitor: Awaited<ReturnType<typeof createMonitor>>;
   try {
-    monitor = await createMonitor(c.env, {
+    monitor = await createMonitor(env, {
       url,
       name: label,
       scheduleCron: cronForIndex(held),
       purpose: PURPOSE,
-      webhookUrl: `${c.env.PUBLIC_BASE_URL.replace(/\/+$/, "")}/hooks/monitor/${c.env.WEBHOOK_SECRET}`,
+      webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/+$/, "")}/hooks/monitor/${env.WEBHOOK_SECRET}`,
     });
   } catch (err) {
     logError("add: Monitor create failed", err);
-    return c.json({ error: "monitor_create_failed", reason: codeOf(err) }, 502);
+    return refuse(502, "monitor_create_failed", codeOf(err));
   }
 
   // 5. The page, its baseline run and its baseline version. A public page keeps the kind it was sent with
@@ -384,14 +426,14 @@ async function createPage(c: AppContext, req: NewPageRequest): Promise<Response>
       expires_at: admin ? null : new Date(now.getTime() + PUBLIC_TTL_DAYS * DAY_MS).toISOString(),
     });
   } catch (err) {
-    await dropMonitor(c.env, monitor.monitorId);
+    await dropMonitor(env, monitor.monitorId);
     if (isUniqueViolation(err)) {
       // Another add stored this url while ours was waiting on TinyFish.
       const winner = await getPageByUrl(db, url);
-      return c.json({ error: "already_watched", page_id: winner?.id ?? null }, 409);
+      return { ok: false, status: 409, error: "already_watched", existing_page_id: winner?.id ?? null };
     }
     logError("add: page insert failed", err);
-    return c.json({ error: "internal_error" }, 500);
+    return refuse(500, "internal_error");
   }
 
   // Adds that arrive together all pass the checks above before any of them has written, so each
@@ -433,23 +475,21 @@ async function createPage(c: AppContext, req: NewPageRequest): Promise<Response>
   } catch (err) {
     logError("add: baseline insert failed", err);
     await rollbackAdd(db, pageId);
-    await dropMonitor(c.env, monitor.monitorId);
-    return c.json({ error: "internal_error" }, 500);
+    await dropMonitor(env, monitor.monitorId);
+    return refuse(500, "internal_error");
   }
   if (overCap !== null) {
     await rollbackAdd(db, pageId);
-    await dropMonitor(c.env, monitor.monitorId);
-    return capRefusal(c, overCap);
+    await dropMonitor(env, monitor.monitorId);
+    return capRefusal(db, overCap);
   }
 
   // 6. Every page gets a day-zero screenshot and source (spec 4.4).
-  c.executionCtx.waitUntil(
-    captureVersion(c.env, versionId).catch((err: unknown) => logError("add: capture failed for " + versionId, err)),
-  );
+  ctx.waitUntil(captureVersion(env, versionId).catch((err: unknown) => logError("add: capture failed for " + versionId, err)));
 
   const row = await getPage(db, pageId);
-  if (!row) return c.json({ error: "internal_error" }, 500);
-  return c.json({ page: pageToJson(row), baseline_version_id: versionId }, 201);
+  if (!row) return refuse(500, "internal_error");
+  return { ok: true, page: pageToJson(row), baseline_version_id: versionId };
 }
 
 pagesRouter.patch("/:id", adminOnly, async (c) => {
