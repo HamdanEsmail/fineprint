@@ -325,6 +325,10 @@ describe("about", () => {
       "The Monitors&#39; own scheduled checks keep running, and a change they report is still kept as a version, without its screenshot.",
     );
     expect(section).toContain("Spend so far: $0.36.");
+    expect(section).toContain("The home counts can trail by up to an hour.");
+    expect(section).toContain(
+      "Home, About and the watchlist are served from a copy rebuilt every hour and whenever a new version is recorded, so their counts and the recording or paused state can be up to an hour behind.",
+    );
     expect(section).not.toContain("recording pauses");
   });
 

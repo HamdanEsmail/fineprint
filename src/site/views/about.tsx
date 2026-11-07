@@ -458,6 +458,10 @@ function Limits(props: { stats: Stats }) {
       lead: "A small, fixed budget.",
       text: `At $${FACTS_PAUSE_USD} of TinyFish spend, no new price-table run starts; changes are still recorded. At $${SPEND_PAUSE_USD}, Fineprint starts nothing more that costs money on its side: no overdue-check pull, screenshot, stored source or price table, and no new page can be added. The Monitors' own scheduled checks keep running, and a change they report is still kept as a version, without its screenshot. Spend so far: ${formatUsd(props.stats.spend_usd)}.`,
     },
+    {
+      lead: "The home counts can trail by up to an hour.",
+      text: "Home, About and the watchlist are served from a copy rebuilt every hour and whenever a new version is recorded, so their counts and the recording or paused state can be up to an hour behind.",
+    },
   ];
   return (
     <ul class="limits">
