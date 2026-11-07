@@ -26,9 +26,10 @@ import {
   versionInForce,
   type VersionItem,
 } from "../readModel";
-import { parseAsOfInput } from "./format";
+import { parseAsOfInput, webHref } from "./format";
+import { About } from "./views/about";
 import { CompareView, diffSections, type CompareState } from "./views/compare";
-import { FEED_SIZE, featuredCatch, Home } from "./views/home";
+import { FEATURE_CHANGES, FEED_SIZE, featuredCatch, Home } from "./views/home";
 import { NotFound, ServerError } from "./views/notFound";
 import { PageView, type AsOf } from "./views/page";
 import { Watchlist, type FindState, type Refusal, type WatchlistProps } from "./views/watchlist";
@@ -199,6 +200,34 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   const sections = diff.blocks ? diffSections(diff.blocks) : [];
   const places = sections.length > 1 ? await sectionPlaces(c.env, from.row.id, to.row.id, sections) : null;
   return render(c, view({ kind: "diff", from: from.item, to: to.item, diff, all: c.req.query("all") === "1", places }));
+});
+
+// --- About: how Fineprint works ---------------------------------------------------------------------
+
+siteRouter.get("/about", async (c) => {
+  if (!siteEnabled(c.env)) return c.notFound();
+  // Nine queries, then the featured catch's: the stats (six); the newest changes outside retired pages, which
+  // the featured catch picks from as the home does (the same change, under the same caps); the newest
+  // layout-only change, for the one linked example; and the page list, for the retired pages it names.
+  const [stats, changes, layoutOnly, pages] = await Promise.all([
+    getStats(c.env),
+    listChanges(c.env, { limit: FEATURE_CHANGES, includeRetired: false }),
+    listChanges(c.env, { limit: 1, includeRetired: false, layoutOnly: true }),
+    listPages(c.env),
+  ]);
+  const featured = await featuredCatch(c.env, changes);
+  return render(
+    c,
+    <About
+      stats={stats}
+      featured={featured}
+      sample={changes[0] ?? null}
+      layoutExample={layoutOnly[0] ?? null}
+      retired={pages.filter((p) => p.status === "retired")}
+      baseUrl={c.env.PUBLIC_BASE_URL.replace(/\/+$/, "")}
+      repoUrl={webHref(c.env.REPO_URL ?? "")}
+    />,
+  );
 });
 
 // --- Watchlist: every page, the public add and discover --------------------------------------------

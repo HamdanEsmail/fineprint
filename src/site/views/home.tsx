@@ -251,9 +251,9 @@ export function retiredLine(n: number): string {
  * one, else the screenshot, by path) beside the label row, the title and the summary; under them the
  * delta badge, where the summary came from and the evidence line, which span the whole card on a phone.
  * A layout-only change shows the "Layout only" tag, its time without the accent, and the line that says
- * nothing in the words or figures moved.
+ * nothing in the words or figures moved. The About screen shows the featured catch's card the same way.
  */
-function CatchCard(props: { change: ChangeItem }) {
+export function CatchCard(props: { change: ChangeItem }) {
   const c = props.change;
   const time = formatUtc(c.captured_at);
   const pageHref = `/pages/${encodeURIComponent(c.page_id)}`;

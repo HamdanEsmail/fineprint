@@ -1,6 +1,6 @@
-// The document every screen shares: head (styles, the two preloaded fonts), the header (wordmark,
-// stamp, nav) and the footer (the spend meter). No inline script or style element: the CSP allows
-// only files from this origin.
+// The document every screen shares: head (styles, the two preloaded fonts, the optional enhance.js), the
+// header (wordmark, stamp, nav) and the footer (the spend meter). No inline script or style element: the
+// CSP allows only files from this origin, and every screen works without the script.
 import type { Child } from "hono/jsx";
 import { raw } from "hono/html";
 import type { Stats } from "../readModel";
@@ -50,6 +50,7 @@ export function Layout(props: {
           <link rel="stylesheet" href="/assets/tokens.css" />
           <link rel="stylesheet" href="/assets/site.css" />
           <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+          <script src="/assets/enhance.js" defer></script>
         </head>
         <body>
           <a class="skip" href="#main">

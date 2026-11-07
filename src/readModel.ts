@@ -80,15 +80,16 @@ export type ChangeItem = {
 /**
  * Real changes across all pages, newest first: captured at or after `since` and strictly before
  * `before` when given (both ISO, as parseTime returns them), at most `limit`. Retired pages are in
- * unless `includeRetired` is false.
+ * unless `includeRetired` is false; `layoutOnly` keeps only the changes labelled layout only.
  */
 export async function listChanges(
   env: Env,
-  opts: { since?: string; before?: string; limit: number; includeRetired?: boolean },
+  opts: { since?: string; before?: string; limit: number; includeRetired?: boolean; layoutOnly?: boolean },
 ): Promise<ChangeItem[]> {
   const rows = await listChangeRows(env.DB, opts.since ?? null, opts.limit, {
     beforeIso: opts.before ?? null,
     includeRetired: opts.includeRetired ?? true,
+    onlyLayoutOnly: opts.layoutOnly ?? false,
   });
   return rows.map((row) => ({
     version_id: row.id,

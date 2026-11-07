@@ -603,12 +603,14 @@ export const NOT_RETIRED_SQL = "(p.status IS NULL OR p.status != 'retired')";
 /**
  * Which real changes a feed query covers; see listChanges. `excludeLayoutOnly` leaves out the changes
  * labelled layout only (the home screen's count, which agrees with Stats.changes); the feed keeps them.
+ * `onlyLayoutOnly` keeps nothing but them (the About screen's one linked example).
  */
 export type ChangeFilter = {
   sinceIso?: string | null;
   beforeIso?: string | null;
   includeRetired?: boolean;
   excludeLayoutOnly?: boolean;
+  onlyLayoutOnly?: boolean;
 };
 
 /**
@@ -628,6 +630,7 @@ function changeWhere(filter: ChangeFilter): { where: string; binds: unknown[] } 
   }
   if (filter.includeRetired === false) where.push(NOT_RETIRED_SQL);
   if (filter.excludeLayoutOnly === true) where.push(`${LAYOUT_ONLY_SQL} = 0`);
+  if (filter.onlyLayoutOnly === true) where.push(`${LAYOUT_ONLY_SQL} = 1`);
   return { where: where.join(" AND "), binds };
 }
 

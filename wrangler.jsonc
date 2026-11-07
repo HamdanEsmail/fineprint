@@ -32,7 +32,9 @@
     "PUBLIC_BASE_URL": "https://fineprint.hamdanesmail12-7a9.workers.dev",
     // The site's screens (src/site) answer only when this is "1". Off, every site path answers as
     // the Worker did before the site existed. Previews upload with --var SITE_ENABLED:1.
-    "SITE_ENABLED": "0"
+    "SITE_ENABLED": "0",
+    // The source repository the About screen links to. Empty, no link is shown.
+    "REPO_URL": ""
   },
   // Styles, fonts, the favicon and robots.txt. A request that matches no file reaches the Worker.
   "assets": { "directory": "./public" },
