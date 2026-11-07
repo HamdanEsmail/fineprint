@@ -695,6 +695,14 @@ describe("the version card's honest states", () => {
     expect(watched).toMatch(/<p class="tl-ends">[\s\S]*?<span>Now<\/span><\/p>/);
   });
 
+  it("gives the 7-day line only to an expired public page; any other expired page reads as no longer watched", async () => {
+    await seedState("taken-down", {}, { status: "expired", added_by: "curated", monitor_id: null });
+    const html = await get("/pages/taken-down");
+    expect(html).toContain('class="chip muted">Expired</span>');
+    expect(html).toContain("No longer watched. Its history is kept.");
+    expect(html).not.toContain("Watched for 7 days as a public page.");
+  });
+
   it("labels a layout-only change and takes the accent off its time", async () => {
     await seedState("restyled", { delta_json: delta([25, 1, 0], null, true) });
     const html = await get("/pages/restyled");

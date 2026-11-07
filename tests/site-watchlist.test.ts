@@ -2,7 +2,7 @@ import { applyD1Migrations, reset } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { captureDeps } from "../src/capture";
-import { DISCOVER_PER_IP_PER_DAY, MAX_URL_LENGTH } from "../src/core/limits";
+import { DISCOVER_PER_IP_PER_DAY, MAX_URL_LENGTH, SPEND_PAUSE_USD } from "../src/core/limits";
 import { hashText } from "../src/core/normalize";
 import { getPage, insertPage, type NewPage } from "../src/db/pages";
 import { publicAddsToday } from "../src/db/publicAdds";
@@ -66,6 +66,14 @@ function post(fields: Record<string, string>, headers: Record<string, string> = 
 
 function postJsonApi(body: unknown, headers: Record<string, string> = {}): Promise<Response> {
   return call("/api/pages", { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+}
+
+/** The page id a successful add redirected to (`/pages/<id>#version`). */
+const pageIdOf = (res: Response): string => (res.headers.get("location") ?? "").replace(/^\/pages\//, "").replace(/#.*$/, "");
+
+/** Total spend at the pause line: nothing that costs money starts. */
+async function pauseSpend(): Promise<void> {
+  await db.prepare("INSERT INTO spend (id, kind, amount_usd, ref, at) VALUES ('s-pause', 'monitor_check', ?, 'x', ?)").bind(SPEND_PAUSE_USD, new Date().toISOString()).run();
 }
 
 const monitorCreateCalls = (): number => fetchMock.calls.filter((c) => c.method === "POST" && c.url === new URL(MONITORS_API).href).length;
@@ -302,9 +310,9 @@ describe("adding a page from the watchlist", () => {
 
     const ok = await post({ url: "https://example.com/pricing" }, from("203.0.113.1"));
     expect(ok.status).toBe(303);
-    const location = ok.headers.get("location") ?? "";
-    expect(location).toMatch(/^\/pages\/[0-9a-f-]{36}$/);
-    const added = (await getPage(db, location.slice("/pages/".length)))!;
+    // Straight to the new page's version card, whatever fragment the form was posted from.
+    expect(ok.headers.get("location")).toMatch(/^\/pages\/[0-9a-f-]{36}#version$/);
+    const added = (await getPage(db, pageIdOf(ok)))!;
     expect(added).toMatchObject({ url: "https://example.com/pricing", added_by: "public", kind: "other", status: "active" });
     expect(added.expires_at).not.toBeNull();
     expect(monitorCreateCalls()).toBe(1);
@@ -382,7 +390,7 @@ describe("adding a page from the watchlist", () => {
       { Authorization: "Bearer test-admin", ...from(ip) },
     );
     expect(res.status).toBe(303);
-    const added = (await getPage(db, (res.headers.get("location") ?? "").slice("/pages/".length)))!;
+    const added = (await getPage(db, pageIdOf(res)))!;
     expect(added).toMatchObject({ added_by: "public", kind: "other", ignore_patterns: "[]" });
     expect(added.expires_at).not.toBeNull();
     const ipHash = await hashText(ip + SECRET);
@@ -402,10 +410,64 @@ describe("adding a page from the watchlist", () => {
     mockTinyFish();
     const named = await post({ url: "https://example.com/a", label: "  My bank fees " }, from("203.0.113.60"));
     expect(named.status).toBe(303);
-    expect((await getPage(db, (named.headers.get("location") ?? "").slice(7)))!.label).toBe("My bank fees");
+    expect((await getPage(db, pageIdOf(named)))!.label).toBe("My bank fees");
     const blank = await post({ url: "https://example.com/b", label: "   " }, from("203.0.113.61"));
     expect(blank.status).toBe(303);
-    expect((await getPage(db, (blank.headers.get("location") ?? "").slice(7)))!.label).toBe(fetchFixture.results[0]!.title);
+    expect((await getPage(db, pageIdOf(blank)))!.label).toBe(fetchFixture.results[0]!.title);
+  });
+
+  it("disables the form at the spend pause, refuses a post with 503 and the reason, and still searches", async () => {
+    mockTinyFish();
+    mockSearch();
+    await pauseSpend();
+    const html = await get("/watchlist");
+    const line = "Recording is paused at the budget line, so no new page can be added until it lifts.";
+    expect(html).toContain(line);
+    expect(html).toMatch(/<input[^>]+name="url"[^>]+disabled/);
+    expect(html).toMatch(/<input[^>]+name="label"[^>]+aria-describedby="label-hint add-slots"[^>]+disabled/);
+    expect(html).toMatch(/<button[^>]+type="submit"[^>]+aria-describedby="add-slots"[^>]+disabled/);
+
+    const res = await post({ url: "https://example.com/pricing" }, from("203.0.113.100"));
+    expect(res.status).toBe(503);
+    const refused = await res.text();
+    expect(sectionOf(refused, "add")).toContain(line);
+    expect(refused).toContain('value="https://example.com/pricing"');
+    expect(fetchMock.calls).toEqual([]);
+    expect(await publicAddsToday(db, await hashText("203.0.113.100" + SECRET))).toBe(0);
+
+    // The search is free, so it stays open.
+    expect(await get("/watchlist?domain=example.com", from("203.0.113.100"))).toContain("Watch this page");
+  });
+
+  it("refuses a post sent from another site with 403 before reading it; a same-origin post, or one without the headers, goes through", async () => {
+    mockTinyFish();
+    const line = "That form was sent from another site, so it was not read. Use the form on this page.";
+    const crossSite: Record<string, string>[] = [{ "Sec-Fetch-Site": "cross-site" }, { Origin: "https://elsewhere.example" }, { Origin: "null" }];
+    for (const headers of crossSite) {
+      const res = await post({ url: "https://example.com/pricing" }, { ...headers, ...from("203.0.113.110") });
+      expect(res.status, JSON.stringify(headers)).toBe(403);
+      const html = await res.text();
+      expect(html).toContain("<h1>Watchlist</h1>");
+      expect(sectionOf(html, "add")).toContain(line);
+    }
+    expect(fetchMock.calls).toEqual([]);
+    expect(await publicAddsToday(db, await hashText("203.0.113.110" + SECRET))).toBe(0);
+
+    const same = await post({ url: "https://example.com/a" }, { Origin: "https://fineprint.test", "Sec-Fetch-Site": "same-origin", ...from("203.0.113.111") });
+    expect(same.status).toBe(303);
+    const sameSite = await post({ url: "https://example.com/b" }, { "Sec-Fetch-Site": "same-site", ...from("203.0.113.112") });
+    expect(sameSite.status).toBe(303);
+  });
+
+  it("describes the closed form's label and button by the line that says why it is closed", async () => {
+    await fillPublicSlots();
+    const html = await get("/watchlist");
+    expect(html).toMatch(/<input[^>]+name="url"[^>]+aria-describedby="add-slots"[^>]+disabled/);
+    expect(html).toMatch(/<input[^>]+name="label"[^>]+aria-describedby="label-hint add-slots"[^>]+disabled/);
+    expect(html).toMatch(/<button[^>]+type="submit"[^>]+aria-describedby="add-slots"[^>]+disabled/);
+    // Open, the button needs no description.
+    await db.prepare("UPDATE pages SET status = 'expired' WHERE id = 'pub0'").run();
+    expect(await get("/watchlist")).toMatch(/<button class="btn" type="submit">Start watching<\/button>/);
   });
 
   it("takes a multipart form as well", async () => {
@@ -509,6 +571,20 @@ describe("finding a site's small print from the watchlist", () => {
     expect(monitorCreateCalls()).toBe(0);
   });
 
+  it("searches nothing for a HEAD request, and robots.txt keeps crawlers off the watchlist's queries", async () => {
+    mockSearch();
+    const ip = "203.0.113.96";
+    const head = await call("/watchlist?domain=example.com", { method: "HEAD", headers: from(ip) });
+    expect(head.status).toBe(200);
+    expect(searchCalls()).toBe(0);
+    expect(await publicAddsToday(db, await discoverKey(ip))).toBe(0);
+
+    // Served as a static file, before the Worker (through the service binding, as production reaches it).
+    const robots = await (await env.SELF.fetch("https://x/robots.txt")).text();
+    expect(robots).toMatch(/^Allow: \/$/m);
+    expect(robots).toMatch(/^Disallow: \/watchlist\?$/m);
+  });
+
   it("refuses a domain it cannot search with 400, without a search or a daily lookup", async () => {
     const ip = "203.0.113.91";
     const res = await call("/watchlist?domain=localhost", { headers: from(ip) });
@@ -576,7 +652,7 @@ describe("the watchlist's reads", () => {
       { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...from("203.0.113.96") }, body: "url=https%3A%2F%2Fexample.com%2Fnew" },
       429,
     );
-    expect(refused.length).toBeLessThanOrEqual(plain.length + 4);
+    expect(refused.length).toBeLessThanOrEqual(plain.length + 5);
     const invalid = await queries("/watchlist", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "url=nope" }, 400);
     expect(invalid).toHaveLength(plain.length);
     // A path under the watchlist that does not exist is the ledger's 404, without a read.

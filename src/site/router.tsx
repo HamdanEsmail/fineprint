@@ -206,7 +206,9 @@ siteRouter.get("/pages/:id/compare", async (c) => {
 /** The largest add form read (a 2,048-character url and a 200-character label, percent-encoded, fit with room). */
 const MAX_FORM_BYTES = 16 * 1024;
 
-type FormRead = { ok: true; url: string; label: string } | { ok: false; status: 400 | 413; error: "invalid_body" | "form_too_large" };
+type FormRead =
+  | { ok: true; url: string; label: string }
+  | { ok: false; status: 400 | 403 | 413; error: "invalid_body" | "form_too_large" | "cross_site" };
 
 /** The request body, read up to `max` bytes; null once it is longer (the rest is not read). */
 async function readCapped(req: Request, max: number): Promise<Uint8Array | null> {
@@ -279,12 +281,14 @@ siteRouter.get("/watchlist", async (c) => {
 
   // domain= searches, through the discover() of POST /api/discover: the same parsing, the same ten lookups a day
   // for the visitor, matched against the pages read above. Only the search form sends it; no link on the site does.
+  // Hono answers HEAD with this handler, and a HEAD (a link checker, a preview fetcher) shows nobody the results,
+  // so it searches nothing and takes none of the visitor's lookups.
   let find: FindState | null = null;
-  if (typed !== "") {
+  if (typed !== "" && c.req.method !== "HEAD") {
     const answer =
       typed.length > MAX_URL_LENGTH
         ? ({ ok: false, status: 400, error: "invalid_domain" } as const)
-        : await discover(c.env, typed, { admin: false, ipHash: await visitorHash(c) }, pages);
+        : await discover(c.env, typed, { admin: false, ipHash: () => visitorHash(c) }, pages);
     find = { typed: typed.slice(0, MAX_URL_LENGTH), answer };
   }
   return watchlist(
@@ -300,9 +304,21 @@ siteRouter.get("/watchlist", async (c) => {
   );
 });
 
+/**
+ * A post another site made a browser send: `Sec-Fetch-Site: cross-site`, or an `Origin` that is not this
+ * host's (`null` included). A request with neither header (an older browser, a script) is let through: the
+ * add's own caps and daily limit hold whoever sends it, and there is no cookie or session to ride on.
+ */
+function fromAnotherSite(c: AppContext): boolean {
+  if (c.req.header("sec-fetch-site")?.toLowerCase() === "cross-site") return true;
+  const origin = c.req.header("origin");
+  return origin !== undefined && origin !== new URL(c.req.url).origin;
+}
+
 siteRouter.post("/watchlist", async (c) => {
   if (!siteEnabled(c.env)) return c.notFound();
-  const form = await readAddForm(c);
+  // A post from another site is refused before its body is read.
+  const form: FormRead = fromAnotherSite(c) ? { ok: false, status: 403, error: "cross_site" } : await readAddForm(c);
   let refusal: Refusal;
   let status: ContentfulStatusCode;
   if (!form.ok) {
@@ -313,12 +329,13 @@ siteRouter.post("/watchlist", async (c) => {
     // takes the admin token, whatever header or field arrives. An empty label is no label (the page's title).
     const result = await addPage(
       c.env,
-      c.executionCtx,
+      { waitUntil: (work) => c.executionCtx.waitUntil(work) },
       { url: form.url, label: form.label.trim() === "" ? undefined : form.label },
-      { admin: false, ipHash: await visitorHash(c) },
+      { admin: false, ipHash: () => visitorHash(c) },
     );
-    // Task 3's page view takes over: the baseline, then the screenshot, with its pending copy and refresh.
-    if (result.ok) return c.redirect(`/pages/${encodeURIComponent(result.page.id)}`, 303);
+    // Task 3's page view takes over: the baseline, then the screenshot, with its pending copy and refresh. The
+    // fragment is the version card's: without one, the browser would keep the form's #add.
+    if (result.ok) return c.redirect(`/pages/${encodeURIComponent(result.page.id)}#version`, 303);
     refusal = result;
     status = result.status;
   }

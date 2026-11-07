@@ -105,7 +105,7 @@ export async function discover(env: Env, rawDomain: unknown, caller: AddCaller, 
   if (caller.admin) return lookup(env, domain, known);
 
   const db = env.DB;
-  const key = "discover:" + caller.ipHash;
+  const key = "discover:" + (await caller.ipHash());
   if (!(await claimPublicAdd(db, key, DISCOVER_PER_IP_PER_DAY))) {
     return { ok: false, status: 429, error: "daily_limit", reason: "Ten discover lookups per day per visitor" };
   }
@@ -127,7 +127,7 @@ export async function discover(env: Env, rawDomain: unknown, caller: AddCaller, 
 discoverRouter.post("/", async (c) => {
   const body = await readBody(c);
   if (!body) return c.json({ error: "invalid_body" }, 400);
-  const answer = await discover(c.env, body.domain, { admin: isAdmin(c), ipHash: await visitorHash(c) });
+  const answer = await discover(c.env, body.domain, { admin: isAdmin(c), ipHash: () => visitorHash(c) });
   if (!answer.ok) {
     return c.json(answer.reason === undefined ? { error: answer.error } : { error: answer.error, reason: answer.reason }, answer.status);
   }

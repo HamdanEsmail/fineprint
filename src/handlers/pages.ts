@@ -7,7 +7,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { adminOnly, isAdmin } from "../auth";
-import { captureVersion, needsFacts } from "../capture";
+import { captureVersion, needsFacts, spendPaused } from "../capture";
 import { MAX_MONITORS, MAX_URL_LENGTH, PUBLIC_ADDS_PER_IP_PER_DAY, PUBLIC_SLOTS, PUBLIC_TTL_DAYS } from "../core/limits";
 import { hashText, normalize } from "../core/normalize";
 import { cronForIndex, PURPOSE } from "../core/schedule";
@@ -197,13 +197,16 @@ const isUniqueViolation = (err: unknown): boolean => err instanceof Error && /UN
 
 // --- Adding a page: POST /api/pages and the site's POST /watchlist ----------
 
-/** Who is adding: the admin (no public slot, no daily limit) or a public visitor, counted by `ipHash` (visitorHash). */
-export type AddCaller = { admin: boolean; ipHash: string };
+/**
+ * Who is adding: the admin (no public slot, no daily limit) or a public visitor, counted by the key `ipHash`
+ * gives (visitorHash). It is asked for only on a public caller's path, once the checks before it have passed.
+ */
+export type AddCaller = { admin: boolean; ipHash: () => Promise<string> };
 
 /** What an add was sent, every field as it arrived: addPage checks them, so both routes refuse the same things alike. */
 export type AddInput = { url?: unknown; label?: unknown; kind?: unknown; ignore_patterns?: unknown };
 
-/** What an add needs of the request's execution context: somewhere to run the baseline's capture after the answer. */
+/** What an add needs of the request's execution context: somewhere to run the baseline's capture after the answer, used only then. */
 export type AddContext = Pick<ExecutionContext, "waitUntil">;
 
 /**
@@ -212,7 +215,7 @@ export type AddContext = Pick<ExecutionContext, "waitUntil">;
  */
 export type AddRefusal = {
   ok: false;
-  status: 400 | 401 | 409 | 422 | 429 | 500 | 502;
+  status: 400 | 401 | 409 | 422 | 429 | 500 | 502 | 503;
   error: string;
   reason?: string;
   existing_page_id?: string | null;
@@ -308,16 +311,23 @@ pagesRouter.get("/:id", async (c) => {
 pagesRouter.post("/", async (c) => {
   const body = await readBody(c);
   if (!body) return c.json({ error: "invalid_body" }, 400);
-  const result = await addPage(c.env, c.executionCtx, body, { admin: isAdmin(c), ipHash: await visitorHash(c) });
+  // The execution context and the visitor key are read only where the add needs them (a capture to schedule,
+  // a public caller's daily add), so a refusal before that answers whatever the request lacks.
+  const result = await addPage(
+    c.env,
+    { waitUntil: (work) => c.executionCtx.waitUntil(work) },
+    body,
+    { admin: isAdmin(c), ipHash: () => visitorHash(c) },
+  );
   if (!result.ok) return c.json(refusalJson(result), result.status);
   return c.json({ page: result.page, baseline_version_id: result.baseline_version_id }, 201);
 });
 
 /**
  * Adds a page (spec 4.1), for `POST /api/pages` and the site's `POST /watchlist` alike: the checks that cost
- * nothing (the url, the fields, duplicates, the caps, a public visitor's one add a day) before the first
- * TinyFish call, then TinyFetch validation, the Monitor and the page. A public visitor's daily add is taken
- * before TinyFetch and given back unless a page was created, whichever way the rest ends.
+ * nothing (the url, the fields, duplicates, the caps, the spend pause, a public visitor's one add a day) before
+ * the first TinyFish call, then TinyFetch validation, the Monitor and the page. A public visitor's daily add is
+ * taken before TinyFetch and given back unless a page was created, whichever way the rest ends.
  */
 export async function addPage(env: Env, ctx: AddContext, input: AddInput, caller: AddCaller): Promise<AddResult> {
   const db = env.DB;
@@ -331,7 +341,7 @@ export async function addPage(env: Env, ctx: AddContext, input: AddInput, caller
   const fields = readFields(input);
   if ("error" in fields) return refuse(400, fields.error);
 
-  const { admin, ipHash } = caller;
+  const { admin } = caller;
   // Ignore patterns are regexes that run inside the Worker on every webhook for the page.
   if (!admin && fields.ignorePatterns !== undefined && fields.ignorePatterns.length > 0) {
     return refuse(401, "admin_required", "Only the admin can set ignore_patterns");
@@ -345,11 +355,16 @@ export async function addPage(env: Env, ctx: AddContext, input: AddInput, caller
   const full = await capHit(db, admin, held, 1);
   if (full) return capRefusal(db, full);
 
+  // At the spend pause nothing that costs money starts, and a Monitor bills its baseline and every check after
+  // it, the admin's as much as a visitor's. No daily add has been taken yet, so there is nothing to give back.
+  if (await spendPaused(db)) return refuse(503, "spend_paused", "Recording is paused at the budget line");
+
   if (admin) return createPage(env, ctx, { url, fields, admin, held });
 
   // A public visitor gets one add a day. The plain check answers the common case without a
   // write; the claim is the one that holds when several adds arrive at once (it is a single
   // statement, so only one of them can take the last add).
+  const ipHash = await caller.ipHash();
   const dailyLimit = refuse(429, "daily_limit", "One public page per day per visitor");
   if ((await publicAddsToday(db, ipHash)) >= PUBLIC_ADDS_PER_IP_PER_DAY) return dailyLimit;
   if (!(await claimPublicAdd(db, ipHash, PUBLIC_ADDS_PER_IP_PER_DAY))) return dailyLimit;

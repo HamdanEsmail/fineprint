@@ -54,7 +54,10 @@ const BY_REASON: Record<string, string> = {
   fetch_failed: "Fineprint could not reach its page reader just now. Nothing was added. Try again in a minute.",
 };
 
-/** Words for the add's error codes (and the form's own two), when the reason has none. */
+/** What the add form says while recording is paused at the budget line: as the slots line, and as a refusal. */
+const PAUSED_LINE = "Recording is paused at the budget line, so no new page can be added until it lifts.";
+
+/** Words for the add's error codes (and the form's own three), when the reason has none. */
 const BY_ERROR: Record<string, string> = {
   daily_limit: "One public page per visitor per day. Come back tomorrow.",
   already_watched: "Fineprint already watches that page.",
@@ -63,6 +66,8 @@ const BY_ERROR: Record<string, string> = {
   watchlist_full: `Fineprint already watches its maximum of ${MAX_MONITORS} pages.`,
   monitor_create_failed: "TinyFish could not start watching that page. Nothing was added. Try again later.",
   internal_error: "Something went wrong while adding the page. Nothing was added. Try again in a minute.",
+  spend_paused: PAUSED_LINE,
+  cross_site: "That form was sent from another site, so it was not read. Use the form on this page.",
   invalid_body: "That request was not a form Fineprint reads. Use the form on this page.",
   form_too_large: "That form is larger than Fineprint reads.",
 };
@@ -245,15 +250,22 @@ function AddPage(props: { stats: Stats; pages: PageSummary[]; form: WatchlistPro
   const free = Math.max(total - used, 0);
   const held = stats.monitors.active + stats.monitors.paused + stats.monitors.failed;
   const listFull = held >= MAX_MONITORS;
-  const closed = free === 0 || listFull;
-  const slotLine =
-    free === 0
+  const paused = stats.spend_paused;
+  const closed = free === 0 || listFull || paused;
+  const slotLine = paused
+    ? PAUSED_LINE
+    : free === 0
       ? slotsFullLine(next_free_at, props.nowMs)
       : listFull
         ? `Fineprint already watches its maximum of ${MAX_MONITORS} pages, so none can be added now.`
         : `${free} of ${total} public slots are free.`;
   // A refusal that says the same as the slots line takes its place.
-  const showSlotLine = !(refusal !== null && (refusal.error === "public_slots_full" || (listFull && refusal.error === "watchlist_full")));
+  const sameAsSlotLine =
+    refusal !== null &&
+    ((paused && refusal.error === "spend_paused") ||
+      (!paused && refusal.error === "public_slots_full") ||
+      (!paused && free > 0 && listFull && refusal.error === "watchlist_full"));
+  const showSlotLine = !sameAsSlotLine;
   const field = refusal === null ? null : refusedField(refusal.error);
   const describe = (name: "url" | "label", own?: string): string | undefined => {
     const ids = [field === name ? "add-refusal" : null, own ?? null].filter((x) => x !== null);
@@ -292,14 +304,14 @@ function AddPage(props: { stats: Stats; pages: PageSummary[]; form: WatchlistPro
           maxlength={MAX_LABEL_LENGTH}
           placeholder="Example pricing"
           aria-invalid={field === "label" ? "true" : undefined}
-          aria-describedby={describe("label", "label-hint")}
+          aria-describedby={describe("label", closed ? "label-hint add-slots" : "label-hint")}
           disabled={closed}
         />
         <p class="field-hint" id="label-hint">
           Left empty, the page's own title is used.
         </p>
       </div>
-      <button class="btn" type="submit" disabled={closed}>
+      <button class="btn" type="submit" aria-describedby={closed ? "add-slots" : undefined} disabled={closed}>
         Start watching
       </button>
     </form>

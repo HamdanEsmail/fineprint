@@ -184,8 +184,12 @@ function PageHead(props: { ctx: Ctx }) {
         </li>
       </ul>
       <p class="page-tally">{`${plural(versions.length, "version")} · ${plural(noiseCount, "noise event")} suppressed`}</p>
-      {page.status === "retired" ? <p class="state-line">No longer watched. Its history is kept.</p> : null}
-      {page.status === "expired" ? <p class="state-line">Watched for 7 days as a public page. Its history is kept.</p> : null}
+      {/* The 7-day line is a public page's; any other page no longer watched (retired, or taken off the list) reads as one. */}
+      {page.status === "expired" && page.added_by === "public" ? (
+        <p class="state-line">Watched for 7 days as a public page. Its history is kept.</p>
+      ) : gone ? (
+        <p class="state-line">No longer watched. Its history is kept.</p>
+      ) : null}
       {!gone && page.pending_hash !== null ? (
         <p class="state-line">A suspect read is waiting for a second check. Nothing is recorded until two reads agree.</p>
       ) : null}

@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { safeEqual } from "../src/auth";
 import { captureDeps } from "../src/capture";
-import { MAX_MONITORS, MAX_URL_LENGTH, PUBLIC_SLOTS, PUBLIC_TTL_DAYS } from "../src/core/limits";
+import { MAX_MONITORS, MAX_URL_LENGTH, PUBLIC_SLOTS, PUBLIC_TTL_DAYS, SPEND_PAUSE_USD } from "../src/core/limits";
 import { hashText, normalize } from "../src/core/normalize";
 import { PURPOSE } from "../src/core/schedule";
 import { countMonitors, getPage, getPageByUrl, insertPage, type NewPage } from "../src/db/pages";
@@ -693,6 +693,48 @@ describe("POST /api/pages as a public caller", () => {
 
     const empty = await addPage({ url: PRICING_URL, ignore_patterns: [] }, { "CF-Connecting-IP": "203.0.113.30" });
     expect(empty.status).toBe(201);
+  });
+});
+
+describe("POST /api/pages at the spend pause", () => {
+  const spend = (amount: number) =>
+    env.DB.prepare("INSERT INTO spend (id, kind, amount_usd, ref, at) VALUES (?, 'monitor_check', ?, 'x', ?)")
+      .bind(crypto.randomUUID(), amount, new Date().toISOString())
+      .run();
+
+  it("refuses every add with 503 spend_paused once total spend reaches the pause, the admin's too, before any TinyFish call", async () => {
+    mockTinyFish();
+    await spend(SPEND_PAUSE_USD);
+    const ip = "203.0.113.120";
+    for (const headers of [ADMIN, { "CF-Connecting-IP": ip }]) {
+      const res = await addPage({ url: PRICING_URL }, headers);
+      expect(res.status).toBe(503);
+      expect(await json(res)).toEqual({ error: "spend_paused", reason: "Recording is paused at the budget line" });
+    }
+    expect(fetchMock.calls).toEqual([]);
+    expect(agentCalls()).toEqual([]);
+    expect(await count("pages")).toBe(0);
+    // No daily add was taken.
+    expect(await publicAddsToday(env.DB, await hashText(ip + env.WEBHOOK_SECRET))).toBe(0);
+  });
+
+  it("adds as before just under the pause", async () => {
+    mockTinyFish();
+    await spend(SPEND_PAUSE_USD - 0.01);
+    expect((await addPage({ url: PRICING_URL }, ADMIN)).status).toBe(201);
+  });
+});
+
+describe("POST /api/pages without an execution context", () => {
+  it("answers a refusal as before: the context is read only to schedule a capture", async () => {
+    const request = new Request("https://fineprint.test/api/pages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "not a url" }),
+    });
+    const res = await worker.fetch(request, env, undefined as unknown as ExecutionContext);
+    expect(res.status).toBe(400);
+    expect(await json(res)).toEqual({ error: "invalid_url" });
   });
 });
 
