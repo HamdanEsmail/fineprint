@@ -421,7 +421,7 @@ describe("adding a page from the watchlist", () => {
     mockSearch();
     await pauseSpend();
     const html = await get("/watchlist");
-    const line = "Recording is paused at the budget line, so no new page can be added until it lifts.";
+    const line = "Spending is paused at the budget line, so no new page can be added until it lifts.";
     expect(html).toContain(line);
     expect(html).toMatch(/<input[^>]+name="url"[^>]+disabled/);
     expect(html).toMatch(/<input[^>]+name="label"[^>]+aria-describedby="label-hint add-slots"[^>]+disabled/);

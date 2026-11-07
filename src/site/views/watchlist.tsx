@@ -55,7 +55,7 @@ const BY_REASON: Record<string, string> = {
 };
 
 /** What the add form says while recording is paused at the budget line: as the slots line, and as a refusal. */
-const PAUSED_LINE = "Recording is paused at the budget line, so no new page can be added until it lifts.";
+const PAUSED_LINE = "Spending is paused at the budget line, so no new page can be added until it lifts.";
 
 /** Words for the add's error codes (and the form's own three), when the reason has none. */
 const BY_ERROR: Record<string, string> = {

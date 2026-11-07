@@ -357,7 +357,7 @@ export async function addPage(env: Env, ctx: AddContext, input: AddInput, caller
 
   // At the spend pause nothing that costs money starts, and a Monitor bills its baseline and every check after
   // it, the admin's as much as a visitor's. No daily add has been taken yet, so there is nothing to give back.
-  if (await spendPaused(db)) return refuse(503, "spend_paused", "Recording is paused at the budget line");
+  if (await spendPaused(db)) return refuse(503, "spend_paused", "Spending is paused at the budget line");
 
   if (admin) return createPage(env, ctx, { url, fields, admin, held });
 

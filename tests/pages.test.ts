@@ -709,7 +709,7 @@ describe("POST /api/pages at the spend pause", () => {
     for (const headers of [ADMIN, { "CF-Connecting-IP": ip }]) {
       const res = await addPage({ url: PRICING_URL }, headers);
       expect(res.status).toBe(503);
-      expect(await json(res)).toEqual({ error: "spend_paused", reason: "Recording is paused at the budget line" });
+      expect(await json(res)).toEqual({ error: "spend_paused", reason: "Spending is paused at the budget line" });
     }
     expect(fetchMock.calls).toEqual([]);
     expect(agentCalls()).toEqual([]);
