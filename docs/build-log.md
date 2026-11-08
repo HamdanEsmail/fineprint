@@ -236,7 +236,8 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 
 ## Open before submission (17 Nov)
 
-1. The submission phase: README, hero image, demo and posts.
+1. The demo video, recorded from `docs/demo-script.md`, and the two posts in `docs/posts.md`.
+2. Repository history prepared for publication, then the repository made public on 16 Nov 2026.
 
 ## Live TinyFish calls during the build
 

@@ -29,7 +29,7 @@ Have a look: https://fineprint.hamdanesmail12-7a9.workers.dev
 The repository link goes in a reply, posted straight after, so the post keeps one link and its card:
 
 ```text
-The code is public now: [REPO LINK: https://github.com/HamdanEsmail/fineprint, added after the flip]
+The code is public now: [REPO LINK: https://github.com/HamdanEsmail/fineprint, added once the repository is public]
 ```
 
 **The image.** The card under the link shows `public/assets/social.png` (the Anthropic pricing catch of 7 Nov, before and after) when the live home carries the `og:image` and `twitter:card` tags. On 8 Nov 2026 the tags are in the code but not yet deployed: the live home has `og:title` and `og:description` only. Before posting, paste the link into the X composer and wait for the card: if it shows the image, post as it is; if not, attach `public/assets/social.png` to the post by hand.
@@ -50,7 +50,7 @@ One catch: on 7 Nov, Anthropic's pricing page added Claude Code to the Pro plan'
 So far: {pages} pages, {changes} real changes in {days} days, each with a screenshot.
 
 Have a look: https://fineprint.hamdanesmail12-7a9.workers.dev
-The code: [REPO LINK: https://github.com/HamdanEsmail/fineprint, added after the flip]
+The code: [REPO LINK: https://github.com/HamdanEsmail/fineprint, added once the repository is public]
 ```
 
 LinkedIn builds its preview from the first link, the live site.
