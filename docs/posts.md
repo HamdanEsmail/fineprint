@@ -18,10 +18,10 @@ It prints one line such as `pages=21 changes=13 days=5` (the reading on 8 Nov 20
 
 ## X
 
-Under 280 characters including the link, which X counts as 23. Counted with the 8 Nov figures filled (21, 13, 5): **271**.
+Under 280 characters including the link, which X counts as 23. Counted with the 8 Nov figures filled (21, 13, 5): **273**.
 
 ```text
-For the TinyFish Time Machine bounty I built Fineprint: a TinyFish Monitor reads each of {pages} pages of small print, and every real change is kept with a screenshot. {changes} caught in {days} days, one of them on Anthropic's pricing page on 7 Nov.
+For the TinyFish Time Machine bounty I built Fineprint: a TinyFish Monitor watched each of {pages} pages of small print, and every real change is kept with a screenshot. {changes} caught in {days} days, one of them on Anthropic's pricing page on 7 Nov.
 
 Have a look: https://fineprint.hamdanesmail12-7a9.workers.dev
 ```
@@ -36,18 +36,18 @@ The code is public now: https://github.com/HamdanEsmail/fineprint
 
 ## LinkedIn
 
-Under 1,300 characters. Counted with the 8 Nov figures filled (21, 13, 5) and the repository URL in its slot: **1,273**.
+Under 1,300 characters. Counted with the 8 Nov figures filled (21, 13, 5) and the repository URL in its slot: **1,281**.
 
 ```text
 For the TinyFish Time Machine bounty I built Fineprint, a dated record of the web's small print.
 
 It watches the pages people agree to without reading: pricing, fees, terms, privacy policies, visa and baggage rules. When one really changes, Fineprint keeps the date, the text, a full-page screenshot and the HTML source, so anyone can see what a page said on any day and which words changed.
 
-TinyFish Monitor does the core work: each page has its own Monitor, which reads it twice a day, and every version comes from a Monitor run. Without the Monitors, nothing new is recorded. Browser takes the screenshots, Fetch keeps the sources, Agent reads price tables and Search finds a site's small print.
+TinyFish Monitor does the core work: each watched page has its own Monitor, which reads it twice a day, and every version comes from a Monitor run. Without the Monitors, nothing new is recorded. Browser takes the screenshots, Fetch keeps the sources, Agent reads price tables and Search finds a site's small print.
 
 One catch: on 7 Nov, Anthropic's pricing page added Claude Code to the Pro plan's list and removed the "Claude Code included" lines under Pro, Max and Ultra. Both versions are kept, the changed words marked. Noise like timestamps never becomes a version, and a change that only rearranges the same words and prices, like GitHub's pricing table on 5 Nov, is kept but labelled layout-only.
 
-So far: {pages} pages, {changes} real changes in {days} days, each with a screenshot.
+In {days} days: {pages} pages watched, {changes} real changes, each with a screenshot.
 
 Have a look: https://fineprint.hamdanesmail12-7a9.workers.dev
 The code: https://github.com/HamdanEsmail/fineprint

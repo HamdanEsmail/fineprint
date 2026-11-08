@@ -31,7 +31,7 @@ Figures below are `/api/stats` on 8 Nov 2026, 16:47 UTC, unless a line gives ano
 | Works for any page you add | [The watchlist's form](https://fineprint.hamdanesmail12-7a9.workers.dev/watchlist#add) and `POST /api/pages`; a page that cannot be read is refused with the reason | `public_slots` | 1 of 4 public slots used: Stripe pricing, added through the site on 7 Nov 2026, 14:19 UTC, watched until 14 Nov 2026, 14:20 UTC |
 | Reusable output | [`/api/export.json`](https://fineprint.hamdanesmail12-7a9.workers.dev/api/export.json) and the endpoints on [About](https://fineprint.hamdanesmail12-7a9.workers.dev/about#data); open to any origin (CORS) | None | The export holds every page and every version, with absolute screenshot and source URLs |
 
-When Stripe pricing expires on 14 Nov 2026 at 14:20 UTC, `monitors.active` reads 20 (the curated pages) unless another page has been added; the floor of 20 holds either way.
+**Recording paused on 8 Nov 2026 at 17:30 UTC.** After the entry was submitted, the 20 curated Monitors were paused at TinyFish and their pages marked paused, to hold the TinyFish spend at $3.83; nothing was deleted, and every version, screenshot, source, diff and check log stays and is shown. A paused Monitor is not resumed (a resumed Monitor cannot be relied on to run again, which the webhook rehearsal showed). Stripe pricing, the one public page, stays active until it expires on 14 Nov 2026, and any page added through the watchlist starts a new Monitor of its own for seven days, so the recorder itself is unchanged. `/api/stats` shows it as `monitors.active` 1 and `monitors.paused` 20. The figures in the table above are from 16:47 UTC the same day, before the pause.
 
 ## TinyFish endpoints
 
