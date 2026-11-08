@@ -6,7 +6,7 @@ import type { Child } from "hono/jsx";
 import { raw } from "hono/html";
 import type { Stats } from "../readModel";
 import { Notice, Stamp } from "./components";
-import { spendMeter, stampFor } from "./format";
+import { FACTS_PAUSED_LINE, SPEND_PAUSED_LINE, spendMeter, stampFor } from "./format";
 
 type Current = "home" | "watchlist" | "about" | null;
 
@@ -80,7 +80,7 @@ export function Layout(props: {
             Skip to the content
           </a>
           {stats?.spend_paused ? (
-            <Notice>Spending is paused at the budget line. Changes the Monitors report are still recorded, without screenshots or price tables.</Notice>
+            <Notice>{SPEND_PAUSED_LINE}</Notice>
           ) : null}
           <header class="top">
             <div class="wrap">
@@ -105,6 +105,7 @@ export function Layout(props: {
           <footer>
             <div class="wrap">
               {stats ? <p class="meterline">{spendMeter(stats)}</p> : null}
+              {stats?.facts_paused && !stats.spend_paused ? <p class="meterline">{FACTS_PAUSED_LINE}</p> : null}
               <ul>
                 <li>
                   <a href="/api/export.json">Download everything as JSON</a>

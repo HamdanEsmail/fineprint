@@ -259,7 +259,7 @@ describe("home", () => {
     await db.prepare("INSERT INTO spend (id, kind, amount_usd, ref, at) VALUES ('s', 'monitor_check', 8, 'x', ?)").bind(ago(HOUR)).run();
     const html = await get("/");
     expect(html).toContain(
-      "Spending is paused at the budget line. Changes the Monitors report are still recorded, without screenshots or price tables.",
+      "Spending is paused at the budget line. Changes the Monitors report are still recorded, without screenshots, stored sources or price tables.",
     );
     expect(html).toMatch(/<span class="stamp"><span class="live" aria-hidden="true"><\/span>RECORDING<\/span>/);
     expect(html).not.toContain("PAUSED");

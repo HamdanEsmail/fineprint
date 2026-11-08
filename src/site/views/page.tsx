@@ -20,6 +20,7 @@ import {
 } from "../components";
 import {
   cronToWords,
+  FACTS_PAUSED_COPY,
   formatUtc,
   noiseReasonWords,
   ownPath,
@@ -398,16 +399,16 @@ function Shot(props: { ctx: Ctx; v: VersionItem; refreshing: boolean }) {
   );
 }
 
-function Facts(props: { v: VersionItem; paused: boolean }) {
+function Facts(props: { v: VersionItem }) {
   const { v } = props;
   if (v.facts_status === "not_needed") return null;
   let body;
   if (v.facts_status === "ok" && v.facts !== null) {
     body = v.facts.length > 0 ? <FactsTable facts={v.facts} /> : <p class="facts-note">No prices were found on this version.</p>;
+  } else if (v.facts_status === "paused") {
+    body = <p class="facts-note">{FACTS_PAUSED_COPY}</p>;
   } else if (v.facts_status === "pending") {
-    body = (
-      <p class="facts-note">{props.paused ? "Price tables are paused at the budget line. Changes are still recorded." : "Reading prices…"}</p>
-    );
+    body = <p class="facts-note">Reading prices…</p>;
   } else {
     body = <p class="facts-note">Price table unavailable for this version.</p>;
   }
@@ -419,7 +420,7 @@ function Facts(props: { v: VersionItem; paused: boolean }) {
   );
 }
 
-function VersionCard(props: { ctx: Ctx; v: VersionItem; asOf: AsOf | null; text: string | null; paused: boolean; refreshing: boolean }) {
+function VersionCard(props: { ctx: Ctx; v: VersionItem; asOf: AsOf | null; text: string | null; refreshing: boolean }) {
   const { ctx, v, asOf, text } = props;
   const { versions, page } = ctx.detail;
   const index = versions.findIndex((x) => x.id === v.id);
@@ -450,7 +451,7 @@ function VersionCard(props: { ctx: Ctx; v: VersionItem; asOf: AsOf | null; text:
       {layoutOnly ? <p class="layout-note">{LAYOUT_ONLY_LINE}</p> : null}
       {v.summary_source === null ? null : <p class="origin">{SUMMARY_ORIGIN[v.summary_source]}</p>}
       <Shot ctx={ctx} v={v} refreshing={props.refreshing} />
-      <Facts v={v} paused={props.paused} />
+      <Facts v={v} />
       <p class="actions">
         {previous === undefined ? null : (
           <a class="btn" href={`${ctx.pageHref}/compare?from=${encodeURIComponent(previous.id)}&to=${encodeURIComponent(v.id)}`}>
@@ -629,7 +630,7 @@ export function PageView(props: PageViewProps) {
             <section class="history" aria-label="History">
               <Timeline ctx={ctx} selected={selected} asOf={asOf} nowMs={nowMs} />
               <div class="history-grid">
-                <VersionCard ctx={ctx} v={selected} asOf={asOf} text={text} paused={stats.facts_paused} refreshing={refreshing} />
+                <VersionCard ctx={ctx} v={selected} asOf={asOf} text={text} refreshing={refreshing} />
                 <VersionList ctx={ctx} selected={selected} />
               </div>
             </section>

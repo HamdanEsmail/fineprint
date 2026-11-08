@@ -46,11 +46,20 @@ export const SCREENSHOT_MAX_HEIGHT = 8000;
 /** When total spend reaches this many US dollars, the Worker pauses everything that costs money. */
 export const SPEND_PAUSE_USD = 8;
 /**
- * From this much total spend on, no facts run is started (versions stay queued for them); overdue
+ * From this much total spend on, no facts run is started (a version waiting for one has facts_status "paused"
+ * and stays eligible, src/capture.ts); overdue
  * pulls and screenshot and source captures go on until SPEND_PAUSE_USD. Facts runs are the one cost
  * a page's changes multiply, so they stop first and cannot use up the budget that keeps checks coming.
  */
 export const FACTS_PAUSE_USD = 6;
+
+/**
+ * The hourly job moves at most this many queued versions a tick to facts_status "paused" once the price-table
+ * pause holds (and back to "pending" if the line is raised above the total), oldest first, and drops the stored
+ * screens of their pages (one R2 list per page and one delete). The queue is serial, so at the pause it holds a
+ * handful of versions at most; the rest move on later ticks.
+ */
+export const FACTS_HOLD_PER_TICK = 10;
 
 /**
  * The partial-render guard (src/core/gate.ts). A changed read is suspect, and held for a confirm read

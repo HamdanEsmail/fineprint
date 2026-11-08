@@ -207,6 +207,8 @@ export type Stats = {
   noise_suppressed: number;
   /** Versions whose screenshot and source are stored but whose price facts could not be taken. */
   facts_unavailable: number;
+  /** Versions whose price-table run cannot start because spending on price tables is paused (`facts_status` paused). */
+  facts_paused_versions: number;
   /** Versions with a full-page screenshot stored (TinyFish Browser). */
   versions_with_screenshot: number;
   /** Versions with their HTML source stored (TinyFish Fetch). */
@@ -254,6 +256,7 @@ export async function getStats(env: Env): Promise<Stats> {
            (SELECT MIN(created_at) FROM pages) AS recording_since,
            (SELECT COUNT(*) FROM runs WHERE noise_suppressed = 1) AS noise_suppressed,
            (SELECT COUNT(*) FROM versions WHERE facts_status = 'unavailable') AS facts_unavailable,
+           (SELECT COUNT(*) FROM versions WHERE facts_status = 'paused') AS facts_paused_versions,
            (SELECT COUNT(*) FROM versions WHERE screenshot_key IS NOT NULL) AS versions_with_screenshot,
            (SELECT COUNT(*) FROM versions WHERE html_key IS NOT NULL) AS versions_with_source,
            (SELECT COUNT(*) FROM versions WHERE facts_status = 'ok') AS versions_with_facts,
@@ -276,6 +279,7 @@ export async function getStats(env: Env): Promise<Stats> {
         recording_since: string | null;
         noise_suppressed: number;
         facts_unavailable: number;
+        facts_paused_versions: number;
         versions_with_screenshot: number;
         versions_with_source: number;
         versions_with_facts: number;
@@ -309,6 +313,7 @@ export async function getStats(env: Env): Promise<Stats> {
     versions: totals?.versions ?? 0,
     noise_suppressed: totals?.noise_suppressed ?? 0,
     facts_unavailable: totals?.facts_unavailable ?? 0,
+    facts_paused_versions: totals?.facts_paused_versions ?? 0,
     versions_with_screenshot: totals?.versions_with_screenshot ?? 0,
     versions_with_source: totals?.versions_with_source ?? 0,
     versions_with_facts: totals?.versions_with_facts ?? 0,

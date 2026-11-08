@@ -41,7 +41,7 @@ Task 15 of the recorder work is committed on `main` and deployed (it changes `sr
 |---|---|
 | Facts not read yet | `Reading prices…` |
 | Facts could not be read | `Price table unavailable for this version.` |
-| Facts paused by the budget | `Price tables are paused at the budget line. Changes are still recorded.` |
+| Facts paused by the budget (`facts_status` paused) | `Price table not read: spending on price tables is paused at the $6 line. The change itself is recorded, with its screenshot and diff.` |
 | Screenshot not taken yet | `Taking the screenshot…` |
 | Screenshot failed | `Screenshot unavailable.` followed by links `Stored source` (when there is one) and `Live page` |
 | Suspect read waiting (page has `pending_hash`) | `A suspect read is waiting for a second check. Nothing is recorded until two reads agree.` |
@@ -52,7 +52,7 @@ Task 15 of the recorder work is committed on `main` and deployed (it changes `sr
 | Layout-only change | tag `Layout only`, line `Same words and figures, different structure.` |
 | Retired pages have changes | under the feed: `{n} page was retired for unreliable reads. Its history is kept.` (plural: `{n} pages were retired for unreliable reads. Their history is kept.`), linking to `/watchlist#retired` |
 | No changes yet | `No changes recorded yet. {n} pages are checked twice a day.` |
-| Spend pause reached | banner `Spending is paused at the budget line. Changes the Monitors report are still recorded, without screenshots or price tables.`; the stamp keeps reading `RECORDING` while any Monitor is active |
+| Spend pause reached | banner `Spending is paused at the budget line. Changes the Monitors report are still recorded, without screenshots, stored sources or price tables.`; the stamp keeps reading `RECORDING` while any Monitor is active |
 | No Monitor active | stamp reads `PAUSED` (it follows the Monitors, not the spend) |
 | Unknown page, version or route | title `No such page in the ledger.` with a link home, status 404 |
 

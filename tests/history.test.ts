@@ -871,6 +871,7 @@ describe("GET /api/stats", () => {
       versions: 3,
       noise_suppressed: NOISE_RUNS,
       facts_unavailable: 0,
+      facts_paused_versions: 0,
       // ver-3's screenshot capture gave up; every version has its source and its facts; no thumbnail was made.
       versions_with_screenshot: 2,
       versions_with_source: 3,
@@ -904,6 +905,7 @@ describe("GET /api/stats", () => {
       versions: 0,
       noise_suppressed: 0,
       facts_unavailable: 0,
+      facts_paused_versions: 0,
       versions_with_screenshot: 0,
       versions_with_source: 0,
       versions_with_facts: 0,

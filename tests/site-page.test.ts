@@ -690,9 +690,16 @@ describe("the version card's honest states", () => {
     expect(terms).not.toContain("Price table");
 
     await db.prepare("INSERT INTO spend (id, kind, amount_usd, ref, at) VALUES ('s', 'monitor_check', 6.5, 'x', ?)").bind(ago(HOUR)).run();
-    const paused = await get("/pages/reading");
-    expect(paused).toContain("Price tables are paused at the budget line. Changes are still recorded.");
-    expect(paused).not.toContain("Reading prices…");
+    // Past the price-table line, a version still queued reads on until the hourly job holds it (tests/facts-paused.test.ts);
+    // a held one says why its price table was not read.
+    expect(await get("/pages/reading")).toContain("Reading prices…");
+    await seedState("held", { facts_status: "paused" });
+    const held = await get("/pages/held");
+    expect(held).toContain(
+      "Price table not read: spending on price tables is paused at the $6 line. The change itself is recorded, with its screenshot and diff.",
+    );
+    expect(held).not.toContain("Reading prices…");
+    expect(held).not.toContain("Price tables are paused at the budget line");
   });
 
   it("says a suspect read is waiting for a second check", async () => {

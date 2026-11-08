@@ -14,8 +14,11 @@
 //   failed          out of attempts with the screenshot or the source still missing
 //
 // facts_status says what became of the price facts: ok (stored), pending (needed, queued or in
-// flight), unavailable (needed and none stored: the attempts were used up, or a run completed with an
-// empty list, which is final for the version) or not_needed.
+// flight), paused (needed, and the run cannot start because spending on price tables is paused at
+// FACTS_PAUSE_USD; the version is queued again if the line is raised), unavailable (needed and none
+// stored: the attempts were used up, or a run completed with an empty list, which is final for the
+// version) or not_needed. A paused version with its screenshot and source stays awaiting_facts: it is
+// still the queue's, so no diff with it is frozen in the cache.
 //
 // One counter, capture_attempts, counts capture attempts and failed facts runs alike;
 // at CAPTURE_MAX_ATTEMPTS a version with a screenshot or source missing is failed, and one with
@@ -63,7 +66,7 @@ export const captureDeps = {
 // --- The status rule ------------------------------------------------------------
 
 type StatusInput = Pick<VersionRow, "screenshot_key" | "html_key" | "facts_json" | "capture_attempts"> &
-  Partial<Pick<VersionRow, "facts_status">>;
+  Partial<Pick<VersionRow, "facts_status" | "agent_run_id">>;
 
 /**
  * Facts that are settled as unavailable for good: once a version's facts_status is `unavailable` (its
@@ -71,6 +74,13 @@ type StatusInput = Pick<VersionRow, "screenshot_key" | "html_key" | "facts_json"
  * facts are stored, and no facts run is started for it again (src/db/versions.ts nextFactsCandidate).
  */
 const factsGivenUp = (v: StatusInput): boolean => v.facts_json === null && v.facts_status === "unavailable";
+
+/**
+ * Facts held at the price-table line: `paused` is written when a version's run cannot start for the pause (its
+ * capture, or the hourly job for versions already queued) and stays until facts are stored, a run holds the
+ * version, or the hourly job queues it again because the line was raised (src/cron.ts). Every other writer keeps it.
+ */
+const factsHeld = (v: StatusInput): boolean => v.facts_json === null && v.facts_status === "paused" && (v.agent_run_id ?? null) === null;
 
 /** The one rule for capture_status, used after every capture and every facts result. */
 export function captureStatusFor(v: StatusInput, needsFacts: boolean): CaptureStatus {
@@ -87,21 +97,26 @@ export function captureStatusFor(v: StatusInput, needsFacts: boolean): CaptureSt
 /**
  * The rule for facts_status, used with captureStatusFor wherever a status is written. Stored facts are
  * `ok`; otherwise `not_needed` when the version needs none; `unavailable` once given up (see
- * factsGivenUp), or once the screenshot and the source are stored and the attempts are used up; `pending`
- * for anything else (a version that failed for want of its screenshot or source never got its facts
- * started, and is not called unavailable).
+ * factsGivenUp), or once the screenshot and the source are stored and the attempts are used up; `paused`
+ * while held at the price-table line (see factsHeld); `pending` for anything else (a version that failed
+ * for want of its screenshot or source never got its facts started, and is not called unavailable).
  */
 export function factsStatusFor(v: StatusInput, needsFacts: boolean): FactsStatus {
   if (v.facts_json !== null) return "ok";
   if (!needsFacts) return "not_needed";
   if (factsGivenUp(v)) return "unavailable";
   const stored = v.screenshot_key !== null && v.html_key !== null;
-  return stored && v.capture_attempts >= CAPTURE_MAX_ATTEMPTS ? "unavailable" : "pending";
+  if (stored && v.capture_attempts >= CAPTURE_MAX_ATTEMPTS) return "unavailable";
+  return factsHeld(v) ? "paused" : "pending";
 }
 
-/** capture_status and facts_status together, from the one state they are both worked out from. */
-function statusPair(v: StatusInput, needsFacts: boolean): { capture_status: CaptureStatus; facts_status: FactsStatus } {
-  return { capture_status: captureStatusFor(v, needsFacts), facts_status: factsStatusFor(v, needsFacts) };
+/**
+ * capture_status and facts_status together, from the one state they are both worked out from. `held` says the
+ * version's facts run cannot start for the price-table pause, which makes it `paused` unless it is settled otherwise.
+ */
+function statusPair(v: StatusInput, needsFacts: boolean, held = false): { capture_status: CaptureStatus; facts_status: FactsStatus } {
+  const input: StatusInput = held ? { ...v, facts_status: "paused" } : v;
+  return { capture_status: captureStatusFor(input, needsFacts), facts_status: factsStatusFor(input, needsFacts) };
 }
 
 /**
@@ -131,9 +146,9 @@ async function loadNeedsFacts(db: D1Database, page: Pick<PageRow, "kind" | "adde
  * settles in turn. Every writer of the status settles after its own write, so a status worked
  * out from an older read (a capture racing a facts result) does not stay.
  */
-async function settleStatus(db: D1Database, v: VersionRow | null, factsNeeded: boolean): Promise<void> {
+async function settleStatus(db: D1Database, v: VersionRow | null, factsNeeded: boolean, held = false): Promise<void> {
   if (v === null) return;
-  const { capture_status: status, facts_status: factsStatus } = statusPair(v, factsNeeded);
+  const { capture_status: status, facts_status: factsStatus } = statusPair(v, factsNeeded, held);
   const error = withExhaustedFacts(v.capture_error, factsStatus);
   if (status !== v.capture_status || error !== v.capture_error || factsStatus !== v.facts_status) {
     await setCaptureStatusIfUnchanged(db, v, status, error, factsStatus);
@@ -215,8 +230,9 @@ export async function spendPaused(db: D1Database): Promise<boolean> {
 }
 
 /**
- * True once total spend has reached FACTS_PAUSE_USD: no facts run starts (the versions stay queued;
- * nothing is failed or counted). Pulls and screenshot and source captures go on until `spendPaused`.
+ * True once total spend has reached FACTS_PAUSE_USD: no facts run starts (a version waiting for one says
+ * facts_status "paused", see factsHeld; nothing is failed or counted). Pulls and screenshot and source
+ * captures go on until `spendPaused`.
  */
 export async function factsPaused(db: D1Database): Promise<boolean> {
   return (await totalSpend(db)) >= FACTS_PAUSE_USD;
@@ -274,21 +290,27 @@ async function capture(env: Env, versionId: string): Promise<void> {
     return;
   }
 
+  // One read of the ledger for both pauses. A version whose facts run cannot start for the price-table pause says
+  // so (facts_status "paused") from the first write below on, before its screenshot is stored, so no screen kept
+  // from then on says its prices are being read. It costs no query or write the capture did not already make.
+  const spend = await totalSpend(db);
+  const held = factsMissing && version.agent_run_id === null && spend >= FACTS_PAUSE_USD && factsStatusFor(version, true) === "pending";
+
   // The spend pause comes before any TinyFish call and uses no attempt.
-  if (await spendPaused(db)) {
-    await updateCapture(db, versionId, { capture_error: "spend_paused" });
+  if (spend >= SPEND_PAUSE_USD) {
+    await updateCapture(db, versionId, { capture_error: "spend_paused", ...(held ? { facts_status: "paused" as const } : {}) });
     return;
   }
 
   // Only facts are outstanding: they are the queue's business, and no attempt is used.
   if (!wantShot && !wantSource) {
-    await settleStatus(db, version, factsNeeded);
+    await settleStatus(db, version, factsNeeded, held);
     if (version.agent_run_id === null) await startNextFacts(env);
     return;
   }
 
   // Counted in SQL, so two captures of one version at once both count.
-  if ((await addCaptureAttempt(db, versionId)) === null) return;
+  if ((await addCaptureAttempt(db, versionId, held ? "paused" : undefined)) === null) return;
 
   // At the same time: waitUntil work is cut about 30 s after the response and a
   // screenshot alone takes about 15 s. Each writes its own column when it is done.

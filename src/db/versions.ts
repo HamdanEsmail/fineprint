@@ -758,9 +758,16 @@ export function getVersionByAgentRunId(db: D1Database, runId: string): Promise<V
 
 /**
  * Adds one capture attempt in SQL (never a read-modify-write, so parallel attempts are all
- * counted) and returns the row as written, or null for an unknown id.
+ * counted) and returns the row as written, or null for an unknown id. `factsStatus`, when given, is
+ * written in the same statement (a capture that finds the price-table pause, src/capture.ts).
  */
-export function addCaptureAttempt(db: D1Database, id: string): Promise<VersionRow | null> {
+export function addCaptureAttempt(db: D1Database, id: string, factsStatus?: FactsStatus): Promise<VersionRow | null> {
+  if (factsStatus !== undefined) {
+    return db
+      .prepare("UPDATE versions SET capture_attempts = capture_attempts + 1, facts_status = ? WHERE id = ? RETURNING *")
+      .bind(factsStatus, id)
+      .first<VersionRow>();
+  }
   return db
     .prepare("UPDATE versions SET capture_attempts = capture_attempts + 1 WHERE id = ? RETURNING *")
     .bind(id)
@@ -885,21 +892,14 @@ export async function inFlightFactsRuns(db: D1Database, olderThanIso: string): P
 export type FactsCandidate = VersionSummary & { url: string };
 
 /**
- * The oldest version (by `captured_at`) that is waiting for a facts run: its page is
- * `pricing` or `fees`, not added by a public visitor (src/capture.ts needsFacts) and not expired or
- * retired, it has no facts and no run, it is not `failed`, its
- * facts are not settled as `unavailable` (a facts run that completed with an empty list is final), it
- * has attempts left, and it is a baseline or its run was not judged irrelevant (a judgment
- * of NULL, or no run at all, counts as relevant). Null when the queue is empty.
+ * A version over alias `v` (with its page `p` and its run `r` joined) whose facts run the queue would start, as
+ * SQL, with `?1` the attempt cap: its page is `pricing` or `fees`, not added by a public visitor (src/capture.ts
+ * needsFacts) and not expired or retired, it has no facts and no run, it is not `failed`, it has attempts left,
+ * and it is a baseline or its run was not judged irrelevant (a judgment of NULL, or no run at all, counts as
+ * relevant). nextFactsCandidate and holdQueuedFacts share it, so the versions held at the price-table line are
+ * exactly the ones the queue would otherwise start.
  */
-export function nextFactsCandidate(
-  db: D1Database,
-  maxAttempts: number = CAPTURE_MAX_ATTEMPTS,
-): Promise<FactsCandidate | null> {
-  return db
-    .prepare(
-      `SELECT ${summaryColumns("v.")}, p.url AS url
-       FROM versions v
+const FACTS_QUEUE_SQL = `FROM versions v
        JOIN pages p ON p.id = v.page_id
        LEFT JOIN runs r ON r.id = v.run_id
        WHERE p.kind IN ('pricing', 'fees')
@@ -908,12 +908,60 @@ export function nextFactsCandidate(
          AND v.facts_json IS NULL
          AND v.agent_run_id IS NULL
          AND v.capture_status != 'failed'
-         AND COALESCE(v.facts_status, '') != 'unavailable'
-         AND v.capture_attempts < ?
-         AND (v.is_baseline = 1 OR r.judgment_relevant IS NULL OR r.judgment_relevant != 0)
+         AND v.capture_attempts < ?1
+         AND (v.is_baseline = 1 OR r.judgment_relevant IS NULL OR r.judgment_relevant != 0)`;
+
+/**
+ * The oldest version (by `captured_at`) that is waiting for a facts run (FACTS_QUEUE_SQL) whose facts are
+ * neither settled as `unavailable` (a facts run that completed with an empty list is final) nor `paused` at the
+ * price-table line. Null when the queue is empty.
+ */
+export function nextFactsCandidate(
+  db: D1Database,
+  maxAttempts: number = CAPTURE_MAX_ATTEMPTS,
+): Promise<FactsCandidate | null> {
+  return db
+    .prepare(
+      `SELECT ${summaryColumns("v.")}, p.url AS url
+       ${FACTS_QUEUE_SQL}
+         AND COALESCE(v.facts_status, '') NOT IN ('unavailable', 'paused')
        ORDER BY v.captured_at, v.rowid
        LIMIT 1`,
     )
     .bind(maxAttempts)
     .first<FactsCandidate>();
+}
+
+/**
+ * At the price-table line: moves the oldest `limit` versions the queue would start (FACTS_QUEUE_SQL) whose
+ * facts are `pending` to `paused`, in one statement, and returns their page ids (one per version moved). A
+ * version with a run in flight is never moved: it keeps its run.
+ */
+export async function holdQueuedFacts(db: D1Database, limit: number, maxAttempts: number = CAPTURE_MAX_ATTEMPTS): Promise<string[]> {
+  const { results } = await db
+    .prepare(
+      `UPDATE versions SET facts_status = 'paused'
+       WHERE agent_run_id IS NULL AND facts_json IS NULL AND id IN (
+         SELECT v.id ${FACTS_QUEUE_SQL}
+           AND COALESCE(v.facts_status, 'pending') = 'pending'
+         ORDER BY v.captured_at, v.rowid
+         LIMIT ?2)
+       RETURNING page_id`,
+    )
+    .bind(maxAttempts, Math.max(0, Math.trunc(limit)) || 0)
+    .all<{ page_id: string }>();
+  return results.map((r) => r.page_id);
+}
+
+/** Below the price-table line (it was raised): moves the oldest `limit` paused versions back to `pending`, and returns their page ids. */
+export async function releaseHeldFacts(db: D1Database, limit: number): Promise<string[]> {
+  const { results } = await db
+    .prepare(
+      `UPDATE versions SET facts_status = 'pending'
+       WHERE id IN (SELECT id FROM versions WHERE facts_status = 'paused' ORDER BY captured_at, rowid LIMIT ?)
+       RETURNING page_id`,
+    )
+    .bind(Math.max(0, Math.trunc(limit)) || 0)
+    .all<{ page_id: string }>();
+  return results.map((r) => r.page_id);
 }

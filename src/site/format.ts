@@ -69,6 +69,22 @@ export function liveParts(s: Stats): string[] {
   ];
 }
 
+/**
+ * Where a version's price table would be, when its run cannot start because spending on price tables is paused
+ * (facts_status "paused"): the page view's version card and the compare's prices section.
+ */
+export const FACTS_PAUSED_COPY = `Price table not read: spending on price tables is paused at the $${FACTS_PAUSE_USD} line. The change itself is recorded, with its screenshot and diff.`;
+
+/** The footer's line under the spend meter while spending on price tables is paused and the rest of the budget is not. */
+export const FACTS_PAUSED_LINE = `Spending on price tables is paused at the $${FACTS_PAUSE_USD} line; changes are still recorded, with their screenshots and diffs.`;
+
+/**
+ * The banner on every screen at the spend pause (SPEND_PAUSE_USD): a capture is skipped whole there, so a change
+ * is recorded without its screenshot, its stored source and its price table.
+ */
+export const SPEND_PAUSED_LINE =
+  "Spending is paused at the budget line. Changes the Monitors report are still recorded, without screenshots, stored sources or price tables.";
+
 /** The live line as one string. */
 export const liveLine = (s: Stats): string => liveParts(s).join(" · ");
 

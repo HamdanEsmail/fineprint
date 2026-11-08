@@ -13,11 +13,12 @@
 // after repair (one or two requests each) and the large diff's store. Each step is wrapped on its
 // own, so one failing step never stops the others, and runCron never throws. It logs one summary
 // line; errors are logged by code, never with a secret or page text.
-import { captureVersion, recordFactsResult, spendPaused, startNextFacts } from "./capture";
+import { captureVersion, factsPaused, recordFactsResult, spendPaused, startNextFacts } from "./capture";
 import { lastTickAtOrBefore } from "./core/cronTick";
 import {
   CAPTURE_MAX_ATTEMPTS,
   CONFIRM_WINDOW_MS,
+  FACTS_HOLD_PER_TICK,
   LARGE_DIFF_TEXT_CHARS,
   MONITOR_LOOKUPS_PER_TICK,
   PULLS_PER_TICK,
@@ -35,14 +36,16 @@ import {
   countMissingDeltas,
   countMissingSummaries,
   diffsToWarm,
+  holdQueuedFacts,
   inFlightFactsRuns,
   listFactsClaims,
   pendingCaptures,
   prewarmKeys,
+  releaseHeldFacts,
   updateIfFactsHolder,
 } from "./db/versions";
 import type { Env } from "./env";
-import { deployStamp, dropCachedWatchlist, sweptStamp } from "./site/htmlCache";
+import { deployStamp, dropCachedPages, dropCachedWatchlist, sweptStamp } from "./site/htmlCache";
 import { oversizedForTick, requestDeltas, requestSummary } from "./summary";
 import { getRun } from "./tinyfish/agent";
 import { TinyFishError } from "./tinyfish/client";
@@ -218,9 +221,26 @@ const isoAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
 async function factsUpkeep(env: Env): Promise<void> {
   await step("stale claims", () => releaseStaleClaims(env));
   await step("facts follow-up", () => followUpRuns(env));
+  await step("facts pause", () => holdOrReleaseFacts(env));
   // The one place that waits out rate limits: the cron has minutes of wall time, where
   // waitUntil work does not. A no-op while a run is in flight.
   await startNextFacts(env, { waitOnRateLimit: true });
+}
+
+/**
+ * The price-table line. While it holds (FACTS_PAUSE_USD), the queued versions whose facts run cannot start move
+ * from `pending` to `paused` (at most FACTS_HOLD_PER_TICK a tick, one UPDATE): the versions that were queued when
+ * the pause began, and any a run failed back into the queue since. A version whose run is in flight keeps it. If
+ * the line is ever raised above the total, paused versions go back to `pending` the same way, and the queue
+ * starts them. Either way the stored screens of the pages moved are dropped, so a page view never shows a state
+ * it no longer has.
+ */
+async function holdOrReleaseFacts(env: Env): Promise<void> {
+  const paused = await factsPaused(env.DB);
+  const moved = paused ? await holdQueuedFacts(env.DB, FACTS_HOLD_PER_TICK) : await releaseHeldFacts(env.DB, FACTS_HOLD_PER_TICK);
+  if (moved.length === 0) return;
+  console.warn(`cron ${paused ? "held" : "queued again"} the price tables of ${moved.length} version(s) at the price-table line`);
+  await dropCachedPages(env, [...new Set(moved)]);
 }
 
 /**

@@ -15,7 +15,7 @@ import type { ChangedBlock, FactChange, FactsDiff, StructuredDiff } from "../../
 import type { Diff, PageJson, Stats, VersionItem } from "../../readModel";
 import { BlockText, blockWork, plainText } from "../blockText";
 import { CompareForm, EvidenceLine, LAYOUT_ONLY_LINE, ShotFigure } from "../components";
-import { formatUtc, plural, SUMMARY_ORIGIN, unitBeside } from "../format";
+import { FACTS_PAUSED_COPY, formatUtc, plural, SUMMARY_ORIGIN, unitBeside } from "../format";
 import { Layout, type ScreenLink } from "../layout";
 import { hasMarks, wordDiff, type WordDiff, type WordDiffBudget } from "../wordDiff";
 
@@ -517,6 +517,16 @@ function Facts(props: { facts: FactsDiff }) {
   );
 }
 
+/** The prices section when either version's price-table run could not start because spending on price tables is paused. */
+function FactsPaused() {
+  return (
+    <section class="facts-diff" aria-labelledby="facts-h">
+      <h2 id="facts-h">Prices</h2>
+      <p class="facts-note">{FACTS_PAUSED_COPY}</p>
+    </section>
+  );
+}
+
 // --- The screen -------------------------------------------------------------------------------------
 
 function Links(props: { pageHref: string; json?: string }) {
@@ -586,7 +596,12 @@ function DiffBody(props: { page: PageJson; pageHref: string; state: Extract<Comp
           <p class="origin">{diff.hops > 1 ? `${origin}, of the newest of these ${diff.hops} changes` : origin}</p>
         )}
       </div>
-      {diff.facts === null ? null : <Facts facts={diff.facts} />}
+      {/* The pair's states come from the versions just read, never from a stored diff. */}
+      {from.facts_status === "paused" || to.facts_status === "paused" ? (
+        <FactsPaused />
+      ) : diff.facts === null ? null : (
+        <Facts facts={diff.facts} />
+      )}
       {diff.blocks.added.length + diff.blocks.removed.length + diff.blocks.changed.length === 0 ? (
         <section class="diff" aria-labelledby="diff-h">
           <h2 id="diff-h">The text, block by block</h2>

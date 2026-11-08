@@ -317,7 +317,9 @@ describe("about", () => {
     expect(section).toContain("never gets a price table");
     // The two budget lines as the code holds them: the facts pause, then the spend pause, which stops Fineprint's
     // own costs while the Monitors' scheduled checks go on and their changes are still kept.
-    expect(section).toContain(`At $${FACTS_PAUSE_USD} of TinyFish spend, no new price-table run starts; changes are still recorded.`);
+    expect(section).toContain(
+      `At $${FACTS_PAUSE_USD} of TinyFish spend, spending on price tables is paused: a change recorded after that says its price table was not read, and is still recorded with its screenshot and diff.`,
+    );
     expect(section).toContain(
       `At $${SPEND_PAUSE_USD}, Fineprint starts nothing more that costs money on its side: no overdue-check pull, screenshot, stored source or price table, and no new page can be added.`,
     );

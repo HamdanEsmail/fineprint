@@ -21,11 +21,12 @@ export type CaptureStatus = "pending" | "partial" | "awaiting_facts" | "complete
 
 /**
  * What became of a version's price facts (migrations/0004_facts_status.sql). ok: facts_json is stored.
- * pending: facts are needed and not settled yet (queued or in flight). unavailable: needed, the attempts
- * are used up, none stored. not_needed: the page is not a pricing or fees page, or the version's run was
- * judged not relevant.
+ * pending: facts are needed and not settled yet (queued or in flight). paused: needed, and the run cannot start
+ * because spending on price tables is paused (FACTS_PAUSE_USD); not final, the version is queued again if the
+ * line is raised. unavailable: needed, the attempts are used up or a run found no prices, none stored; final.
+ * not_needed: the page is not a pricing or fees page, or the version's run was judged not relevant.
  */
-export type FactsStatus = "ok" | "pending" | "unavailable" | "not_needed";
+export type FactsStatus = "ok" | "pending" | "paused" | "unavailable" | "not_needed";
 
 /**
  * Where a version's one-line summary came from (migrations/0006_summaries_pull_backoff.sql): tinyfish, the
