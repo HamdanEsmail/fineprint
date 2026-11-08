@@ -42,7 +42,7 @@ import {
   updateIfFactsHolder,
 } from "./db/versions";
 import type { Env } from "./env";
-import { dropCachedWatchlist } from "./site/htmlCache";
+import { deployStamp, dropCachedWatchlist, sweptStamp } from "./site/htmlCache";
 import { oversizedForTick, requestDeltas, requestSummary } from "./summary";
 import { getRun } from "./tinyfish/agent";
 import { TinyFishError } from "./tinyfish/client";
@@ -66,6 +66,14 @@ export const cronDeps = {
   warm: (env: Env, versionId: string): Promise<Response> =>
     env.SELF.fetch(
       new Request(`https://fineprint.internal/api/admin/warm-diff?version=${encodeURIComponent(versionId)}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` },
+      }),
+    ),
+  /** Cleans up the stored screens of an earlier deploy in an invocation of its own (POST /api/admin/sweep-screens). */
+  sweep: (env: Env): Promise<Response> =>
+    env.SELF.fetch(
+      new Request("https://fineprint.internal/api/admin/sweep-screens", {
         method: "POST",
         headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` },
       }),
@@ -141,7 +149,10 @@ export async function runCron(realEnv: Env): Promise<CronResult> {
 // --- 8. Stored screens ----------------------------------------------------------------------
 
 /**
- * The last step: rebuilds the stored copies of the site's screens, each in an invocation of its own through the
+ * The last step. First, when the stamp the stored screens were last cleaned up for (one R2 read) is not this
+ * deploy's, the clean-up runs in an invocation of its own (POST /api/admin/sweep-screens): the earlier deploy's
+ * copies, or once, the copies kept under html/ before the stamp; this deploy's copies are never touched.
+ * Then it rebuilds the stored copies of the site's screens, each in an invocation of its own through the
  * SELF binding (one screen's render is most of a request's CPU). At most REBUILD_CALLS_PER_TICK in all: home,
  * About and the watchlist every tick (their live counts move with every check), then the page view and the default
  * compare of pages with a version in the last REBUILD_WINDOW_HOURS, taken in turn by the hour of day when there
@@ -149,6 +160,7 @@ export async function runCron(realEnv: Env): Promise<CronResult> {
  * next change.
  */
 async function rebuildScreens(env: Env, callsSoFar: number): Promise<void> {
+  await step("stored screens clean-up", () => sweepEarlierScreens(env));
   const now = cronDeps.now();
   const since = new Date(now.getTime() - REBUILD_WINDOW_HOURS * 60 * MINUTE_MS).toISOString();
   const room = REBUILD_CALLS_PER_TICK - REBUILD_FIXED_SCREENS.length;
@@ -168,6 +180,19 @@ async function rebuildScreens(env: Env, callsSoFar: number): Promise<void> {
       logError(`rebuild of ${key} failed`, err);
     }
   }
+}
+
+/** Asks for the clean-up when the stamp last cleaned up for is not this deploy's. A failed one is asked for again next tick. */
+async function sweepEarlierScreens(env: Env): Promise<void> {
+  if ((await sweptStamp(env)) === deployStamp(env)) return;
+  const res = await cronDeps.sweep(env);
+  const body: unknown = await res.json().catch(() => null);
+  if (!res.ok) {
+    console.error("stored screens clean-up failed", `status=${res.status}`);
+    return;
+  }
+  const { previous, deleted } = (body ?? {}) as { previous?: unknown; deleted?: unknown };
+  console.log("stored screens clean-up", { previous: typeof previous === "string" ? previous : null, deleted: Number(deleted) || 0 });
 }
 
 async function step(name: string, work: () => Promise<void>): Promise<void> {

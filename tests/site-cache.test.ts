@@ -13,11 +13,20 @@ import { insertRun } from "../src/db/runs";
 import type { RunRow, TriggerKind } from "../src/db/types";
 import { insertVersion, type NewVersion } from "../src/db/versions";
 import { REBUILD_CALLS_PER_TICK } from "../src/core/limits";
-import { cacheKey, dropCached } from "../src/site/htmlCache";
+import {
+  cacheKey,
+  deployStamp,
+  dropCached,
+  dropCachedPages,
+  dropCachedWatchlist,
+  isScreenListing,
+  isStoredScreen,
+  sweepStoredScreens,
+} from "../src/site/htmlCache";
 import worker from "../src/index";
 
 // The stored copy of the likely screens (src/site/htmlCache.ts): the first answer is a miss that stores
-// html/<key>, the next is a hit with the same body and headers, and every screen with a varying query
+// screens/<stamp>/<key>, the next is a hit with the same body and headers, and every screen with a varying query
 // parameter, every 404 and every screen that still refreshes itself is never stored.
 
 // Each test renders several screens, which the suite running in parallel can slow past the default 5 s.
@@ -25,6 +34,10 @@ vi.setConfig({ testTimeout: 30_000 });
 
 const db = env.DB;
 const cacheOn = { ...env, HTML_CACHE: "1" };
+/** This deploy's stamp in the test pool (the version metadata binding's id). */
+const STAMP = deployStamp(cacheOn);
+/** The R2 key of a stored screen under this deploy's stamp. */
+const at = (key: string): string => `screens/${STAMP}/${key}`;
 
 /** The Worker with the stored copy on (the suite's default has it off), waiting for the write after the response. */
 async function callWorker(path: string, init?: RequestInit): Promise<Response> {
@@ -85,10 +98,10 @@ async function version(id: string, pageId: string, at: string, trigger: TriggerK
   });
 }
 
-/** The keys under html/ that the cache wrote (the recorded sources are html/<id>.html and are not its). */
+/** The screen keys the cache wrote under this deploy's stamp. */
 async function stored(): Promise<string[]> {
-  const listed = await env.STORE.list({ prefix: "html/" });
-  return listed.objects.map((o) => o.key.slice("html/".length)).filter((k) => !k.endsWith(".html"));
+  const listed = await env.STORE.list({ prefix: at("") });
+  return listed.objects.map((o) => o.key.slice(at("").length));
 }
 
 const headersOf = (res: Response): [string, string][] =>
@@ -121,7 +134,7 @@ beforeEach(async () => {
 });
 
 describe("the stored copy of the likely screens", () => {
-  it("serves the home screen: a miss stores html/home, the next is the same response", async () => {
+  it("serves the home screen: a miss stores screens/<stamp>/home, the next is the same response", async () => {
     await missThenHit("/", "home");
     expect(headersOf(await callWorker("/"))).toContainEqual(["cache-control", "public, max-age=60"]);
   });
@@ -256,7 +269,7 @@ const ALL_KEYS = ["home", "about", "watchlist", "page/alpha", "page/beta", "comp
 
 /** Every screen has a stored copy, whatever the pages are. */
 async function fillCache(): Promise<void> {
-  for (const key of ALL_KEYS) await env.STORE.put(`html/${key}`, `<p>${key}</p>`, { customMetadata: { headers: "{}" } });
+  for (const key of ALL_KEYS) await env.STORE.put(at(key), `<p>${key}</p>`, { customMetadata: { headers: "{}" } });
 }
 
 const left = async (): Promise<string[]> => (await stored()).sort();
@@ -335,7 +348,7 @@ describe("dropping the stored screens that show a change", () => {
     await insertPage(db, { ...page("old"), added_by: "public", expires_at: ago(1000) });
     fetchMock.intercept({ method: "DELETE", url: /\/v1\/monitors\/mon-old$/, reply: { status: 204 } });
     fetchMock.intercept({ method: "GET", url: "https://agent.tinyfish.ai/v1/monitors", times: Infinity, reply: { json: { monitors: [] } } });
-    await env.STORE.put("html/page/old", "<p>old</p>");
+    await env.STORE.put(at("page/old"), "<p>old</p>");
     const rebuild = vi.spyOn(cronDeps, "rebuild").mockResolvedValue(new Response("{}")); // the tick's own rebuild is tested below
     const result = await runCron(cacheOn);
     rebuild.mockRestore();
@@ -395,7 +408,7 @@ describe("POST /api/admin/rebuild-html", () => {
     expect(hit.headers.get("x-fineprint-cache")).toBe("hit");
     expect(await hit.text()).toContain("<h1>alpha</h1>");
     // a rebuild replaces the copy with a fresh render
-    await env.STORE.put("html/page/alpha", "stale", { customMetadata: { headers: "{}" } });
+    await env.STORE.put(at("page/alpha"), "stale", { customMetadata: { headers: "{}" } });
     await callWorker("/api/admin/rebuild-html?key=page/alpha", { method: "POST", headers: ADMIN });
     const again = await callWorker("/pages/alpha");
     expect(again.headers.get("x-fineprint-cache")).toBe("hit");
@@ -414,7 +427,7 @@ describe("POST /api/admin/rebuild-html", () => {
   });
 
   it("the public cannot force a fresh render: HTML_CACHE is not read from a request", async () => {
-    await env.STORE.put("html/about", "<p>kept</p>", { customMetadata: { headers: "{}" } });
+    await env.STORE.put(at("about"), "<p>kept</p>", { customMetadata: { headers: "{}" } });
     const res = await callWorker("/about", { headers: { "x-fineprint-cache": "rebuild", "cache-control": "no-cache" } });
     expect(res.headers.get("x-fineprint-cache")).toBe("hit");
     expect(await res.text()).toBe("<p>kept</p>");
@@ -480,7 +493,7 @@ describe("the hourly tick's rebuild", () => {
 // --- Follow-ups: status changes, late price tables, the age bound, the tick budget ----------------------
 
 const put = (key: string, meta: Record<string, string> = {}) =>
-  env.STORE.put(`html/${key}`, `<p>${key}</p>`, { customMetadata: { headers: "{}", ...meta } });
+  env.STORE.put(at(key), `<p>${key}</p>`, { customMetadata: { headers: "{}", ...meta } });
 
 describe("stored screens follow status changes and late price tables", () => {
   beforeEach(() => {
@@ -538,7 +551,7 @@ describe("stored screens follow status changes and late price tables", () => {
     expect(await stale.text()).toContain("<html");
     const again = await callWorker("/about");
     expect(again.headers.get("x-fineprint-cache")).toBe("hit");
-    expect(Number((await env.STORE.head("html/about"))?.customMetadata?.at)).toBeGreaterThan(Date.now() - HOUR);
+    expect(Number((await env.STORE.head(at("about")))?.customMetadata?.at)).toBeGreaterThan(Date.now() - HOUR);
     await put("about", { at: String(Date.now() - 23 * HOUR) });
     expect((await callWorker("/about")).headers.get("x-fineprint-cache")).toBe("hit");
   });
@@ -561,5 +574,213 @@ describe("stored screens follow status changes and late price tables", () => {
       fetchMock.reset();
     }
     expect(asked).toEqual(["home", "about", "watchlist"]);
+  });
+});
+
+// --- The deploy stamp ------------------------------------------------------------------------------------
+
+/** The Worker as another deploy (another version id) would run it, with the stored copy on. */
+const asDeploy = (id: string) => ({ ...cacheOn, CF_VERSION_METADATA: { id, tag: "", timestamp: "" } });
+
+async function callAs(id: string, path: string, init?: RequestInit): Promise<Response> {
+  const ctx = createExecutionContext();
+  const response = await worker.fetch(new Request(new URL(path, "https://fineprint.test"), init), asDeploy(id), ctx);
+  await waitOnExecutionContext(ctx);
+  return response;
+}
+
+/** Every key in the bucket, sorted. */
+async function everything(): Promise<string[]> {
+  return (await env.STORE.list()).objects.map((o) => o.key).sort();
+}
+
+/** A version source, as captureSource stores it: html/<versionId>.html. */
+const SOURCE = "html/0d6f1c1e-6b5a-4d3c-9a8b-7c6d5e4f3a2b.html";
+
+describe("stored screens are keyed by the deploy", () => {
+  beforeEach(async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await env.STORE.put(SOURCE, "<p>the page as it was read</p>", { httpMetadata: { contentType: "text/html; charset=utf-8" } });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("keeps each copy under screens/<version id>/<key>, so a new deploy never serves an older deploy's markup", async () => {
+    expect(STAMP).toBe(env.CF_VERSION_METADATA.id);
+    const first = await callAs("deploy-a", "/about");
+    expect(first.headers.get("x-fineprint-cache")).toBe("miss");
+    await first.text();
+    expect(await env.STORE.head("screens/deploy-a/about")).not.toBeNull();
+    expect((await callAs("deploy-a", "/about")).headers.get("x-fineprint-cache")).toBe("hit");
+    // The next deploy renders its own copy, and the old one is not read.
+    await env.STORE.put("screens/deploy-a/about", "<p>old markup</p>", { customMetadata: { headers: "{}", at: String(Date.now()) } });
+    const next = await callAs("deploy-b", "/about");
+    expect(next.headers.get("x-fineprint-cache")).toBe("miss");
+    expect(await next.text()).not.toContain("old markup");
+    expect((await callAs("deploy-b", "/about")).headers.get("x-fineprint-cache")).toBe("hit");
+    // Nothing is written under html/ any more.
+    expect((await everything()).filter((k) => k.startsWith("html/"))).toEqual([SOURCE]);
+  });
+
+  it("the clean-up after a deploy deletes the previous stamp's copies by listing that stamp, and never the current one's", async () => {
+    await env.STORE.put("screens/stamp", "deploy-a");
+    for (const key of ["home", "page/alpha", "compare/alpha/a-2/a-3"]) await env.STORE.put(`screens/deploy-a/${key}`, "<p>a</p>");
+    for (const key of ["home", "about"]) await env.STORE.put(`screens/deploy-b/${key}`, "<p>b</p>");
+    const first = await callAs("deploy-b", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN });
+    expect(await first.json()).toEqual({ stamp: "deploy-b", previous: "deploy-a", deleted: 3 });
+    expect(await everything()).toEqual([SOURCE, "screens/deploy-b/about", "screens/deploy-b/home", "screens/stamp"].sort());
+    expect(await (await env.STORE.get("screens/stamp"))!.text()).toBe("deploy-b");
+    // Once the marker is this deploy's, a sweep deletes nothing, this deploy's copies least of all.
+    const again = await callAs("deploy-b", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN });
+    expect(await again.json()).toEqual({ stamp: "deploy-b", previous: "deploy-b", deleted: 0 });
+    expect(await everything()).toContain("screens/deploy-b/home");
+  });
+
+  it("the first clean-up deletes the copies kept under html/ by name, once, and the version sources survive", async () => {
+    await insertPage(db, page("beta"));
+    const legacy = ["home", "about", "watchlist", "page/alpha", "page/beta", "compare/alpha/a-1/a-2", "compare/alpha/a-2/a-3", "compare/beta/b-1/b-2"];
+    for (const key of legacy) await env.STORE.put(`html/${key}`, `<p>${key}</p>`);
+    // Not a page in D1: not named, so not deleted.
+    await env.STORE.put("html/page/ghost", "<p>ghost</p>");
+    const list = vi.spyOn(env.STORE, "list");
+    const res = await callAs("deploy-a", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ stamp: "deploy-a", previous: null });
+    // Only each page's own compares were listed.
+    expect(list.mock.calls.map(([o]) => o?.prefix).sort()).toEqual(["html/compare/alpha/", "html/compare/beta/"]);
+    list.mockRestore();
+    expect(await everything()).toEqual([SOURCE, "html/page/ghost", "screens/stamp"].sort());
+    // Never again: a later sweep for the same deploy, or the next deploy's, leaves html/ alone.
+    await env.STORE.put("html/home", "<p>home</p>");
+    await callAs("deploy-a", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN });
+    await callAs("deploy-b", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN });
+    expect(await everything()).toContain("html/home");
+    expect(await everything()).toContain(SOURCE);
+  });
+
+  it("the sweep needs the admin token", async () => {
+    await env.STORE.put("html/home", "<p>home</p>");
+    const res = await callAs("deploy-a", "/api/admin/sweep-screens", { method: "POST" });
+    expect(res.status).toBe(401);
+    expect(await everything()).toContain("html/home");
+    expect(await env.STORE.head("screens/stamp")).toBeNull();
+  });
+
+  it("the hourly tick asks for the clean-up first, and only when the stamp it last cleaned up for is not its own", async () => {
+    const order: string[] = [];
+    vi.spyOn(cronDeps, "rebuild").mockImplementation(async (_env, key) => (order.push(key), new Response("{}")));
+    await env.STORE.put("screens/stamp", "deploy-old");
+    await env.STORE.put("screens/deploy-old/home", "<p>old</p>");
+    await env.STORE.put(at("page/other"), "<p>current</p>");
+    await runCron(cacheOn); // the real clean-up, through the SELF binding, as an invocation of its own
+    expect(order.slice(0, 3)).toEqual(["home", "about", "watchlist"]);
+    expect(await env.STORE.head("screens/deploy-old/home")).toBeNull();
+    expect(await env.STORE.head(at("page/other"))).not.toBeNull();
+    expect(await (await env.STORE.get("screens/stamp"))!.text()).toBe(STAMP);
+
+    const sweep = vi.spyOn(cronDeps, "sweep");
+    await runCron(cacheOn);
+    expect(sweep).not.toHaveBeenCalled();
+  });
+
+  it("a failed clean-up is logged, the rebuilds still run, and the next tick asks again", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const asked: string[] = [];
+    vi.spyOn(cronDeps, "rebuild").mockImplementation(async (_env, key) => (asked.push(key), new Response("{}")));
+    const sweep = vi.spyOn(cronDeps, "sweep").mockResolvedValue(new Response("no", { status: 500 }));
+    await runCron(cacheOn);
+    expect(asked.slice(0, 3)).toEqual(["home", "about", "watchlist"]);
+    await runCron(cacheOn);
+    expect(sweep).toHaveBeenCalledTimes(2);
+    expect(errors).toHaveBeenCalledWith("stored screens clean-up failed", "status=500");
+  });
+});
+
+describe("the guard on every delete", () => {
+  beforeEach(async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await env.STORE.put(SOURCE, "<p>the page as it was read</p>");
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("names only the five screen shapes as stored screens, never a version source or a broad prefix", () => {
+    const screens = [
+      "screens/x/home",
+      "screens/x/about",
+      "screens/x/watchlist",
+      "screens/x/page/p",
+      "screens/x/compare/p/a/b",
+      "html/home",
+      "html/page/p",
+      "html/compare/p/a/b",
+    ];
+    for (const key of screens) expect(isStoredScreen(key), key).toBe(true);
+    const others = [
+      SOURCE,
+      "html/abc.html",
+      "html/home.html",
+      "html/",
+      "html/page",
+      "html/page/",
+      "html/page/a/b",
+      "html/compare/p/a",
+      "html/../html/x.html",
+      "screens/stamp",
+      "screens/x/",
+      "screens/x/x.html",
+      "screens/x/page/../a",
+      "shots/a.jpg",
+      "home",
+    ];
+    for (const key of others) expect(isStoredScreen(key), key).toBe(false);
+    const now = asDeploy("deploy-now");
+    for (const prefix of ["screens/deploy-now/compare/p/", "screens/old/compare/p/", "screens/old/", "html/compare/p/"]) {
+      expect(isScreenListing(now, prefix), prefix).toBe(true);
+    }
+    const broad = ["", "html/", "html", "html/compare/", "html/compare/p", "html/page/", "screens/", "screens/deploy-now/", "screens/old/page/", "screens/../html/", "html/compare/../", "shots/"];
+    for (const prefix of broad) expect(isScreenListing(now, prefix), prefix).toBe(false);
+  });
+
+  it("a seeded version source survives every invalidation and the clean-up", async () => {
+    await insertPage(db, page("beta"));
+    const list = vi.spyOn(env.STORE, "list");
+    const del = vi.spyOn(env.STORE, "delete");
+    const id = SOURCE.slice("html/".length, -".html".length);
+    // Keys a caller could pass that name the source, whatever the stamp prefix.
+    await dropCached(cacheOn, [`${id}.html`, `../../html/${id}.html`, `page/../../../html/${id}.html`, "../stamp"]);
+    await dropCachedPages(cacheOn, ["alpha", `../../html/${id}.html`, "..", ""]);
+    await dropCachedWatchlist(cacheOn, `../../../html/${id}.html`);
+    await env.STORE.put("html/home", "<p>legacy</p>");
+    await sweepStoredScreens(asDeploy("deploy-a"), async () => ["alpha", "beta", `${id}.html`, "../..", ""]);
+    await sweepStoredScreens(asDeploy("deploy-b"), async () => ["alpha"]);
+    expect(await env.STORE.head(SOURCE)).not.toBeNull();
+    expect(await env.STORE.head("html/home")).toBeNull();
+    // No listing reached past one page's compares or an earlier stamp, and nothing deleted was anything but a stored screen.
+    for (const [options] of list.mock.calls) expect(isScreenListing(asDeploy("deploy-b"), options?.prefix ?? ""), options?.prefix).toBe(true);
+    for (const [keys] of del.mock.calls) for (const key of [keys].flat()) expect(isStoredScreen(key), key).toBe(true);
+    expect(await (await env.STORE.get("screens/stamp"))!.text()).toBe("deploy-b");
+  });
+
+  it("the cron's paths keep the source too: the summary fill, a status change, a tick after a deploy", async () => {
+    await env.STORE.put("screens/stamp", "deploy-old");
+    await version("a-4", "alpha", ago(60_000), "webhook");
+    await fillSummaries(cacheOn, { versionId: "a-4" });
+    vi.spyOn(cronDeps, "rebuild").mockResolvedValue(new Response("{}"));
+    fetchMock.activate();
+    fetchMock.intercept({
+      method: "GET",
+      url: "https://agent.tinyfish.ai/v1/monitors",
+      times: Infinity,
+      reply: { json: { monitors: [{ id: "mon-alpha", status: "paused", name: "alpha" }] } },
+    });
+    try {
+      expect((await runCron(cacheOn)).unhealthy).toEqual(["alpha"]);
+    } finally {
+      fetchMock.reset();
+    }
+    expect(await env.STORE.head(SOURCE)).not.toBeNull();
+    expect(await (await env.STORE.get("screens/stamp"))!.text()).toBe(STAMP);
   });
 });

@@ -123,6 +123,12 @@ export async function listPages(db: D1Database): Promise<PageListRow[]> {
   return results;
 }
 
+/** Every page's id, whatever its status (the one-time clean-up of the stored screens, src/site/htmlCache.ts). */
+export async function listPageIds(db: D1Database): Promise<string[]> {
+  const { results } = await db.prepare("SELECT id FROM pages ORDER BY created_at, rowid").all<{ id: string }>();
+  return results.map((r) => r.id);
+}
+
 /** Sets the columns present in `patch` (undefined is skipped, null sets NULL). An empty patch does nothing. */
 export async function updatePage(db: D1Database, id: string, patch: PagePatch): Promise<void> {
   const sets: string[] = [];

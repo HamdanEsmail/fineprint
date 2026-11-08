@@ -23,7 +23,7 @@ import { featureCandidates, getDiff, type AsOfExample, type ChangeItem, type Sta
 import { BlockText, plainText } from "../blockText";
 import { DeltaBadge, EvidenceLine, hasDeltaBadge, LAYOUT_ONLY_LINE, ShotFigure, StatBlock, Thumb } from "../components";
 import { checksRun, costLine, daysSince, formatDate, formatUtc, liveParts, ownPath, plural, SUMMARY_ORIGIN } from "../format";
-import { Layout } from "../layout";
+import { Layout, type ScreenLink } from "../layout";
 import { hasMarks, wordDiff, type Part } from "../wordDiff";
 
 /** Changes on one screen of the feed. */
@@ -248,6 +248,8 @@ function FeaturedCatch(props: { featured: Featured }) {
 
 export type HomeProps = {
   stats: Stats;
+  /** Where the screen lives, for its link preview (src/site/layout.tsx). */
+  link: ScreenLink;
   /** This week's real changes outside retired pages, leaving out layout-only ones (as Stats.changes does). */
   weekCount: number;
   /** Up to FEED_SIZE + 1 changes: one more than is shown says there are older ones. */
@@ -599,6 +601,7 @@ export function Home(props: HomeProps) {
       description={`${OPENING.h1} ${OPENING.lede[0]}`}
       stats={stats}
       current="home"
+      link={props.link}
     >
       <div class={featured === null ? "wrap opening" : "wrap opening has-shot"}>
         <div class="opening-text">

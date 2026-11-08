@@ -1,7 +1,7 @@
-// The document every screen shares: head (the title and description, also as og: tags for link previews,
-// styles, the two preloaded fonts, the optional enhance.js), the header (wordmark, stamp, nav) and the footer
-// (the spend meter). No inline script or style element: the CSP allows only files from this origin, and every
-// screen works without the script.
+// The document every screen shares: head (the title and description, the Open Graph and Twitter card tags for
+// link previews, styles, the two preloaded fonts, the optional enhance.js), the header (wordmark, stamp, nav) and
+// the footer (the spend meter). No inline script or style element: the CSP allows only files from this origin, and
+// every screen works without the script.
 import type { Child } from "hono/jsx";
 import { raw } from "hono/html";
 import type { Stats } from "../readModel";
@@ -9,6 +9,16 @@ import { Notice, Stamp } from "./components";
 import { spendMeter, stampFor } from "./format";
 
 type Current = "home" | "watchlist" | "about" | null;
+
+/**
+ * Where a screen lives, for link previews: `base` is PUBLIC_BASE_URL without trailing slashes (never the request's
+ * host, so a preview or the hourly rebuild names the same address), `path` the screen's canonical path without its
+ * varying query parameters (a compare keeps the pair it shows), null on the 404 and error pages, which have none.
+ */
+export type ScreenLink = { base: string; path: string | null };
+
+/** The link-preview card (public/assets/social.png), 1200 by 630. */
+const SOCIAL_IMAGE = "/assets/social.png";
 
 const NAV: { key: Exclude<Current, null>; href: string; text: string }[] = [
   { key: "home", href: "/", text: "Changes" },
@@ -30,10 +40,12 @@ export function Layout(props: {
   current: Current;
   refreshSeconds?: number;
   noindex?: boolean;
+  link: ScreenLink;
   children: Child;
 }) {
-  const { stats } = props;
+  const { stats, link } = props;
   const stamp = stats === null ? null : stampFor(stats);
+  const image = link.base + SOCIAL_IMAGE;
   return (
     <>
       {raw("<!doctype html>")}
@@ -44,8 +56,16 @@ export function Layout(props: {
           {props.refreshSeconds === undefined ? null : <meta http-equiv="refresh" content={String(props.refreshSeconds)} />}
           <title>{props.title}</title>
           <meta name="description" content={props.description} />
+          <meta property="og:type" content="website" />
+          <meta property="og:site_name" content="Fineprint" />
           <meta property="og:title" content={props.title} />
           <meta property="og:description" content={props.description} />
+          {link.path === null ? null : <meta property="og:url" content={link.base + link.path} />}
+          <meta property="og:image" content={image} />
+          <meta property="og:image:width" content="1200" />
+          <meta property="og:image:height" content="630" />
+          <meta name="twitter:card" content="summary_large_image" />
+          <meta name="twitter:image" content={image} />
           {props.noindex ? <meta name="robots" content="noindex" /> : null}
           <meta name="theme-color" content="#f3eee4" />
           <link rel="preload" href="/assets/fonts/fraunces-latin-opsz-normal.woff2" as="font" type="font/woff2" crossorigin="anonymous" />

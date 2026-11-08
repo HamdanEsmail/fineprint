@@ -10,7 +10,7 @@ import { MAX_LABEL_LENGTH } from "../../handlers/pages";
 import type { PageSummary, Stats } from "../../readModel";
 import { StatusChip } from "../components";
 import { cronToWords, formatUtc, plural, sourceLabel, webHref } from "../format";
-import { Layout } from "../layout";
+import { Layout, type ScreenLink } from "../layout";
 
 /** A refused add as the screen shows it: the add's own refusal (src/handlers/pages.ts AddRefusal), or the form's. */
 export type Refusal = { error: string; reason?: string; existing_page_id?: string | null; retry_after?: string | null };
@@ -20,6 +20,8 @@ export type FindState = { typed: string; answer: DiscoverAnswer };
 
 export type WatchlistProps = {
   stats: Stats;
+  /** Where the screen lives, for its link preview (src/site/layout.tsx). */
+  link: ScreenLink;
   /** Every page, in the order they were added (listPages). */
   pages: PageSummary[];
   /** What the add form shows in its fields: what was typed, or what a Watch this page link carried. */
@@ -458,6 +460,7 @@ export function Watchlist(props: WatchlistProps) {
       stats={stats}
       current="watchlist"
       noindex={props.noindex}
+      link={props.link}
     >
       <div class="wrap watchlist">
         <header class="page-head">

@@ -9,11 +9,11 @@ import { PULL_BACKOFF_AFTER_FAILURES, PULL_BACKOFF_MS } from "../core/limits";
 import { PRICES, recordSpendOnce } from "../core/spend";
 import { changedRunsForReplay, clearNoise, markNoise } from "../db/runs";
 import { deleteCachedDiffsOfPage } from "../db/diffCache";
-import { clearPullFailures, getPage, listPages, notePullFailure, setPageStatusIf, updatePage } from "../db/pages";
+import { clearPullFailures, getPage, listPageIds, listPages, notePullFailure, setPageStatusIf, updatePage } from "../db/pages";
 import type { VersionRow } from "../db/types";
 import { baselineVersion, countVersionsWithoutThumb, getVersion, insertVersion, latestVersion, versionsWithoutThumb } from "../db/versions";
 import type { Env } from "../env";
-import { dropCachedWatchlist } from "../site/htmlCache";
+import { dropCachedWatchlist, sweepStoredScreens } from "../site/htmlCache";
 import { rebuildScreen } from "../site/rebuild";
 import { warmDiff } from "../readModel";
 import { recordMonitorRun, type MonitorRun } from "../record";
@@ -250,7 +250,7 @@ adminRouter.post("/admin/backfill-deltas", adminOnly, async (c) => {
 // --- Stored screens -------------------------------------------------------------------------------
 
 /**
- * Renders one site screen fresh, exactly as the site route does, and stores it at `html/<key>` with the
+ * Renders one site screen fresh, exactly as the site route does, and stores it at `screens/<stamp>/<key>` with the
  * same headers (src/site/rebuild.ts): `?key=home|about|watchlist|page/<id>|compare/<id>/<from>/<to>`. Answers
  * `{key, stored}`; `stored` is false for a screen that is not kept (a 404, a page still refreshing for its
  * screenshot). A key of any other kind is 400. The hourly job calls it, one screen to an invocation.
@@ -261,6 +261,14 @@ adminRouter.post("/admin/rebuild-html", adminOnly, async (c) => {
   if (stored === null) return c.json({ error: "invalid_key" }, 400);
   return c.json({ key, stored });
 });
+
+/**
+ * The clean-up after a deploy (src/site/htmlCache.ts sweepStoredScreens): deletes the stored screens of the stamp
+ * the last sweep was for, or, the first time, the copies kept under html/ before the stamp, by name; then records
+ * this deploy's stamp. Answers `{stamp, previous, deleted}`; a second call for the same stamp deletes nothing.
+ * The hourly job's rebuild step calls it, in an invocation of its own, when the recorded stamp is not its own.
+ */
+adminRouter.post("/admin/sweep-screens", adminOnly, async (c) => c.json(await sweepStoredScreens(c.env, () => listPageIds(c.env.DB))));
 
 // --- Thumbnails ---------------------------------------------------------------------------------
 

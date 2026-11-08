@@ -29,7 +29,7 @@ import {
   toDatetimeLocal,
   webHref,
 } from "../format";
-import { Layout } from "../layout";
+import { Layout, type ScreenLink } from "../layout";
 
 /** How long after a version is recorded the page reloads itself while its screenshot is being taken. */
 export const REFRESH_WINDOW_MS = 2 * 60_000;
@@ -53,6 +53,8 @@ export type AsOf =
 
 export type PageViewProps = {
   stats: Stats;
+  /** Where the screen lives, for its link preview (src/site/layout.tsx). */
+  link: ScreenLink;
   detail: PageDetail;
   /** The version the card shows; null only for a page with no version. */
   selected: VersionItem | null;
@@ -616,6 +618,7 @@ export function PageView(props: PageViewProps) {
       stats={stats}
       current={null}
       refreshSeconds={refreshing ? REFRESH_SECONDS : undefined}
+      link={props.link}
     >
       <div class="wrap page">
         <PageHead ctx={ctx} />

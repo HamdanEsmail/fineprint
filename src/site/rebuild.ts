@@ -2,22 +2,25 @@
 // for a visitor, in a mode no request can ask for (the env value HTML_CACHE "rebuild", set here only), which
 // skips the stored copy and writes the fresh one. Nothing about rendering is repeated.
 import type { Env } from "../env";
+import { parseScreenKey, storedKey } from "./htmlCache";
 import { siteEnabled, siteRouter } from "./router";
-
-const PREFIX = "html/";
 
 /** The site path that renders the screen under `key`, or null for a key that is not one of the five kinds. */
 export function pathForKey(key: string): string | null {
-  const parts = key.split("/");
-  const ok = parts.every((p) => p !== "" && p !== "." && p !== "..");
-  if (!ok) return null;
-  if (parts.length === 1) return { home: "/", about: "/about", watchlist: "/watchlist" }[key] ?? null;
-  const id = encodeURIComponent(parts[1]!);
-  if (parts[0] === "page" && parts.length === 2) return `/pages/${id}`;
-  if (parts[0] === "compare" && parts.length === 4) {
-    return `/pages/${id}/compare?from=${encodeURIComponent(parts[2]!)}&to=${encodeURIComponent(parts[3]!)}`;
+  const screen = parseScreenKey(key);
+  if (screen === null) return null;
+  switch (screen.kind) {
+    case "home":
+      return "/";
+    case "about":
+      return "/about";
+    case "watchlist":
+      return "/watchlist";
+    case "page":
+      return `/pages/${encodeURIComponent(screen.pageId)}`;
+    case "compare":
+      return `/pages/${encodeURIComponent(screen.pageId)}/compare?from=${encodeURIComponent(screen.fromVersionId)}&to=${encodeURIComponent(screen.toVersionId)}`;
   }
-  return null;
 }
 
 /** Renders the screen fresh and stores it; true when a copy was written. False for a screen that is not stored (a 404, a page still refreshing). */
@@ -32,6 +35,6 @@ export async function rebuildScreen(env: Env, origin: string, key: string): Prom
   await res.arrayBuffer();
   await Promise.all(pending);
   if (res.headers.get("x-fineprint-cache") !== "miss") return false;
-  const head = await env.STORE.head(PREFIX + key);
+  const head = await env.STORE.head(storedKey(env, key));
   return head !== null && head.uploaded.getTime() >= startedAt - 1000;
 }

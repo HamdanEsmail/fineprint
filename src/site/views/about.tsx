@@ -17,11 +17,13 @@ import type { ChangeItem, PageSummary, Stats } from "../../readModel";
 import { BlockText } from "../blockText";
 import { LAYOUT_ONLY_LINE, ShotFigure, StatusChip } from "../components";
 import { formatUsd, formatUtc, ownPath, plural, sourceLabel, SUMMARY_ORIGIN, triggerLabel, webHref } from "../format";
-import { Layout } from "../layout";
+import { Layout, type ScreenLink } from "../layout";
 import { CatchCard, type Featured } from "./home";
 
 export type AboutProps = {
   stats: Stats;
+  /** Where the screen lives, for its link preview (src/site/layout.tsx). */
+  link: ScreenLink;
   /** The home's featured catch (the same change, read under the same caps), or null when there is none. */
   featured: Featured | null;
   /** The newest change on a page that is not retired, for the curl examples when there is no featured catch. */
@@ -582,6 +584,7 @@ export function About(props: AboutProps) {
       description="How Fineprint records each real change to pricing, fees, terms and rules pages with TinyFish: the five steps, one change start to finish, what counts as noise, the honest limits and the public API."
       stats={stats}
       current="about"
+      link={props.link}
     >
       <div class="wrap about">
         <header class="page-head about-head">

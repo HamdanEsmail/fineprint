@@ -16,7 +16,7 @@ import type { Diff, PageJson, Stats, VersionItem } from "../../readModel";
 import { BlockText, blockWork, plainText } from "../blockText";
 import { CompareForm, EvidenceLine, LAYOUT_ONLY_LINE, ShotFigure } from "../components";
 import { formatUtc, plural, SUMMARY_ORIGIN, unitBeside } from "../format";
-import { Layout } from "../layout";
+import { Layout, type ScreenLink } from "../layout";
 import { hasMarks, wordDiff, type WordDiff, type WordDiffBudget } from "../wordDiff";
 
 /** Blocks shown per section group before "Show all". */
@@ -57,6 +57,8 @@ export type CompareState =
 
 export type CompareProps = {
   stats: Stats;
+  /** Where the screen lives, for its link preview (src/site/layout.tsx). */
+  link: ScreenLink;
   page: PageJson;
   /** Every version of the page, newest first, without text. */
   versions: VersionItem[];
@@ -618,7 +620,7 @@ export function CompareView(props: CompareProps) {
       ? `What changed on ${page.label} between ${formatUtc(state.from.captured_at)} and ${formatUtc(state.to.captured_at)}, word by word, with both screenshots.`
       : `Compare two recorded versions of ${page.label}.`;
   return (
-    <Layout title={`${title} · Fineprint`} description={description} stats={stats} current={null}>
+    <Layout title={`${title} · Fineprint`} description={description} stats={stats} current={null} link={props.link}>
       <div class="wrap compare">
         <header class="page-head compare-head">
           {/* The page's name is the way back to its history, from the top of a long comparison. */}

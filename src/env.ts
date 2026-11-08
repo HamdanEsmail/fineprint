@@ -13,4 +13,6 @@ export interface Env {
   REPO_URL: string;
   /** This Worker (wrangler.jsonc `services`): the cron runs each overdue-check pull as its own invocation. */
   SELF: Fetcher;
+  /** This Worker version (wrangler.jsonc `version_metadata`): its id stamps the stored screens (src/site/htmlCache.ts). */
+  CF_VERSION_METADATA: WorkerVersionMetadata;
 }

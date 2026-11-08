@@ -29,6 +29,7 @@ import {
 } from "../readModel";
 import { parseAsOfInput, webHref } from "./format";
 import { cacheKey, markMiss, onlyParams, readCached } from "./htmlCache";
+import type { ScreenLink } from "./layout";
 import { About } from "./views/about";
 import { CompareView, diffSections, placesFromDiff, type CompareState } from "./views/compare";
 import { FEATURE_CHANGES, FEED_SIZE, featuredCatch, Home } from "./views/home";
@@ -65,6 +66,15 @@ const render = (
   headers: Record<string, string> = {},
 ): Response | Promise<Response> => c.html(page as string | Promise<string>, status, { ...SECURITY_HEADERS, ...headers });
 
+/** PUBLIC_BASE_URL without trailing slashes: the host every absolute url on a screen names. */
+const baseUrl = (env: Env): string => env.PUBLIC_BASE_URL.replace(/\/+$/, "");
+
+/** A screen's address for its link preview: its canonical path, or null for a screen that has none (a 404, an error). */
+const linkTo = (c: AppContext, path: string | null): ScreenLink => ({ base: baseUrl(c.env), path });
+
+/** The ledger's 404 page. */
+const lost = (c: AppContext): Response | Promise<Response> => render(c, <NotFound link={linkTo(c, null)} />, 404);
+
 const isApiPath = (path: string): boolean =>
   path === "/api" || path.startsWith("/api/") || path === "/hooks" || path.startsWith("/hooks/");
 
@@ -77,7 +87,7 @@ const isApiPath = (path: string): boolean =>
 export function notFound(c: AppContext): Response | Promise<Response> {
   if (isApiPath(c.req.path)) return c.json({ error: "not_found" }, 404);
   if (!siteEnabled(c.env)) return c.text("404 Not Found", 404);
-  return render(c, <NotFound />, 404);
+  return lost(c);
 }
 
 /** Hands the stored copy's write to the execution context (a context-less call just skips the copy). */
@@ -101,7 +111,7 @@ export const siteRouter = new Hono<{ Bindings: Env }>();
 
 siteRouter.onError((err, c) => {
   console.error("site handler failed", err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 200) : "unknown error");
-  return render(c, <ServerError />, 500);
+  return render(c, <ServerError link={linkTo(c, null)} />, 500);
 });
 
 // --- Home: the change feed -------------------------------------------------------------------
@@ -136,6 +146,7 @@ siteRouter.get("/", async (c) => {
       c,
       <Home
         stats={stats}
+        link={linkTo(c, "/")}
         weekCount={weekCount}
         changes={changes}
         before={before}
@@ -161,7 +172,7 @@ siteRouter.get("/pages/:id", async (c) => {
   // stamp and spend meter need (six statements) and the page's versions and runs (two), none with a text.
   // v= and at= are resolved from the versions already read.
   const head = await findPage(c.env, pageId);
-  if (head === null) return render(c, <NotFound />, 404);
+  if (head === null) return lost(c);
   // The default view (no query) may come from the stored copy: the page exists, which is all a hit needs.
   const key = onlyParams(c.req.url) ? cacheKey.page(pageId) : null;
   const hit = await stored(c, key);
@@ -178,7 +189,7 @@ siteRouter.get("/pages/:id", async (c) => {
   const atRaw = c.req.query("at")?.trim();
   if (v) {
     const hit = versions.find((version) => version.id === v);
-    if (hit === undefined) return render(c, <NotFound />, 404);
+    if (hit === undefined) return lost(c);
     selected = hit;
   } else if (atRaw && versions.length > 0) {
     const at = parseAsOfInput(atRaw);
@@ -213,7 +224,15 @@ siteRouter.get("/pages/:id", async (c) => {
     key,
     render(
       c,
-      <PageView stats={stats} detail={detail} selected={selected} asOf={asOf} text={text} nowMs={nowMs} />,
+      <PageView
+        stats={stats}
+        detail={detail}
+        selected={selected}
+        asOf={asOf}
+        text={text}
+        nowMs={nowMs}
+        link={linkTo(c, `/pages/${encodeURIComponent(pageId)}`)}
+      />,
       200,
       kept ? KEEP_A_MINUTE : {},
     ),
@@ -231,7 +250,7 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   // version this page does not have is the 404 too, and only then is the diff read (one query when it is
   // stored, or the two texts and two counts and the cache write when it is not).
   const head = await findPage(c.env, pageId);
-  if (head === null) return render(c, <NotFound />, 404);
+  if (head === null) return lost(c);
   // A compare with no parameter but from= and to= may come from the stored copy, found by the concrete pair; a hit
   // needs the versions (to name the pair) but not the stats, which are read after it.
   const cacheable = onlyParams(c.req.url, ["from", "to"]);
@@ -246,9 +265,24 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   };
   let fromIndex = indexOf(c.req.query("from"));
   let toIndex = indexOf(c.req.query("to"));
-  if (fromIndex === -1 || toIndex === -1) return render(c, <NotFound />, 404);
+  if (fromIndex === -1 || toIndex === -1) return lost(c);
 
-  const view = (state: CompareState, stats: Stats) => <CompareView stats={stats} page={head.page} versions={items} state={state} />;
+  // The preview's address is the pair on screen (a compare without from= or to= names the pair it resolved to).
+  const comparePath = `/pages/${encodeURIComponent(pageId)}/compare`;
+  const view = (state: CompareState, stats: Stats) => (
+    <CompareView
+      stats={stats}
+      page={head.page}
+      versions={items}
+      state={state}
+      link={linkTo(
+        c,
+        state.kind === "diff"
+          ? `${comparePath}?from=${encodeURIComponent(state.from.id)}&to=${encodeURIComponent(state.to.id)}`
+          : comparePath,
+      )}
+    />
+  );
   if (versions.length < 2) return render(c, view({ kind: "single" }, await statsNow()), 200, KEEP_A_MINUTE);
 
   // Versions are newest first. Without to=, the latest; without from=, the one just before `to` (the one
@@ -267,7 +301,7 @@ siteRouter.get("/pages/:id/compare", async (c) => {
   const statsRead = await statsNow();
   const answer = await diffVersions(c.env, head.page, from.row, to.row);
   // A version deleted between the two reads.
-  if (answer === null) return render(c, <NotFound />, 404);
+  if (answer === null) return lost(c);
   const diff = answer.diff;
   // Where the sections stand, so the groups go in page order: from the diff itself when its lists settle it
   // (placesFromDiff), else one more query, searched in D1, and only when there are two sections or more.
@@ -307,11 +341,12 @@ siteRouter.get("/about", async (c) => {
       c,
       <About
         stats={stats}
+        link={linkTo(c, "/about")}
         featured={featured}
         sample={changes[0] ?? null}
         layoutExample={layoutOnly[0] ?? null}
         retired={pages.filter((p) => p.status === "retired")}
-        baseUrl={c.env.PUBLIC_BASE_URL.replace(/\/+$/, "")}
+        baseUrl={baseUrl(c.env)}
         repoUrl={webHref(c.env.REPO_URL ?? "")}
       />,
       200,
@@ -385,12 +420,17 @@ async function readAddForm(c: AppContext): Promise<FormRead> {
 function watchlist(
   c: AppContext,
   read: { stats: WatchlistProps["stats"]; pages: WatchlistProps["pages"] },
-  rest: Omit<WatchlistProps, "stats" | "pages" | "nowMs">,
+  rest: Omit<WatchlistProps, "stats" | "pages" | "nowMs" | "link">,
   status: ContentfulStatusCode = 200,
 ): Response | Promise<Response> {
   // A screen that answers the add form or the search is never kept: it is that visitor's answer, once.
   const answered = rest.refusal !== null || rest.find !== null;
-  return render(c, <Watchlist stats={read.stats} pages={read.pages} nowMs={Date.now()} {...rest} />, status, answered ? NEVER_KEEP : {});
+  return render(
+    c,
+    <Watchlist stats={read.stats} pages={read.pages} nowMs={Date.now()} link={linkTo(c, "/watchlist")} {...rest} />,
+    status,
+    answered ? NEVER_KEEP : {},
+  );
 }
 
 siteRouter.get("/watchlist", async (c) => {
