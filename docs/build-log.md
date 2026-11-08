@@ -224,10 +224,12 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 
 - **Stored screens, review fixes (8 Nov).** The health step's status changes and a price table that lands late now drop the screens they touch; a stored copy older than 24 hours is rendered and stored again; and a tick that has already made more than 12 invocations rebuilds only home, About and the watchlist.
 
+- **First public add, 7 Nov 14:19 UTC.** Stripe pricing through the site's own form (`POST /watchlist`): 303 to its page, baseline with screenshot, source and thumbnail within about 25 seconds, no price table (public page), watched until 14 Nov 14:20 UTC.
+- **Stored copies of the screens (Task 9), live 8 Nov.** Deployed at 05:19:48 UTC (version `8ab91c86`). Home, About, the watchlist, each page's default view and its default compare are served from a copy in R2 (`html/<key>`): the first request renders and stores it (`x-fineprint-cache: miss`), later ones read it (`hit`). A new version drops the copies that show it; an add, retirement, expiry or status change drops the watchlist's; a copy is never older than 24 hours; the hourly job rebuilds home, About and the watchlist and pre-warms up to five changed pages (at most 8 calls a tick, fewer on a busy tick). CPU on production (8 Nov, `wrangler tail`, ten requests each; median ms): stored copy home 1, About 1, watchlist 1, page view 3, compare 4; a fresh render (the first visit after a change, or the rebuild's own invocation) home 35, About 13, watchlist 12, page view 8, compare 21. The 06:00 UTC cron ran (23 ms CPU) and its eight rebuild calls answered 200; the scheduled webhooks at 05:35 (Ryanair) and 05:59 (OpenAI terms) were recorded.
+
 ## Open before submission (17 Nov)
 
-1. The site's render cost (above): bring the HTML screens back under the free plan's per-request CPU allowance, or decide to accept it.
-2. The first public add, once the site is on (about $0.08 over its 7 days).
+1. The submission phase: README, hero image, demo and posts.
 
 ## Live TinyFish calls during the build
 
