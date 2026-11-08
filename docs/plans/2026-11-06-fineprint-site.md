@@ -620,6 +620,29 @@ expect(costLine(stats({ spend_usd: 0.3, changes: 0 }))).toBe("TinyFish spend so 
 - [ ] **Step 3: Verify on production:** `/`, a page view, a compare, `/watchlist`, `/about` answer 200; `/api/stats` answers JSON; the next scheduled webhook is recorded; the hourly cron ran.
 - [ ] **Step 4: Update `docs/build-log.md`** (what went live, when, the CPU numbers) and the README's live URL line; commit and push. Then stop.
 
+### Task 9: Stored copies of the screens (a render cache)
+
+Measured on production after Task 8, each HTML screen cost 14 to 26 ms of CPU (median) against 2 to 3 ms for the JSON API, the cost being the render itself. The fix serves the screens a visitor is likely to open from a stored copy.
+
+- [x] **Step 1: Store and serve.** Copies in R2 keyed by the screen and its identity, never by the query string: home, about, watchlist, a page's default view, a page's default compare. Any other parameter renders fresh. A hit replays the fresh render's headers and adds `x-fineprint-cache: hit`; a miss renders, answers and stores the copy after the response. Never stored: a 404 or any non-200, a page waiting for its screenshot, a form result.
+- [x] **Step 2: Invalidate.** The step that computes a new version's summary and delta (never the webhook handler) drops home, about, that page's view and its compares; an add, a retirement, an expiry, a deletion or a status change drops the watchlist, home and about. A copy is never older than 24 hours.
+- [x] **Step 3: Rebuild.** The hourly job, as its last step, rebuilds home, about and the watchlist and pre-warms the views of pages changed in the last 24 hours, each in its own invocation, at most 8 a tick and only the three fixed screens on a busy tick.
+- [x] **Step 4: Say so.** About's honest limits say the home's counts can trail by up to an hour.
+- [x] **Step 5: Measure.** Stored copies: home, about and the watchlist 1 ms, a page view 3 ms, a compare 4 ms (median); fresh renders 8 to 35 ms, now paid on the first visit after a change or in the rebuild's own invocation.
+
+### Task 10: The submission package
+
+The build is complete; this task packages it for review. Nothing in it costs TinyFish money. Every production deploy, the `REPO_URL` change and the visibility change wait for Hamdan's own yes.
+
+- [ ] **10.1 README** in the shared order (PRINCIPLES rule 14): the hero image and what Fineprint is; the live URL with the three clicks a reviewer needs (the home, the page with the most versions, its largest compare) and the recording start date; how TinyFish is used (the table, and why each of the five services is needed); run locally; how it was built and verified (spec and plans, tests, mocks, the webhook rehearsal, live since 3 Nov with the 3-day minimum met on 6 Nov, the noise rules, the stored copies and their measured CPU); the API; limits and posture written for review day; license.
+- [ ] **10.2 Hero and social images** (PRINCIPLES rule 13): one comp `design/hero.html` in the Stamped Ledger world (the wordmark and its stamp, the line "A dated record of the web's small print.", one real screenshot of the live home as a bordered card with the hard shadow), rendered with headless Chrome to `docs/hero.png` (1600x800) and `public/assets/social.png` (1200x630).
+- [ ] **10.3 Link previews:** `og:type`, `og:site_name`, `og:url`, `og:image` (absolute, 1200x630) and the `twitter:` card tags on every screen; the stored copies' keys carry a deploy stamp so a markup change never serves old markup, and the previous stamp's copies are deleted by name (never by listing a shared prefix).
+- [ ] **10.4 An honest state at the price-table budget line:** a version whose price-table run cannot start because spending on price tables is paused says so everywhere a version appears, with the same shape in every JSON reply, and `/api/stats` counts it. Copy: `Price table not read: spending on price tables is paused at the $6 line. The change itself is recorded, with its screenshot and diff.`
+- [ ] **10.5 Demo script** (`docs/demo-script.md`): a 60 to 90 second shot list, one URL and one line per shot.
+- [ ] **10.6 Posts** (`docs/posts.md`): an X post and a LinkedIn post in Hamdan's voice, figures filled from `/api/stats` on the day.
+- [ ] **10.7 Submission sheet** (`docs/submission.md`): links, a three-sentence description, the requirement-to-proof map, the reviewer's three clicks and the TinyFish endpoints.
+- [ ] **10.8 Before the repository goes public:** a secret scan of the whole history that prints counts only; `.impeccable/` ignored; `REPO_URL` set and deployed in the same hour; dated README figures; CI green; tag `v1.0.0`; Hamdan changes the visibility himself.
+
 ## Not in this plan
 
 Admin screens (the runbook's curl commands stay the admin surface); the README rewrite, hero image, demo recording and post drafts (the submission phase); dark mode; per-change social images; filters or search on the feed; email or push alerts.
