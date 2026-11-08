@@ -75,6 +75,19 @@ export function liveParts(s: Stats): string[] {
  */
 export const FACTS_PAUSED_COPY = `Price table not read: spending on price tables is paused at the $${FACTS_PAUSE_USD} line. The change itself is recorded, with its screenshot and diff.`;
 
+/**
+ * Whether a version's prices area says FACTS_PAUSED_COPY: its facts are `paused`, or, while the price-table pause
+ * holds (`factsPaused`, the stats), still `pending` with its screenshot and source stored, so not yet reached by
+ * the hourly job's hold. Without both stored it is still being captured, and says so as before.
+ */
+export function saysFactsPaused(
+  v: { facts_status: string; screenshot_url: string | null; source_url: string | null },
+  factsPaused: boolean,
+): boolean {
+  if (v.facts_status === "paused") return true;
+  return factsPaused && v.facts_status === "pending" && v.screenshot_url !== null && v.source_url !== null;
+}
+
 /** The footer's line under the spend meter while spending on price tables is paused and the rest of the budget is not. */
 export const FACTS_PAUSED_LINE = `Spending on price tables is paused at the $${FACTS_PAUSE_USD} line; changes are still recorded, with their screenshots and diffs.`;
 

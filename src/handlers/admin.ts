@@ -2,14 +2,14 @@
 // re-point every Monitor's webhook at a new host, and pull one overdue Monitor check. Each route
 // checks the admin token first, so an unknown page or a bad body never tells a stranger anything.
 import { Hono } from "hono";
-import { adminOnly } from "../auth";
+import { adminOnly, productionHostOnly } from "../auth";
 import { needsFacts, spendPaused } from "../capture";
 import { isFetchFailure, judgeChange, normalizedHash, readIgnorePatterns, type Verdict } from "../core/gate";
 import { PULL_BACKOFF_AFTER_FAILURES, PULL_BACKOFF_MS } from "../core/limits";
 import { PRICES, recordSpendOnce } from "../core/spend";
 import { changedRunsForReplay, clearNoise, markNoise } from "../db/runs";
 import { deleteCachedDiffsOfPage } from "../db/diffCache";
-import { clearPullFailures, getPage, listPageIds, listPages, notePullFailure, setPageStatusIf, updatePage } from "../db/pages";
+import { clearPullFailures, getPage, listPageIdsAfter, listPages, notePullFailure, setPageStatusIf, updatePage } from "../db/pages";
 import type { VersionRow } from "../db/types";
 import { baselineVersion, countVersionsWithoutThumb, getVersion, insertVersion, latestVersion, versionsWithoutThumb } from "../db/versions";
 import type { Env } from "../env";
@@ -264,11 +264,16 @@ adminRouter.post("/admin/rebuild-html", adminOnly, async (c) => {
 
 /**
  * The clean-up after a deploy (src/site/htmlCache.ts sweepStoredScreens): deletes the stored screens of the stamp
- * the last sweep was for, or, the first time, the copies kept under html/ before the stamp, by name; then records
- * this deploy's stamp. Answers `{stamp, previous, deleted}`; a second call for the same stamp deletes nothing.
- * The hourly job's rebuild step calls it, in an invocation of its own, when the recorded stamp is not its own.
+ * the last sweep was for, or, the first time, the copies kept under html/ before the stamp, by name, at most
+ * LEGACY_PAGES_PER_SWEEP page ids a call; then records this deploy's stamp. Answers `{stamp, previous, deleted,
+ * done}`; `done` false means another call is needed, and a call for a stamp already recorded deletes nothing. The
+ * hourly job's rebuild step calls it, in an invocation of its own, while the recorded stamp is not its own. Only
+ * on the deployed Worker's own hosts (403 `not_production` on a preview URL, whose stamp is another version's).
+ * rebuild-html needs no such guard: a preview's rebuild writes under its own stamp, which production never reads.
  */
-adminRouter.post("/admin/sweep-screens", adminOnly, async (c) => c.json(await sweepStoredScreens(c.env, () => listPageIds(c.env.DB))));
+adminRouter.post("/admin/sweep-screens", adminOnly, productionHostOnly, async (c) =>
+  c.json(await sweepStoredScreens(c.env, (after, limit) => listPageIdsAfter(c.env.DB, after, limit))),
+);
 
 // --- Thumbnails ---------------------------------------------------------------------------------
 

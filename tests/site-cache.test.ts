@@ -12,7 +12,7 @@ import { insertPage, type NewPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { RunRow, TriggerKind } from "../src/db/types";
 import { insertVersion, type NewVersion } from "../src/db/versions";
-import { REBUILD_CALLS_PER_TICK } from "../src/core/limits";
+import { REBUILD_BUSY_TICK_CALLS, REBUILD_CALLS_PER_TICK } from "../src/core/limits";
 import {
   cacheKey,
   deployStamp,
@@ -582,6 +582,7 @@ describe("stored screens follow status changes and late price tables", () => {
 /** The Worker as another deploy (another version id) would run it, with the stored copy on. */
 const asDeploy = (id: string) => ({ ...cacheOn, CF_VERSION_METADATA: { id, tag: "", timestamp: "" } });
 
+/** `path` may be a full url, for a request that reaches the Worker on another host (a preview URL). */
 async function callAs(id: string, path: string, init?: RequestInit): Promise<Response> {
   const ctx = createExecutionContext();
   const response = await worker.fetch(new Request(new URL(path, "https://fineprint.test"), init), asDeploy(id), ctx);
@@ -627,12 +628,12 @@ describe("stored screens are keyed by the deploy", () => {
     for (const key of ["home", "page/alpha", "compare/alpha/a-2/a-3"]) await env.STORE.put(`screens/deploy-a/${key}`, "<p>a</p>");
     for (const key of ["home", "about"]) await env.STORE.put(`screens/deploy-b/${key}`, "<p>b</p>");
     const first = await callAs("deploy-b", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN });
-    expect(await first.json()).toEqual({ stamp: "deploy-b", previous: "deploy-a", deleted: 3 });
+    expect(await first.json()).toEqual({ stamp: "deploy-b", previous: "deploy-a", deleted: 3, done: true });
     expect(await everything()).toEqual([SOURCE, "screens/deploy-b/about", "screens/deploy-b/home", "screens/stamp"].sort());
     expect(await (await env.STORE.get("screens/stamp"))!.text()).toBe("deploy-b");
     // Once the marker is this deploy's, a sweep deletes nothing, this deploy's copies least of all.
     const again = await callAs("deploy-b", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN });
-    expect(await again.json()).toEqual({ stamp: "deploy-b", previous: "deploy-b", deleted: 0 });
+    expect(await again.json()).toEqual({ stamp: "deploy-b", previous: "deploy-b", deleted: 0, done: true });
     expect(await everything()).toContain("screens/deploy-b/home");
   });
 
@@ -645,7 +646,7 @@ describe("stored screens are keyed by the deploy", () => {
     const list = vi.spyOn(env.STORE, "list");
     const res = await callAs("deploy-a", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ stamp: "deploy-a", previous: null });
+    expect(await res.json()).toMatchObject({ stamp: "deploy-a", previous: null, done: true });
     // Only each page's own compares were listed.
     expect(list.mock.calls.map(([o]) => o?.prefix).sort()).toEqual(["html/compare/alpha/", "html/compare/beta/"]);
     list.mockRestore();
@@ -656,6 +657,78 @@ describe("stored screens are keyed by the deploy", () => {
     await callAs("deploy-b", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN });
     expect(await everything()).toContain("html/home");
     expect(await everything()).toContain(SOURCE);
+  });
+
+  it("the sweep answers only on production's own hosts: a preview URL is refused, the SELF binding and PUBLIC_BASE_URL are not", async () => {
+    // Production's stamp is in the marker and its copies are stored; a preview runs another version (another stamp).
+    await env.STORE.put("screens/stamp", "deploy-prod");
+    await env.STORE.put("screens/deploy-prod/home", "<p>production</p>");
+    for (const url of ["https://abc123-fineprint.example.workers.dev/api/admin/sweep-screens", "https://preview.example/api/admin/sweep-screens"]) {
+      const refused = await callAs("deploy-preview", url, { method: "POST", headers: ADMIN });
+      expect(refused.status, url).toBe(403);
+      expect(await refused.json()).toEqual({ error: "not_production" });
+    }
+    expect(await env.STORE.head("screens/deploy-prod/home")).not.toBeNull();
+    expect(await (await env.STORE.get("screens/stamp"))!.text()).toBe("deploy-prod");
+    // Without the token it is still a 401 first, whatever the host.
+    expect((await callAs("deploy-preview", "https://preview.example/api/admin/sweep-screens", { method: "POST" })).status).toBe(401);
+    // Through the SELF binding (the hourly job's own call) it runs, as the deployed version.
+    const viaSelf = await env.SELF.fetch("https://fineprint.internal/api/admin/sweep-screens", { method: "POST", headers: ADMIN });
+    expect(viaSelf.status).toBe(200);
+    expect(await viaSelf.json()).toMatchObject({ stamp: STAMP, previous: "deploy-prod", done: true });
+    // And on PUBLIC_BASE_URL's host (https://fineprint.test in the tests).
+    expect((await callAs("deploy-next", "https://fineprint.test/api/admin/sweep-screens", { method: "POST", headers: ADMIN })).status).toBe(200);
+  });
+
+  it("a rebuild on a preview URL writes only under the preview's own stamp, never production's copies", async () => {
+    await env.STORE.put("screens/deploy-prod/about", "<p>production</p>", { customMetadata: { headers: "{}", at: String(Date.now()) } });
+    const res = await callAs("deploy-preview", "https://preview.example/api/admin/rebuild-html?key=about", { method: "POST", headers: ADMIN });
+    expect(await res.json()).toEqual({ key: "about", stored: true });
+    expect(await env.STORE.head("screens/deploy-preview/about")).not.toBeNull();
+    expect(await (await env.STORE.get("screens/deploy-prod/about"))!.text()).toBe("<p>production</p>");
+  });
+
+  it("the html/ clean-up takes at most 20 page ids a call, resumes on the next, and each call stays far inside 50 subrequests", async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 45; i++) {
+      const id = `p-${String(i).padStart(2, "0")}`;
+      ids.push(id);
+      await insertPage(db, { ...page(id), url: `https://example.com/many/${id}` });
+      await env.STORE.put(`html/page/${id}`, "<p>old</p>");
+      await env.STORE.put(`html/compare/${id}/x/y`, "<p>old</p>");
+    }
+    for (const key of ["home", "about", "watchlist"]) await env.STORE.put(`html/${key}`, "<p>old</p>");
+    const legacyLeft = async () => (await everything()).filter((k) => k.startsWith("html/") && k !== SOURCE).length;
+    expect(await legacyLeft()).toBe(3 + 45 * 2);
+    const answers: { done: boolean }[] = [];
+    for (let call = 0; call < 4; call++) {
+      const counts = (["get", "put", "list", "delete", "head"] as const).map((m) => vi.spyOn(env.STORE, m));
+      const queries = vi.spyOn(db, "prepare");
+      const res = await callAs("deploy-a", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN });
+      answers.push((await res.json()) as { done: boolean });
+      const used = counts.reduce((n, spy) => n + spy.mock.calls.length, 0) + queries.mock.calls.length;
+      for (const spy of [...counts, queries]) spy.mockRestore();
+      expect(used, `call ${call + 1}`).toBeLessThanOrEqual(30);
+      if (answers.at(-1)!.done) break;
+    }
+    // alpha (from beforeEach) and the 45: 46 page ids, so three calls of at most 20.
+    expect(answers.map((a) => a.done)).toEqual([false, false, true]);
+    expect((await everything()).filter((k) => k.startsWith("html/"))).toEqual([SOURCE]);
+    expect(await (await env.STORE.get("screens/stamp"))!.text()).toBe("deploy-a");
+  });
+
+  it("a deploy in the middle of the html/ clean-up finishes it, then takes the earlier deploy's copies", async () => {
+    for (let i = 0; i < 25; i++) await insertPage(db, { ...page(`q-${String(i).padStart(2, "0")}`), url: `https://example.com/q/${i}` });
+    await env.STORE.put("screens/deploy-a/home", "<p>a</p>");
+    expect(await (await callAs("deploy-a", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN })).json()).toMatchObject({ done: false });
+    // The next deploy goes on from where the clean-up stopped, then names the stamp it began under.
+    expect(await (await callAs("deploy-b", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN })).json()).toMatchObject({ done: false });
+    expect(await (await env.STORE.get("screens/stamp"))!.text()).toBe("deploy-a");
+    expect(await (await callAs("deploy-b", "/api/admin/sweep-screens", { method: "POST", headers: ADMIN })).json()).toMatchObject({
+      previous: "deploy-a",
+      done: true,
+    });
+    expect(await env.STORE.head("screens/deploy-a/home")).toBeNull();
   });
 
   it("the sweep needs the admin token", async () => {
@@ -681,6 +754,34 @@ describe("stored screens are keyed by the deploy", () => {
     const sweep = vi.spyOn(cronDeps, "sweep");
     await runCron(cacheOn);
     expect(sweep).not.toHaveBeenCalled();
+  });
+
+  it("the clean-up's own invocation counts towards a busy tick", async () => {
+    const asked: string[] = [];
+    vi.spyOn(cronDeps, "rebuild").mockImplementation(async (_env, key) => (asked.push(key), new Response("{}")));
+    // The clean-up's call goes through the tick's SELF binding, as the real one does.
+    vi.spyOn(cronDeps, "sweep").mockImplementation(async (e) => {
+      await (await e.SELF.fetch("https://fineprint.internal/api/stats")).arrayBuffer();
+      return Response.json({ stamp: STAMP, previous: null, deleted: 0, done: true });
+    });
+    // No other call goes through the binding: the pull and the delta fill answer here.
+    vi.spyOn(cronDeps, "pull").mockResolvedValue(Response.json({ ok: true, pulled: false, reason: "x" }));
+    vi.spyOn(summaryDeps, "fillDeltas").mockResolvedValue(new Response("{}"));
+    const realFill = summaryDeps.fill;
+    // Exactly the busy line's worth of calls before the last step: the clean-up's makes it a busy tick.
+    summaryDeps.fill = async (e) => {
+      for (let i = 0; i < REBUILD_BUSY_TICK_CALLS; i++) await (await e.SELF.fetch("https://fineprint.internal/api/stats")).arrayBuffer();
+      return new Response("{}");
+    };
+    fetchMock.activate();
+    fetchMock.intercept({ method: "GET", url: "https://agent.tinyfish.ai/v1/monitors", times: Infinity, reply: { json: { monitors: [] } } });
+    try {
+      await runCron(cacheOn);
+    } finally {
+      summaryDeps.fill = realFill;
+      fetchMock.reset();
+    }
+    expect(asked).toEqual(["home", "about", "watchlist"]);
   });
 
   it("a failed clean-up is logged, the rebuilds still run, and the next tick asks again", async () => {

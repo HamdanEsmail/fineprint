@@ -13,7 +13,7 @@ import { cronDeps, runCron } from "../src/cron";
 import { insertPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { PageKind, VersionRow } from "../src/db/types";
-import { getVersion, insertVersion, nextFactsCandidate, type NewVersion } from "../src/db/versions";
+import { getVersion, insertVersion, nextFactsCandidate, setCaptureStatusIfUnchanged, updateCapture, type NewVersion } from "../src/db/versions";
 import worker from "../src/index";
 import { deployStamp } from "../src/site/htmlCache";
 import { fetchMock } from "./helpers/fetch-mock";
@@ -161,7 +161,9 @@ describe("the paused state in the status rule", () => {
 
   it.each([
     ["paused and queued", "paused", "awaiting_facts", row({ ...both, facts_status: "paused" })],
-    ["paused, screenshot still to take", "paused", "partial", row({ html_key: "h", facts_status: "paused" })],
+    // Only a version with its screenshot and source stored is held: anything else keeps today's state.
+    ["paused, screenshot still to take", "pending", "partial", row({ html_key: "h", facts_status: "paused" })],
+    ["paused, nothing captured", "pending", "partial", row({ facts_status: "paused" })],
     ["paused, then its facts are stored", "ok", "complete", row({ ...both, facts_status: "paused", facts_json: "[]" })],
     ["paused with a run (only after the line is raised)", "pending", "awaiting_facts", row({ ...both, facts_status: "paused", agent_run_id: "run-1" })],
     ["paused at the attempt cap, both stored", "unavailable", "complete", row({ ...both, facts_status: "paused", capture_attempts: CAPTURE_MAX_ATTEMPTS })],
@@ -173,17 +175,17 @@ describe("the paused state in the status rule", () => {
 });
 
 describe("a version whose price table cannot start because spending on price tables is paused", () => {
-  it("a version created while paused takes the state as its capture starts, and no run starts", async () => {
+  it("a version created while paused takes the state once its screenshot and source are stored, and no run starts", async () => {
     mockCapture();
     await spend(6.5);
     const id = await seedVersion(await seedPage(), { capture_status: "pending", facts_status: "pending" });
     let during: string | undefined;
     shot.mockImplementation(async () => {
-      during = (await version(id)).facts_status; // already said while the screenshot is being taken
+      during = (await version(id)).facts_status; // nothing is stored yet: the copy would say "with its screenshot"
       return { bytes: JPEG.slice().buffer, height: 800, sessionId: "s" };
     });
     await captureVersion(env, id);
-    expect(during).toBe("paused");
+    expect(during).toBe("pending");
     expect(await version(id)).toMatchObject({ capture_status: "awaiting_facts", facts_status: "paused", agent_run_id: null, screenshot_key: `shots/${id}.jpg` });
     expect(runAsyncCount()).toBe(0);
     // Another capture (the repair) keeps it.
@@ -191,11 +193,40 @@ describe("a version whose price table cannot start because spending on price tab
     expect((await version(id)).facts_status).toBe("paused");
   });
 
-  it("at the spend pause too, the capture that is skipped says so", async () => {
+  it("a capture that fails without its screenshot during the pause keeps its facts pending, and so does the tick", async () => {
+    mockCapture();
+    await spend(6.5);
+    shot.mockRejectedValue(new Error("CDP timeout"));
+    const id = await seedVersion(await seedPage(), { capture_status: "pending", facts_status: "pending" });
+    for (let i = 0; i < CAPTURE_MAX_ATTEMPTS; i++) await captureVersion(env, id);
+    expect(await version(id)).toMatchObject({ capture_status: "failed", facts_status: "pending", screenshot_key: null });
+    const partial = await seedVersion(await seedPage(), { html_key: "html/p.html", capture_status: "partial", facts_status: "pending", capture_attempts: 1 });
+    await tick();
+    expect((await version(id)).facts_status).toBe("pending");
+    expect((await version(partial)).facts_status).toBe("pending");
+  });
+
+  it("at the spend pause the capture is skipped whole and the facts stay pending; a queued version with both stored is held", async () => {
     await spend(8);
     const id = await seedVersion(await seedPage(), { capture_status: "pending", facts_status: "pending" });
     await captureVersion(env, id);
-    expect(await version(id)).toMatchObject({ capture_status: "pending", capture_error: "spend_paused", facts_status: "paused" });
+    expect(await version(id)).toMatchObject({ capture_status: "pending", capture_error: "spend_paused", facts_status: "pending" });
+    const stored = await queued(await seedPage());
+    await tick();
+    expect((await version(id)).facts_status).toBe("pending");
+    expect((await version(stored)).facts_status).toBe("paused");
+  });
+
+  it("no write of the status flips a held version back to pending", async () => {
+    const id = await queued(await seedPage(), { facts_status: "paused" });
+    await updateCapture(db, id, { facts_status: "pending", capture_status: "complete", capture_error: "x" });
+    expect(await version(id)).toMatchObject({ facts_status: "paused", capture_status: "complete", capture_error: "x" });
+    const seen = await version(id);
+    expect(await setCaptureStatusIfUnchanged(db, seen, "awaiting_facts", null, "pending")).toBe(true);
+    expect(await version(id)).toMatchObject({ facts_status: "paused", capture_status: "awaiting_facts", capture_error: null });
+    // Facts that land, or attempts used up, still settle it.
+    await updateCapture(db, id, { facts_status: "ok", facts_json: "[]" });
+    expect((await version(id)).facts_status).toBe("ok");
   });
 
   it("a page that needs no price table is not paused", async () => {
@@ -260,6 +291,34 @@ describe("a version whose price table cannot start because spending on price tab
     await tick();
     expect(await version(id)).toMatchObject({ facts_status: "pending", agent_run_id: "agent-run-1" });
     expect(runAsyncCount()).toBe(1);
+  });
+
+  it("raising the line queues again only versions the queue would start: a retired page's stays as it is", async () => {
+    const page = await seedPage();
+    const gone = await queued(page, { facts_status: "paused" });
+    await db.prepare("UPDATE pages SET status = 'retired' WHERE id = ?").bind(page).run();
+    await spend(3);
+    await tick();
+    expect((await version(gone)).facts_status).toBe("paused");
+  });
+
+  it("the tick drops the stored screens of the pages it held after the overdue pulls", async () => {
+    const order: string[] = [];
+    const page = await seedPage();
+    await queued(page);
+    await spend(6.5);
+    const del = env.STORE.delete.bind(env.STORE);
+    vi.spyOn(env.STORE, "delete").mockImplementation(async (keys) => {
+      if ([keys].flat().some((k) => k.includes(`page/${page}`))) order.push("drop");
+      return del(keys);
+    });
+    fetchMock.intercept({ method: "GET", url: MONITORS_API, times: Infinity, reply: { json: { monitors: [] } } });
+    vi.spyOn(cronDeps, "rebuild").mockResolvedValue(new Response("{}"));
+    vi.spyOn(cronDeps, "sweep").mockResolvedValue(Response.json({ stamp: "x", previous: "x", deleted: 0, done: true }));
+    vi.spyOn(cronDeps, "pull").mockImplementation(async () => (order.push("pull"), Response.json({ ok: true, pulled: false, reason: "x" })));
+    await runCron({ ...env, HTML_CACHE: "1" } as typeof env);
+    expect(order[0]).toBe("pull");
+    expect(order).toContain("drop");
   });
 
   it("the facts queue never starts a run for a paused version", async () => {
@@ -329,6 +388,22 @@ describe("the paused state everywhere a version appears", () => {
     expect(compare).toContain('<h2 id="facts-h">Prices</h2>');
     expect(compare).toContain(COPY);
     expect(compare).not.toContain("Reading prices…");
+  });
+
+  it("while the pause holds, a pending version with its screenshot and source says so before the tick holds it", async () => {
+    const page = await seedPage();
+    const a = await seedVersion(page, { ...both, capture_status: "complete", facts_status: "ok", facts_json: JSON.stringify(ITEMS) });
+    const b = await queued(page, { is_baseline: 0, summary: "Changed.", summary_source: "diff" });
+    await spend(6.5);
+    const view = await html(`/pages/${page}`);
+    expect(view).toContain(`<p class="facts-note">${COPY}</p>`);
+    expect(view).not.toContain("Reading prices…");
+    expect(await html(`/pages/${page}/compare?from=${a}&to=${b}`)).toContain(COPY);
+    // Without its source stored, it is still reading.
+    const young = await seedVersion(await seedPage(), { screenshot_key: "shots/y.jpg", capture_status: "partial", facts_status: "pending", capture_attempts: 1 });
+    const youngView = await html(`/pages/${(await version(young)).page_id}`);
+    expect(youngView).toContain("Reading prices…");
+    expect(youngView).not.toContain(COPY);
   });
 
   it("a version still reading its prices is not called paused, and an unpaused screen has no pause line", async () => {

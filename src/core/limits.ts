@@ -56,10 +56,10 @@ export const FACTS_PAUSE_USD = 6;
 /**
  * The hourly job moves at most this many queued versions a tick to facts_status "paused" once the price-table
  * pause holds (and back to "pending" if the line is raised above the total), oldest first, and drops the stored
- * screens of their pages (one R2 list per page and one delete). The queue is serial, so at the pause it holds a
- * handful of versions at most; the rest move on later ticks.
+ * screens of their pages after the overdue pulls (one R2 list per page and one delete, so at most six calls). The
+ * queue is serial, so at the pause it holds a handful of versions at most; the rest move on later ticks.
  */
-export const FACTS_HOLD_PER_TICK = 10;
+export const FACTS_HOLD_PER_TICK = 5;
 
 /**
  * The partial-render guard (src/core/gate.ts). A changed read is suspect, and held for a confirm read

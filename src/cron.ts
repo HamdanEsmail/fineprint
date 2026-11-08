@@ -5,14 +5,16 @@
 // TinyFish no longer runs, retries captures that did not finish, asks for any missing summaries
 // and deltas, and, last, has the diff of one large version pair stored ahead of readers.
 //
-// The steps run in this order: facts upkeep, overdue pulls, expiry, health, repair, the summary
-// fills, the delta fills, and the large diff. Repair comes after the cheap steps and is capped
+// The steps run in this order: facts upkeep, overdue pulls, the stored screens of the pages the
+// price-table line moved, expiry, health, repair, the summary fills, the delta fills, the large diff,
+// and the stored screens. Repair comes after the cheap steps and is capped
 // (REPAIR_PER_TICK): each capture makes several outbound requests, the free plan allows 50 per
 // invocation, and a backlog must never starve the steps before it. Pulls are capped too
 // (PULLS_PER_TICK), and each runs in its own Worker invocation, as do the summary and delta fills
 // after repair (one or two requests each) and the large diff's store. Each step is wrapped on its
 // own, so one failing step never stops the others, and runCron never throws. It logs one summary
 // line; errors are logged by code, never with a secret or page text.
+import { SELF_ORIGIN } from "./auth";
 import { captureVersion, factsPaused, recordFactsResult, spendPaused, startNextFacts } from "./capture";
 import { lastTickAtOrBefore } from "./core/cronTick";
 import {
@@ -60,7 +62,7 @@ import { deleteMonitor, getMonitor, listMonitors, UNKNOWN_STATUS } from "./tinyf
 export const cronDeps = {
   pull: (env: Env, pageId: string): Promise<Response> =>
     env.SELF.fetch(
-      new Request(`https://fineprint.internal/api/admin/pull/${encodeURIComponent(pageId)}`, {
+      new Request(`${SELF_ORIGIN}/api/admin/pull/${encodeURIComponent(pageId)}`, {
         method: "POST",
         headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` },
       }),
@@ -68,7 +70,7 @@ export const cronDeps = {
   /** Stores the diff of one large pair in an invocation of its own (POST /api/admin/warm-diff). */
   warm: (env: Env, versionId: string): Promise<Response> =>
     env.SELF.fetch(
-      new Request(`https://fineprint.internal/api/admin/warm-diff?version=${encodeURIComponent(versionId)}`, {
+      new Request(`${SELF_ORIGIN}/api/admin/warm-diff?version=${encodeURIComponent(versionId)}`, {
         method: "POST",
         headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` },
       }),
@@ -76,7 +78,7 @@ export const cronDeps = {
   /** Cleans up the stored screens of an earlier deploy in an invocation of its own (POST /api/admin/sweep-screens). */
   sweep: (env: Env): Promise<Response> =>
     env.SELF.fetch(
-      new Request("https://fineprint.internal/api/admin/sweep-screens", {
+      new Request(`${SELF_ORIGIN}/api/admin/sweep-screens`, {
         method: "POST",
         headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` },
       }),
@@ -84,7 +86,7 @@ export const cronDeps = {
   /** Rebuilds one stored site screen in an invocation of its own (POST /api/admin/rebuild-html). */
   rebuild: (env: Env, key: string): Promise<Response> =>
     env.SELF.fetch(
-      new Request(`https://fineprint.internal/api/admin/rebuild-html?key=${encodeURIComponent(key)}`, {
+      new Request(`${SELF_ORIGIN}/api/admin/rebuild-html?key=${encodeURIComponent(key)}`, {
         method: "POST",
         headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` },
       }),
@@ -131,15 +133,18 @@ export async function runCron(realEnv: Env): Promise<CronResult> {
     SELF: { fetch: (...args: Parameters<Fetcher["fetch"]>) => (calls.n++, realEnv.SELF.fetch(...args)) } as unknown as Fetcher,
   } as Env;
   const result: CronResult = { repaired: 0, expired: 0, unhealthy: [], pulled: 0 };
-  await step("facts upkeep", () => factsUpkeep(env));
+  // The pages whose versions the price-table line moved: their stored screens are dropped after the pulls.
+  const moved = new Set<string>();
+  await step("facts upkeep", () => factsUpkeep(env, moved));
   await step("overdue pulls", () => pullOverdue(env, result));
+  await step("held screens", () => dropCachedPages(env, [...moved]));
   await step("expiry", () => expire(env, result));
   await step("health", () => health(env, result));
   await step("repair", () => repair(env, result));
   await step("summaries", () => fillMissingSummaries(env));
   await step("deltas", () => fillMissingDeltas(env));
   await step("large diffs", () => warmLargeDiff(env));
-  await step("stored screens", () => rebuildScreens(env, calls.n));
+  await step("stored screens", () => rebuildScreens(env, calls));
   console.log("cron", {
     repaired: result.repaired,
     expired: result.expired,
@@ -162,8 +167,10 @@ export async function runCron(realEnv: Env): Promise<CronResult> {
  * are more than fit. Never throws: a failed rebuild is logged and the copy is rebuilt on the next tick or the
  * next change.
  */
-async function rebuildScreens(env: Env, callsSoFar: number): Promise<void> {
+async function rebuildScreens(env: Env, calls: { n: number }): Promise<void> {
   await step("stored screens clean-up", () => sweepEarlierScreens(env));
+  // Counted after the clean-up, whose own invocation is one of the tick's.
+  const callsSoFar = calls.n;
   const now = cronDeps.now();
   const since = new Date(now.getTime() - REBUILD_WINDOW_HOURS * 60 * MINUTE_MS).toISOString();
   const room = REBUILD_CALLS_PER_TICK - REBUILD_FIXED_SCREENS.length;
@@ -194,8 +201,12 @@ async function sweepEarlierScreens(env: Env): Promise<void> {
     console.error("stored screens clean-up failed", `status=${res.status}`);
     return;
   }
-  const { previous, deleted } = (body ?? {}) as { previous?: unknown; deleted?: unknown };
-  console.log("stored screens clean-up", { previous: typeof previous === "string" ? previous : null, deleted: Number(deleted) || 0 });
+  const { previous, deleted, done } = (body ?? {}) as { previous?: unknown; deleted?: unknown; done?: unknown };
+  console.log("stored screens clean-up", {
+    previous: typeof previous === "string" ? previous : null,
+    deleted: Number(deleted) || 0,
+    done: done === true,
+  });
 }
 
 async function step(name: string, work: () => Promise<void>): Promise<void> {
@@ -218,29 +229,33 @@ const isoAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
 
 // --- 1. Facts upkeep --------------------------------------------------------------------
 
-async function factsUpkeep(env: Env): Promise<void> {
+async function factsUpkeep(env: Env, moved: Set<string>): Promise<void> {
   await step("stale claims", () => releaseStaleClaims(env));
   await step("facts follow-up", () => followUpRuns(env));
-  await step("facts pause", () => holdOrReleaseFacts(env));
+  // One read of the ledger for the line and the start below (undefined when it failed: the start reads it itself).
+  let paused: boolean | undefined;
+  await step("facts pause", async () => {
+    paused = await factsPaused(env.DB);
+    for (const pageId of await holdOrReleaseFacts(env, paused)) moved.add(pageId);
+  });
+  if (paused === true) return;
   // The one place that waits out rate limits: the cron has minutes of wall time, where
   // waitUntil work does not. A no-op while a run is in flight.
-  await startNextFacts(env, { waitOnRateLimit: true });
+  await startNextFacts(env, { waitOnRateLimit: true, factsPaused: paused });
 }
 
 /**
- * The price-table line. While it holds (FACTS_PAUSE_USD), the queued versions whose facts run cannot start move
- * from `pending` to `paused` (at most FACTS_HOLD_PER_TICK a tick, one UPDATE): the versions that were queued when
- * the pause began, and any a run failed back into the queue since. A version whose run is in flight keeps it. If
- * the line is ever raised above the total, paused versions go back to `pending` the same way, and the queue
- * starts them. Either way the stored screens of the pages moved are dropped, so a page view never shows a state
- * it no longer has.
+ * The price-table line. While it holds (FACTS_PAUSE_USD), the queued versions whose facts run cannot start and
+ * whose screenshot and source are stored move from `pending` to `paused` (at most FACTS_HOLD_PER_TICK a tick, one
+ * UPDATE): the versions that were queued when the pause began, and any a run failed back into the queue since. A
+ * version whose run is in flight keeps it. If the line is ever raised above the total, paused versions the queue
+ * would start go back to `pending` the same way, and the queue starts them. Returns the pages moved, whose stored
+ * screens the tick drops after the overdue pulls, so a page view never shows a state it no longer has.
  */
-async function holdOrReleaseFacts(env: Env): Promise<void> {
-  const paused = await factsPaused(env.DB);
+async function holdOrReleaseFacts(env: Env, paused: boolean): Promise<string[]> {
   const moved = paused ? await holdQueuedFacts(env.DB, FACTS_HOLD_PER_TICK) : await releaseHeldFacts(env.DB, FACTS_HOLD_PER_TICK);
-  if (moved.length === 0) return;
-  console.warn(`cron ${paused ? "held" : "queued again"} the price tables of ${moved.length} version(s) at the price-table line`);
-  await dropCachedPages(env, [...new Set(moved)]);
+  if (moved.length > 0) console.warn(`cron ${paused ? "held" : "queued again"} the price tables of ${moved.length} version(s) at the price-table line`);
+  return moved;
 }
 
 /**

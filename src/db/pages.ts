@@ -123,9 +123,15 @@ export async function listPages(db: D1Database): Promise<PageListRow[]> {
   return results;
 }
 
-/** Every page's id, whatever its status (the one-time clean-up of the stored screens, src/site/htmlCache.ts). */
-export async function listPageIds(db: D1Database): Promise<string[]> {
-  const { results } = await db.prepare("SELECT id FROM pages ORDER BY created_at, rowid").all<{ id: string }>();
+/**
+ * Up to `limit` page ids after `after` in id order, whatever the page's status (the one-time clean-up of the stored
+ * screens, src/site/htmlCache.ts, which goes through every page a batch at a time). `""` starts from the first.
+ */
+export async function listPageIdsAfter(db: D1Database, after: string, limit: number): Promise<string[]> {
+  const { results } = await db
+    .prepare("SELECT id FROM pages WHERE id > ? ORDER BY id LIMIT ?")
+    .bind(after, Math.max(0, Math.trunc(limit)) || 0)
+    .all<{ id: string }>();
   return results.map((r) => r.id);
 }
 

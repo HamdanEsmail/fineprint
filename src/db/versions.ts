@@ -734,13 +734,25 @@ export async function pendingCaptures(
   return results;
 }
 
-/** Sets the capture columns present in `patch` (undefined is skipped, null sets NULL). An empty patch does nothing. */
+/**
+ * facts_status as an UPDATE sets it to a bound value: a version held at the price-table line (`paused`) is never
+ * set back to `pending` by a status write worked out from an earlier read; only the hourly job's releaseHeldFacts
+ * queues it again. Binds the value twice.
+ */
+const SET_FACTS_STATUS = "facts_status = CASE WHEN facts_status = 'paused' AND ? = 'pending' THEN 'paused' ELSE ? END";
+
+/** Sets the capture columns present in `patch` (undefined is skipped, null sets NULL; see SET_FACTS_STATUS). An empty patch does nothing. */
 export async function updateCapture(db: D1Database, id: string, patch: CapturePatch): Promise<void> {
   const sets: string[] = [];
   const values: (string | number | null)[] = [];
   for (const column of CAPTURE_PATCH_COLUMNS) {
     const value = patch[column];
     if (value === undefined) continue;
+    if (column === "facts_status") {
+      sets.push(SET_FACTS_STATUS);
+      values.push(value, value);
+      continue;
+    }
     sets.push(`${column} = ?`);
     values.push(value);
   }
@@ -758,16 +770,9 @@ export function getVersionByAgentRunId(db: D1Database, runId: string): Promise<V
 
 /**
  * Adds one capture attempt in SQL (never a read-modify-write, so parallel attempts are all
- * counted) and returns the row as written, or null for an unknown id. `factsStatus`, when given, is
- * written in the same statement (a capture that finds the price-table pause, src/capture.ts).
+ * counted) and returns the row as written, or null for an unknown id.
  */
-export function addCaptureAttempt(db: D1Database, id: string, factsStatus?: FactsStatus): Promise<VersionRow | null> {
-  if (factsStatus !== undefined) {
-    return db
-      .prepare("UPDATE versions SET capture_attempts = capture_attempts + 1, facts_status = ? WHERE id = ? RETURNING *")
-      .bind(factsStatus, id)
-      .first<VersionRow>();
-  }
+export function addCaptureAttempt(db: D1Database, id: string): Promise<VersionRow | null> {
   return db
     .prepare("UPDATE versions SET capture_attempts = capture_attempts + 1 WHERE id = ? RETURNING *")
     .bind(id)
@@ -809,7 +814,8 @@ export async function updateIfFactsHolder(
  * Sets a version's status and error only if the columns the status rule reads (both keys,
  * the facts and the attempt count) are still what `seen` holds: a compare-and-set, so a
  * status worked out from an older read never overwrites a newer state. False when another
- * write changed them in between (that writer settles the status itself).
+ * write changed them in between (that writer settles the status itself). A held `paused` is
+ * kept (SET_FACTS_STATUS): the hourly job holds versions without settling them.
  */
 export async function setCaptureStatusIfUnchanged(
   db: D1Database,
@@ -820,10 +826,10 @@ export async function setCaptureStatusIfUnchanged(
 ): Promise<boolean> {
   const result = await db
     .prepare(
-      `UPDATE versions SET capture_status = ?, capture_error = ?, facts_status = ?
+      `UPDATE versions SET capture_status = ?, capture_error = ?, ${SET_FACTS_STATUS}
        WHERE id = ? AND screenshot_key IS ? AND html_key IS ? AND facts_json IS ? AND capture_attempts = ?`,
     )
-    .bind(status, error, factsStatus, seen.id, seen.screenshot_key, seen.html_key, seen.facts_json, seen.capture_attempts)
+    .bind(status, error, factsStatus, factsStatus, seen.id, seen.screenshot_key, seen.html_key, seen.facts_json, seen.capture_attempts)
     .run();
   return result.meta.changes === 1;
 }
@@ -934,8 +940,9 @@ export function nextFactsCandidate(
 
 /**
  * At the price-table line: moves the oldest `limit` versions the queue would start (FACTS_QUEUE_SQL) whose
- * facts are `pending` to `paused`, in one statement, and returns their page ids (one per version moved). A
- * version with a run in flight is never moved: it keeps its run.
+ * facts are `pending` and whose screenshot and source are both stored to `paused` (the rule src/capture.ts
+ * factsHeld keeps), in one statement, and returns their page ids (one per version moved). A version with a run
+ * in flight is never moved: it keeps its run.
  */
 export async function holdQueuedFacts(db: D1Database, limit: number, maxAttempts: number = CAPTURE_MAX_ATTEMPTS): Promise<string[]> {
   const { results } = await db
@@ -944,6 +951,7 @@ export async function holdQueuedFacts(db: D1Database, limit: number, maxAttempts
        WHERE agent_run_id IS NULL AND facts_json IS NULL AND id IN (
          SELECT v.id ${FACTS_QUEUE_SQL}
            AND COALESCE(v.facts_status, 'pending') = 'pending'
+           AND v.screenshot_key IS NOT NULL AND v.html_key IS NOT NULL
          ORDER BY v.captured_at, v.rowid
          LIMIT ?2)
        RETURNING page_id`,
@@ -953,15 +961,23 @@ export async function holdQueuedFacts(db: D1Database, limit: number, maxAttempts
   return results.map((r) => r.page_id);
 }
 
-/** Below the price-table line (it was raised): moves the oldest `limit` paused versions back to `pending`, and returns their page ids. */
-export async function releaseHeldFacts(db: D1Database, limit: number): Promise<string[]> {
+/**
+ * Below the price-table line (it was raised): moves the oldest `limit` paused versions the queue would start
+ * (FACTS_QUEUE_SQL: so never one of a retired or expired page, which would read "Reading prices…" for good) back to
+ * `pending`, and returns their page ids.
+ */
+export async function releaseHeldFacts(db: D1Database, limit: number, maxAttempts: number = CAPTURE_MAX_ATTEMPTS): Promise<string[]> {
   const { results } = await db
     .prepare(
       `UPDATE versions SET facts_status = 'pending'
-       WHERE id IN (SELECT id FROM versions WHERE facts_status = 'paused' ORDER BY captured_at, rowid LIMIT ?)
+       WHERE facts_status = 'paused' AND id IN (
+         SELECT v.id ${FACTS_QUEUE_SQL}
+           AND v.facts_status = 'paused'
+         ORDER BY v.captured_at, v.rowid
+         LIMIT ?2)
        RETURNING page_id`,
     )
-    .bind(Math.max(0, Math.trunc(limit)) || 0)
+    .bind(maxAttempts, Math.max(0, Math.trunc(limit)) || 0)
     .all<{ page_id: string }>();
   return results.map((r) => r.page_id);
 }

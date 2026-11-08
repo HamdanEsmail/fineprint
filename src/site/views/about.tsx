@@ -458,7 +458,7 @@ function Limits(props: { stats: Stats }) {
     },
     {
       lead: "A small, fixed budget.",
-      text: `At $${FACTS_PAUSE_USD} of TinyFish spend, spending on price tables is paused: a change recorded after that says its price table was not read, and is still recorded with its screenshot and diff. At $${SPEND_PAUSE_USD}, Fineprint starts nothing more that costs money on its side: no overdue-check pull, screenshot, stored source or price table, and no new page can be added. The Monitors' own scheduled checks keep running, and a change they report is still kept as a version, without its screenshot. Spend so far: ${formatUsd(props.stats.spend_usd)}.`,
+      text: `At $${FACTS_PAUSE_USD} of TinyFish spend, spending on price tables is paused: a change recorded after that says its price table was not read, and is still recorded with its screenshot and diff. At $${SPEND_PAUSE_USD}, Fineprint starts nothing more that costs money on its side: no overdue-check pull, screenshot, stored source or price table, and no new page can be added. The Monitors' own scheduled checks keep running, and a change they report is still kept as a version, without its screenshot or stored source. Spend so far: ${formatUsd(props.stats.spend_usd)}.`,
     },
     {
       lead: "The home counts can trail by up to an hour.",

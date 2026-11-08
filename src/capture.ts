@@ -17,8 +17,9 @@
 // flight), paused (needed, and the run cannot start because spending on price tables is paused at
 // FACTS_PAUSE_USD; the version is queued again if the line is raised), unavailable (needed and none
 // stored: the attempts were used up, or a run completed with an empty list, which is final for the
-// version) or not_needed. A paused version with its screenshot and source stays awaiting_facts: it is
-// still the queue's, so no diff with it is frozen in the cache.
+// version) or not_needed. Only a version whose screenshot and source are stored is paused (the copy says
+// the change is recorded with them); it stays awaiting_facts, still the queue's, so no diff with it is
+// frozen in the cache.
 //
 // One counter, capture_attempts, counts capture attempts and failed facts runs alike;
 // at CAPTURE_MAX_ATTEMPTS a version with a screenshot or source missing is failed, and one with
@@ -76,11 +77,18 @@ type StatusInput = Pick<VersionRow, "screenshot_key" | "html_key" | "facts_json"
 const factsGivenUp = (v: StatusInput): boolean => v.facts_json === null && v.facts_status === "unavailable";
 
 /**
- * Facts held at the price-table line: `paused` is written when a version's run cannot start for the pause (its
- * capture, or the hourly job for versions already queued) and stays until facts are stored, a run holds the
- * version, or the hourly job queues it again because the line was raised (src/cron.ts). Every other writer keeps it.
+ * Facts held at the price-table line: `paused` is written when a version's run cannot start for the pause and its
+ * screenshot and source are both stored (by its capture, or by the hourly job for versions already queued), and
+ * stays until facts are stored, a run holds the version, or the hourly job queues it again because the line was
+ * raised (src/cron.ts). A version without both keeps today's state (`pending`), at the spend pause too, where the
+ * capture is skipped whole. The writes in src/db/versions.ts never turn `paused` back into `pending`.
  */
-const factsHeld = (v: StatusInput): boolean => v.facts_json === null && v.facts_status === "paused" && (v.agent_run_id ?? null) === null;
+const factsHeld = (v: StatusInput): boolean =>
+  v.facts_json === null &&
+  v.facts_status === "paused" &&
+  (v.agent_run_id ?? null) === null &&
+  v.screenshot_key !== null &&
+  v.html_key !== null;
 
 /** The one rule for capture_status, used after every capture and every facts result. */
 export function captureStatusFor(v: StatusInput, needsFacts: boolean): CaptureStatus {
@@ -112,7 +120,8 @@ export function factsStatusFor(v: StatusInput, needsFacts: boolean): FactsStatus
 
 /**
  * capture_status and facts_status together, from the one state they are both worked out from. `held` says the
- * version's facts run cannot start for the price-table pause, which makes it `paused` unless it is settled otherwise.
+ * version's facts run cannot start for the price-table pause, which makes it `paused` once its screenshot and
+ * source are stored, unless it is settled otherwise.
  */
 function statusPair(v: StatusInput, needsFacts: boolean, held = false): { capture_status: CaptureStatus; facts_status: FactsStatus } {
   const input: StatusInput = held ? { ...v, facts_status: "paused" } : v;
@@ -291,14 +300,15 @@ async function capture(env: Env, versionId: string): Promise<void> {
   }
 
   // One read of the ledger for both pauses. A version whose facts run cannot start for the price-table pause says
-  // so (facts_status "paused") from the first write below on, before its screenshot is stored, so no screen kept
-  // from then on says its prices are being read. It costs no query or write the capture did not already make.
+  // so (facts_status "paused") in the status writes below, once its screenshot and source are stored. It costs no
+  // query or write the capture did not already make.
   const spend = await totalSpend(db);
   const held = factsMissing && version.agent_run_id === null && spend >= FACTS_PAUSE_USD && factsStatusFor(version, true) === "pending";
 
-  // The spend pause comes before any TinyFish call and uses no attempt.
+  // The spend pause comes before any TinyFish call and uses no attempt. The capture is skipped whole, so the
+  // facts keep their state.
   if (spend >= SPEND_PAUSE_USD) {
-    await updateCapture(db, versionId, { capture_error: "spend_paused", ...(held ? { facts_status: "paused" as const } : {}) });
+    await updateCapture(db, versionId, { capture_error: "spend_paused" });
     return;
   }
 
@@ -310,7 +320,7 @@ async function capture(env: Env, versionId: string): Promise<void> {
   }
 
   // Counted in SQL, so two captures of one version at once both count.
-  if ((await addCaptureAttempt(db, versionId, held ? "paused" : undefined)) === null) return;
+  if ((await addCaptureAttempt(db, versionId)) === null) return;
 
   // At the same time: waitUntil work is cut about 30 s after the response and a
   // screenshot alone takes about 15 s. Each writes its own column when it is done.
@@ -325,12 +335,12 @@ async function capture(env: Env, versionId: string): Promise<void> {
   // Read the row again: the captures wrote their keys, and a facts result may have landed.
   const now = await getVersion(db, versionId);
   if (now === null) return;
-  const settled = statusPair(now, factsNeeded);
+  const settled = statusPair(now, factsNeeded, held);
   const error = withExhaustedFacts(withErrors(now.capture_error, ["screenshot", "source"], failures), settled.facts_status);
   await updateCapture(db, versionId, { ...settled, capture_error: error });
   // A facts result can land between that read and that write; read once more and settle.
   const after = await getVersion(db, versionId);
-  await settleStatus(db, after, factsNeeded);
+  await settleStatus(db, after, factsNeeded, held);
 
   // The queue starts the oldest waiting version, which may be this one or an older one.
   if (factsNeeded && after !== null && after.facts_json === null && after.agent_run_id === null) await startNextFacts(env);
@@ -395,19 +405,20 @@ const noWait = (): Promise<void> =>
  * unless `waitOnRateLimit` is set (only the cron, which can wait, sets it): then it waits
  * 60 s and retries, up to three times.
  */
-export async function startNextFacts(env: Env, opts: { waitOnRateLimit?: boolean } = {}): Promise<boolean> {
+export async function startNextFacts(env: Env, opts: { waitOnRateLimit?: boolean; factsPaused?: boolean } = {}): Promise<boolean> {
   try {
-    return await startNext(env, opts.waitOnRateLimit === true);
+    return await startNext(env, opts.waitOnRateLimit === true, opts.factsPaused);
   } catch (err) {
     logError("facts start failed", err);
     return false;
   }
 }
 
-async function startNext(env: Env, waitOnRateLimit: boolean): Promise<boolean> {
+async function startNext(env: Env, waitOnRateLimit: boolean, knownPaused?: boolean): Promise<boolean> {
   const db = env.DB;
-  // The facts pause comes first (FACTS_PAUSE_USD is below SPEND_PAUSE_USD, so this covers the spend pause too).
-  if (await factsPaused(db)) return false;
+  // The facts pause comes first (FACTS_PAUSE_USD is below SPEND_PAUSE_USD, so this covers the spend pause too); a
+  // caller that has just read it (the hourly job) passes it in.
+  if (knownPaused ?? (await factsPaused(db))) return false;
   const next = await nextFactsCandidate(db);
   if (next === null) return false;
   const token = `claim:${new Date().toISOString()}`;

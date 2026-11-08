@@ -15,7 +15,7 @@ import type { ChangedBlock, FactChange, FactsDiff, StructuredDiff } from "../../
 import type { Diff, PageJson, Stats, VersionItem } from "../../readModel";
 import { BlockText, blockWork, plainText } from "../blockText";
 import { CompareForm, EvidenceLine, LAYOUT_ONLY_LINE, ShotFigure } from "../components";
-import { FACTS_PAUSED_COPY, formatUtc, plural, SUMMARY_ORIGIN, unitBeside } from "../format";
+import { FACTS_PAUSED_COPY, formatUtc, plural, saysFactsPaused, SUMMARY_ORIGIN, unitBeside } from "../format";
 import { Layout, type ScreenLink } from "../layout";
 import { hasMarks, wordDiff, type WordDiff, type WordDiffBudget } from "../wordDiff";
 
@@ -568,8 +568,8 @@ function readable(d: Diff): Diff {
   };
 }
 
-function DiffBody(props: { page: PageJson; pageHref: string; state: Extract<CompareState, { kind: "diff" }> }) {
-  const { page, pageHref, state } = props;
+function DiffBody(props: { page: PageJson; pageHref: string; state: Extract<CompareState, { kind: "diff" }>; factsPaused: boolean }) {
+  const { page, pageHref, state, factsPaused } = props;
   const { from, to, all } = state;
   const diff = readable(state.diff);
   const layoutOnly = to.delta?.layout_only === true;
@@ -597,7 +597,7 @@ function DiffBody(props: { page: PageJson; pageHref: string; state: Extract<Comp
         )}
       </div>
       {/* The pair's states come from the versions just read, never from a stored diff. */}
-      {from.facts_status === "paused" || to.facts_status === "paused" ? (
+      {saysFactsPaused(from, factsPaused) || saysFactsPaused(to, factsPaused) ? (
         <FactsPaused />
       ) : diff.facts === null ? null : (
         <Facts facts={diff.facts} />
@@ -644,7 +644,7 @@ export function CompareView(props: CompareProps) {
           </h1>
         </header>
         {state.kind === "diff" ? (
-          <DiffBody page={page} pageHref={pageHref} state={state} />
+          <DiffBody page={page} pageHref={pageHref} state={state} factsPaused={stats.facts_paused} />
         ) : state.kind === "same" ? (
           <>
             <p class="state-line">Pick two different versions.</p>

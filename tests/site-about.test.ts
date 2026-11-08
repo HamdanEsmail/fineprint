@@ -324,7 +324,7 @@ describe("about", () => {
       `At $${SPEND_PAUSE_USD}, Fineprint starts nothing more that costs money on its side: no overdue-check pull, screenshot, stored source or price table, and no new page can be added.`,
     );
     expect(section).toContain(
-      "The Monitors&#39; own scheduled checks keep running, and a change they report is still kept as a version, without its screenshot.",
+      "The Monitors&#39; own scheduled checks keep running, and a change they report is still kept as a version, without its screenshot or stored source.",
     );
     expect(section).toContain("Spend so far: $0.36.");
     expect(section).toContain("The home counts can trail by up to an hour.");

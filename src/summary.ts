@@ -19,6 +19,7 @@
 // Computing a delta is also when a diff summary stored under the old line rule is rebuilt: each version gets
 // its delta once, so each stored diff summary is rebuilt once, from the diff the delta needs anyway. A
 // TinyFish summary is never touched.
+import { SELF_ORIGIN } from "./auth";
 import { blockCounts, factCounts, factsDiff, isLayoutOnly, structuredDiff, type Delta, type StructuredDiff } from "./core/diff";
 import { readIgnorePatterns } from "./core/gate";
 import { FILL_DIFFS_PER_CALL, SUMMARY_TEXT_BUDGET_CHARS } from "./core/limits";
@@ -50,7 +51,7 @@ type FillRoute = "backfill-summaries" | "backfill-deltas";
 const fillRequest = (env: Env, route: FillRoute, versionId?: string): Promise<Response> =>
   env.SELF.fetch(
     new Request(
-      `https://fineprint.internal/api/admin/${route}${versionId === undefined ? "" : `?version=${encodeURIComponent(versionId)}`}`,
+      `${SELF_ORIGIN}/api/admin/${route}${versionId === undefined ? "" : `?version=${encodeURIComponent(versionId)}`}`,
       { method: "POST", headers: { Authorization: `Bearer ${env.ADMIN_TOKEN}` } },
     ),
   );

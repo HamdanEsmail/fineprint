@@ -218,37 +218,71 @@ export async function dropCached(env: Env, keys: string[]): Promise<void> {
 
 // --- After a deploy -----------------------------------------------------------------------------------
 
-/** What a sweep found and did: this deploy's stamp, the one the marker held before (null: none yet), and the copies deleted. */
-export type Sweep = { stamp: string; previous: string | null; deleted: number };
+/**
+ * The one-time clean-up of html/ takes at most this many page ids a call: one R2 list each, plus the marker's read
+ * and write, the page-id query and one delete, so a call stays near 25 subrequests (the free plan allows 50)
+ * however many pages there are. The rest go on the next call.
+ */
+export const LEGACY_PAGES_PER_SWEEP = 20;
 
-/** The stamp the marker holds, or null when there is none. Throws when R2 does. */
+/** The marker while the html/ clean-up is under way: `legacy:<the stamp it began under>:<the last page id done>`. */
+const PROGRESS = "legacy:";
+
+/**
+ * What a sweep found and did: this deploy's stamp, what the marker held before (null: nothing yet), the keys
+ * deleted, and whether the marker now holds this deploy's stamp (false: another call is needed).
+ */
+export type Sweep = { stamp: string; previous: string | null; deleted: number; done: boolean };
+
+/** The stamp the marker holds (or the html/ clean-up's progress), or null when there is none. Throws when R2 does. */
 export async function sweptStamp(env: Env): Promise<string | null> {
   const marker = await env.STORE.get(STAMP_MARKER);
   return marker === null ? null : (await marker.text()).trim();
 }
 
+/** The html/ clean-up's progress in a marker, or null for a marker that is not one. */
+function progressOf(marker: string): { began: string; after: string } | null {
+  if (!marker.startsWith(PROGRESS)) return null;
+  const rest = marker.slice(PROGRESS.length);
+  const cut = rest.indexOf(":");
+  const began = rest.slice(0, cut);
+  const after = rest.slice(cut + 1);
+  return cut > 0 && STAMP_SHAPE.test(began) && isSegment(after) ? { began, after } : null;
+}
+
 /**
  * The hourly job's clean-up after a deploy (POST /api/admin/sweep-screens, from the rebuild step). The marker
  * (screens/stamp) holds the stamp the last sweep was for. The same stamp: nothing to do. Another stamp: that
- * stamp's copies are deleted (screens/<previous>/ holds nothing else), never this deploy's. No marker yet (the
- * deploy that brought the stamp): the copies kept before it are deleted once, by name: html/home, html/about,
- * html/watchlist and html/page/<id> for every page id given, and each page's compares by listing
- * html/compare/<id>/. The marker is written only after the deletes, so a sweep that is cut off runs again on the
- * next tick, and once it is written the html/ clean-up never runs again. Throws when R2 does.
+ * stamp's copies are deleted (screens/<previous>/ holds nothing else), never this deploy's, and the marker takes
+ * this deploy's stamp.
+ *
+ * No marker yet (the deploy that brought the stamp): the copies kept before it are deleted once, by name:
+ * html/home, html/about, html/watchlist, then for each page id (from `pageIdsAfter`, in id order, at most
+ * LEGACY_PAGES_PER_SWEEP a call) html/page/<id> and the page's compares, listed under html/compare/<id>/. Between
+ * calls the marker holds the progress (`legacy:<stamp>:<last id>`); after the last batch it holds the stamp the
+ * clean-up began under, so a deploy that came in between finds that stamp's copies on the next call and takes
+ * them as an earlier deploy's. Once the marker holds a stamp, the html/ clean-up never runs again.
+ *
+ * Each write of the marker comes after the deletes it records, so a call that is cut off is done again. Throws
+ * when R2 does.
  */
-export async function sweepStoredScreens(env: Env, pageIds: () => Promise<string[]>): Promise<Sweep> {
+export async function sweepStoredScreens(env: Env, pageIdsAfter: (after: string, limit: number) => Promise<string[]>): Promise<Sweep> {
   const stamp = deployStamp(env);
   const previous = await sweptStamp(env);
-  if (previous === stamp) return { stamp, previous, deleted: 0 };
-  const keys: string[] = [];
-  if (previous === null) {
-    const ids = await pageIds();
-    keys.push(...[cacheKey.home(), cacheKey.about(), cacheKey.watchlist(), ...ids.map(cacheKey.page)].map((k) => LEGACY_ROOT + k));
+  if (previous === stamp) return { stamp, previous, deleted: 0, done: true };
+  const progress = previous === null ? { began: stamp, after: "" } : progressOf(previous);
+  if (progress !== null) {
+    const ids = await pageIdsAfter(progress.after, LEGACY_PAGES_PER_SWEEP);
+    const names = progress.after === "" ? [cacheKey.home(), cacheKey.about(), cacheKey.watchlist()] : [];
+    const keys = [...names, ...ids.map(cacheKey.page)].map((k) => LEGACY_ROOT + k);
     for (const id of ids) keys.push(...(await listScreens(env, `${LEGACY_ROOT}compare/${id}/`)));
-  } else if (STAMP_SHAPE.test(previous)) {
-    keys.push(...(await listScreens(env, stampRoot(previous))));
+    const deleted = await deleteScreens(env, keys);
+    const next = ids.length < LEGACY_PAGES_PER_SWEEP ? progress.began : `${PROGRESS}${progress.began}:${ids.at(-1)!}`;
+    await env.STORE.put(STAMP_MARKER, next);
+    return { stamp, previous, deleted, done: next === stamp };
   }
+  const keys = STAMP_SHAPE.test(previous!) ? await listScreens(env, stampRoot(previous!)) : [];
   const deleted = await deleteScreens(env, keys);
   await env.STORE.put(STAMP_MARKER, stamp);
-  return { stamp, previous, deleted };
+  return { stamp, previous, deleted, done: true };
 }
