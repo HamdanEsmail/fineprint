@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fineprint: hero and link-preview image</title>
+<!-- The README hero (800x400 at 2x) and the link-preview image (1200x630 at 1x), rendered by
+     design/render-hero.mjs. One layout, two canvases: the viewport width picks the size. Tokens and faces
+     are the site's own, read from public/assets by relative path; nothing here touches the network. -->
+<link rel="stylesheet" href="../public/assets/tokens.css">
+<style>
+@font-face { font-family: "Fraunces"; font-style: normal; font-weight: 100 900; font-display: block; src: url("../public/assets/fonts/fraunces-latin-opsz-normal.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 100 900; font-display: block; src: url("../public/assets/fonts/inter-latin-wght-normal.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 100 800; font-display: block; src: url("../public/assets/fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2"); }
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; overflow: hidden; }
+body { width: 800px; height: 400px; background: var(--paper); }
+
+/* The wordmark and stamp as public/assets/site.css draws them over tokens.css; the comp scales the pair
+   as one unit, so the stamp keeps the site's proportions. The dot holds still: a still image has no pulse. */
+.wordmark { gap: 12px; font: 600 22px/1 var(--font-display); text-decoration: none; }
+.stamp { display: inline-flex; align-items: center; gap: 6px; }
+.stamp::before { content: none; }
+.live { width: 7px; height: 7px; animation: none; }
+
+.page { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 372px; column-gap: 32px; align-items: center; padding: 0 44px; }
+.words { display: flex; flex-direction: column; align-items: flex-start; }
+.words .wordmark { zoom: 1.5; }
+.line { margin: 28px 0 0; font: 600 42px/1.02 var(--font-display); letter-spacing: -0.025em; text-wrap: balance; }
+
+.exhibit { margin: 0; padding: 0 0 16px; overflow: hidden; background: var(--paper-raised); border: var(--border); border-radius: var(--r); box-shadow: var(--shadow); }
+.exhibit img { display: block; width: 100%; height: auto; }
+
+/* The link-preview canvas: 1200x630 drawn at 1.5 of the hero's units, a little taller. A preview card is
+   shown at about 500px wide, so the line takes the column's full measure there. */
+@media (min-width: 1000px) {
+  body { zoom: 1.5; width: 800px; height: 420px; }
+  .line { margin-top: 30px; font-size: 46px; }
+}
+</style>
+</head>
+<body>
+<main class="page">
+  <div class="words">
+    <div class="wordmark">Fineprint <span class="stamp"><span class="live" aria-hidden="true"></span>RECORDING</span></div>
+    <p class="line">A dated record of the web&rsquo;s small print.</p>
+  </div>
+  <figure class="exhibit">
+    <img src="shot/catch.png" alt="The live Fineprint home, 7 Nov 2026: a real catch on Anthropic's pricing page, one block changed and three removed, before and after side by side">
+  </figure>
+</main>
+</body>
+</html>

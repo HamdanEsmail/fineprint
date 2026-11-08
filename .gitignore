@@ -11,3 +11,6 @@ dist/
 
 # Local design tool state
 .impeccable/
+
+# Live-home screenshot the hero comp reads (design/render-hero.mjs regenerates it)
+design/shot/
