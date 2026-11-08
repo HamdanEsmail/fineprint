@@ -36,6 +36,19 @@ export type WatchlistProps = {
 /** A page that is no longer watched: retired for unreliable reads, or past its 7 days. */
 const isGone = (status: PageStatus | null): boolean => status === "retired" || status === "expired";
 
+/** A page watched now: active, or failed (its Monitor did not read active at the hourly health check, which sets it back once it does). A paused page keeps its row but is not counted. */
+const isWatchedNow = (status: PageStatus | null): boolean => status === "active" || status === "failed";
+
+/** The lede's first sentences: how many pages are watched now, then, while any is paused, how many are paused with their history kept. */
+function ledeCounts(watched: number, paused: number): string {
+  const now =
+    watched === 0
+      ? "No page is watched now."
+      : `${watched === 1 ? "One page is" : `${watched} pages are`} watched now, each read by TinyFish Monitor on its own schedule.`;
+  if (paused === 0) return now;
+  return `${now} ${paused === 1 ? "One page is paused, its history kept." : `${paused} pages are paused, their history kept.`}`;
+}
+
 // --- What a refusal says -----------------------------------------------------------------------
 
 /** The slots line when every public slot is held: when the next frees, or that it is due (the hourly job expires it). */
@@ -453,10 +466,11 @@ export function Watchlist(props: WatchlistProps) {
   const { stats, pages, nowMs } = props;
   const watching = pages.filter((p) => !isGone(p.status));
   const gone = pages.filter((p) => isGone(p.status));
+  const watchedNow = pages.filter((p) => isWatchedNow(p.status)).length;
   return (
     <Layout
       title="Watchlist · Fineprint"
-      description={`The ${plural(watching.length, "page")} Fineprint watches, how often each is read, and a form to add one of your own for ${PUBLIC_TTL_DAYS} days.`}
+      description={`The ${plural(watchedNow, "page")} Fineprint watches, how often each is read, and a form to add one of your own for ${PUBLIC_TTL_DAYS} days.`}
       stats={stats}
       current="watchlist"
       noindex={props.noindex}
@@ -466,7 +480,7 @@ export function Watchlist(props: WatchlistProps) {
         <header class="page-head">
           <h1>Watchlist</h1>
           <p class="lede">
-            {`${watching.length === 1 ? "One page is" : `${watching.length} pages are`} watched now, each read by TinyFish Monitor on its own schedule. `}
+            {`${ledeCounts(watchedNow, stats.monitors.paused)} `}
             <a href="#add">Add a page of your own</a>
             {` for ${PUBLIC_TTL_DAYS} days.`}
           </p>

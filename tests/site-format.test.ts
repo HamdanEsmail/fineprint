@@ -95,6 +95,16 @@ describe("site formatters", () => {
     expect(liveLine(stats({ recording_since: null }))).toBe("Not recording yet: no page has been added.");
   });
 
+  it("puts the paused pages right after the pages part of the live line, only while any is paused", () => {
+    expect(liveLine(stats({ monitors: { active: 1, paused: 20, failed: 0, expired: 0, retired: 1 } }))).toBe(
+      "Recording since 3 Nov 2026 · 1 page · 20 paused · 11 real changes · 150 checks · 8 noise events filtered",
+    );
+    expect(liveLine(stats({ monitors: { active: 0, paused: 1, failed: 0, expired: 0, retired: 0 } }))).toBe(
+      "Recording since 3 Nov 2026 · 0 pages · 1 paused · 11 real changes · 150 checks · 8 noise events filtered",
+    );
+    expect(liveLine(stats())).not.toContain("paused");
+  });
+
   it("writes the cost line, with a cost per real change only when there is one, and the two caps", () => {
     expect(costLine(stats())).toBe("TinyFish spend so far $3.44 · $0.31 per real change · caps at $6 and $8 by design.");
     expect(costLine(stats({ spend_usd: 0.3, changes: 0 }))).toBe("TinyFish spend so far $0.30 · caps at $6 and $8 by design.");

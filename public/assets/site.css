@@ -515,6 +515,7 @@ section.add, section.find { padding-top: 64px; }
 .about-head .lede { max-width: 60ch; }
 .since { margin-top: 18px; font: 500 12px/1.5 var(--font-data); letter-spacing: .06em; text-transform: uppercase; font-variant-numeric: tabular-nums; color: var(--ink-muted); }
 .since time { color: var(--ink); }
+.paused-note { max-width: 60ch; margin-top: 12px; color: var(--ink-soft); }
 
 /* The contents: a list under the opening on a phone, a sticky rail beside the column from 1000px. */
 .about-grid { display: grid; }

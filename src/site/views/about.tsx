@@ -5,6 +5,7 @@
 // copyable curl for each read; and who built it. Every figure comes from the read model the JSON API uses,
 // and every number in the copy from src/core/limits.ts, so this screen cannot disagree with the others.
 import {
+  CURATED_PAUSED_ON,
   FACTS_PAUSE_USD,
   FLAP_WINDOW_MS,
   PUBLIC_ADDS_PER_IP_PER_DAY,
@@ -48,7 +49,7 @@ const When = (props: { at: string }) => <time datetime={props.at}>{formatUtc(pro
 const STEPS: { title: string; text: string }[] = [
   {
     title: "Monitor checks the page",
-    text: "TinyFish Monitor reads each page twice a day on its own schedule and sends every result to Fineprint by webhook. When a scheduled check is overdue, Fineprint asks Monitor to run it now; that run is marked pulled.",
+    text: "TinyFish Monitor reads each watched page twice a day on its own schedule and sends every result to Fineprint by webhook. When a scheduled check is overdue, Fineprint asks Monitor to run it now; that run is marked pulled.",
   },
   {
     title: "The read is cleaned of noise",
@@ -260,7 +261,7 @@ function Uses(props: { stats: Stats }) {
   const rows: { name: string; does: string; figure: string; note: string }[] = [
     {
       name: "Monitor",
-      does: "Checks each page on its schedule and sends every run by webhook; when a scheduled check is overdue, Fineprint asks Monitor to run it now and records that run, marked pulled.",
+      does: "Checks each watched page on its schedule and sends every run by webhook; when a scheduled check is overdue, Fineprint asks Monitor to run it now and records that run, marked pulled.",
       figure: formatUsd(spend.monitor_check),
       note: `${plural(total, "run")}: ${plural(runs.create, "baseline")}, ${runs.webhook} by webhook, ${runs.pull} pulled`,
     },
@@ -441,7 +442,7 @@ function Limits(props: { stats: Stats }) {
       text: "Fineprint records from its first read of a page, the baseline. It cannot say what a page said before that.",
     },
     {
-      lead: "Each page is checked twice a day.",
+      lead: "Each watched page is checked twice a day.",
       text: "A change is dated by the check that found it, which can be up to about twelve hours after the page itself changed.",
     },
     {
@@ -566,6 +567,22 @@ function Endpoints(props: { baseUrl: string; ex: Example }) {
 
 // --- The screen ------------------------------------------------------------------------------------------
 
+/**
+ * The opening's note while any page is paused: when and why recording of the curated pages stopped, that nothing
+ * was deleted, and what is still watched (active or failed, as the watchlist counts it). Null with nothing paused.
+ */
+function pausedNote(stats: Stats): string | null {
+  const paused = stats.monitors.paused;
+  if (paused === 0) return null;
+  const watched = stats.monitors.active + stats.monitors.failed;
+  const still = watched === 0 ? "No page is watched now" : watched === 1 ? "One page is still watched" : `${watched} pages are still watched`;
+  return (
+    `Recording of ${plural(paused, "curated page")} was paused on ${CURATED_PAUSED_ON}, after the bounty entry was submitted, to hold the TinyFish spend. ` +
+    "Nothing was deleted: every version, screenshot, source, diff and check log is still shown. " +
+    `${still}, and any page added on the watchlist starts a Monitor of its own for ${PUBLIC_TTL_DAYS} days.`
+  );
+}
+
 const TOC: { id: string; text: string }[] = [
   { id: "how", text: "How a change is recorded" },
   { id: "example", text: "One change, start to finish" },
@@ -578,6 +595,7 @@ const TOC: { id: string; text: string }[] = [
 export function About(props: AboutProps) {
   const { stats, featured } = props;
   const since = stats.recording_since;
+  const note = pausedNote(stats);
   return (
     <Layout
       title="How Fineprint works · Fineprint"
@@ -603,6 +621,7 @@ export function About(props: AboutProps) {
               </>
             )}
           </p>
+          {note === null ? null : <p class="paused-note">{note}</p>}
         </header>
 
         <div class="about-grid">

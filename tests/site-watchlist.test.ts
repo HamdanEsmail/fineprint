@@ -286,6 +286,42 @@ describe("the watchlist", () => {
     expect(html).not.toContain('id="retired"');
   });
 
+  it("counts only the pages watched now in its lede, and says how many are paused with their history kept", async () => {
+    await insertPage(db, page("live", { label: "Live pricing" }));
+    await insertPage(db, page("held-1", { label: "Held terms", kind: "policy", status: "paused" }));
+    await insertPage(db, page("held-2", { label: "Held fees", kind: "fees", status: "paused" }));
+    const lede = async (): Promise<string> => {
+      const html = await get("/watchlist");
+      const start = html.indexOf('<p class="lede">');
+      expect(start).toBeGreaterThan(-1);
+      const p = html.slice(start, html.indexOf("</p>", start));
+      // The add link stays as it was.
+      expect(p).toContain('<a href="#add">Add a page of your own</a>');
+      return p.replace(/<[^>]+>/g, "");
+    };
+
+    expect(await lede()).toBe(
+      "One page is watched now, each read by TinyFish Monitor on its own schedule. 2 pages are paused, their history kept. Add a page of your own for 7 days.",
+    );
+    // The paused pages keep their rows in the watched table, with their chip and line.
+    const html = await get("/watchlist");
+    const watching = sectionOf(html, "watching");
+    expect(watching).toContain('<a href="/pages/held-1">Held terms</a>');
+    expect(watching).toContain("Checks are paused");
+    expect(html).toContain('content="The 1 page Fineprint watches, how often each is read');
+
+    await db.prepare("UPDATE pages SET status = 'retired' WHERE id = 'held-2'").run();
+    expect(await lede()).toBe(
+      "One page is watched now, each read by TinyFish Monitor on its own schedule. One page is paused, its history kept. Add a page of your own for 7 days.",
+    );
+
+    await db.prepare("UPDATE pages SET status = 'expired' WHERE id = 'live'").run();
+    expect(await lede()).toBe("No page is watched now. One page is paused, its history kept. Add a page of your own for 7 days.");
+
+    await db.prepare("UPDATE pages SET status = 'retired' WHERE id = 'held-1'").run();
+    expect(await lede()).toBe("No page is watched now. Add a page of your own for 7 days.");
+  });
+
   it("is a plain 404 with the site off, for GET and POST alike, and reads nothing", async () => {
     const prepare = vi.spyOn(env.DB, "prepare");
     for (const init of [{}, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "url=https%3A%2F%2Fexample.com%2F" }]) {

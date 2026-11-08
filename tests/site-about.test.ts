@@ -2,7 +2,7 @@ import { applyD1Migrations, createExecutionContext, reset, SELF, waitOnExecution
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Delta } from "../src/core/diff";
-import { FACTS_PAUSE_USD, PUBLIC_SLOTS, PUBLIC_TTL_DAYS, SPEND_PAUSE_USD } from "../src/core/limits";
+import { CURATED_PAUSED_ON, FACTS_PAUSE_USD, PUBLIC_SLOTS, PUBLIC_TTL_DAYS, SPEND_PAUSE_USD } from "../src/core/limits";
 import { insertPage, type NewPage } from "../src/db/pages";
 import { insertRun } from "../src/db/runs";
 import type { RunRow, TriggerKind } from "../src/db/types";
@@ -177,6 +177,51 @@ describe("about", () => {
     expect(html).toMatch(/Recording since <time datetime="[^"]+">\d{1,2} \w{3} \d{4}, \d{2}:\d{2} UTC<\/time>/);
     expect(html).toContain('aria-current="page">About</a>');
     expect(html).toContain("Fineprint never reads a page itself to find a change");
+  });
+
+  it("says each watched page is checked, and notes the paused curated pages in its opening only while any is paused", async () => {
+    await seed();
+    let html = await get("/about");
+    expect(html).toContain("TinyFish Monitor reads each watched page twice a day on its own schedule");
+    expect(html).toContain("Checks each watched page on its schedule");
+    expect(html).toContain("<b>Each watched page is checked twice a day.</b>");
+    expect(html).not.toMatch(/reads each page|Checks each page|Each page is checked/);
+    expect(CURATED_PAUSED_ON).toBe("8 Nov 2026");
+    // Nothing is paused: no note.
+    expect(html).not.toContain('class="paused-note"');
+    expect(html).not.toContain("was paused on");
+
+    const note = async (): Promise<string> => {
+      const screen = await get("/about");
+      // In the opening, right under the date recording began.
+      const start = screen.indexOf('<p class="paused-note">');
+      expect(start).toBeGreaterThan(screen.indexOf('<p class="since">'));
+      expect(start).toBeLessThan(screen.indexOf("</header>", screen.indexOf('<header class="page-head about-head">')));
+      return screen.slice(start + '<p class="paused-note">'.length, screen.indexOf("</p>", start));
+    };
+    const kept = "Nothing was deleted: every version, screenshot, source, diff and check log is still shown.";
+    const added = `and any page added on the watchlist starts a Monitor of its own for ${PUBLIC_TTL_DAYS} days.`;
+
+    await insertPage(db, page("held-1", { label: "Held terms", kind: "policy", status: "paused" }));
+    await insertPage(db, page("held-2", { label: "Held fees", kind: "fees", status: "paused" }));
+    expect(await note()).toBe(
+      `Recording of 2 curated pages was paused on ${CURATED_PAUSED_ON}, after the bounty entry was submitted, to hold the TinyFish spend. ${kept} 2 pages are still watched, ${added}`,
+    );
+
+    // A failed page is still watched; one paused page is said in the singular.
+    await db.prepare("UPDATE pages SET status = 'failed' WHERE id = 'privacy'").run();
+    await db.prepare("UPDATE pages SET status = 'retired' WHERE id = 'held-2'").run();
+    expect(await note()).toBe(
+      `Recording of 1 curated page was paused on ${CURATED_PAUSED_ON}, after the bounty entry was submitted, to hold the TinyFish spend. ${kept} 2 pages are still watched, ${added}`,
+    );
+
+    await db.prepare("UPDATE pages SET status = 'expired' WHERE id IN ('pricing', 'privacy')").run();
+    expect(await note()).toContain(`${kept} No page is watched now, ${added}`);
+
+    await db.prepare("UPDATE pages SET status = 'retired' WHERE id = 'held-1'").run();
+    html = await get("/about");
+    expect(html).not.toContain('class="paused-note"');
+    expect(html).not.toContain("was paused on");
   });
 
   it("draws the diagram with a title and a text alternative, colour from the stylesheet only", async () => {

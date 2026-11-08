@@ -271,6 +271,9 @@ describe("home", () => {
     const html = await get("/");
     expect(html).toMatch(/<span class="stamp">PAUSED<\/span>/);
     expect(html).not.toContain("RECORDING");
+    // The live line counts the paused page right after the pages part, as its own part.
+    expect(plain(slice(html, '<p class="liveline">', "</p>"))).toContain(" · 0 pages · 1 paused · ");
+    expect(html).toContain("<span>1 paused</span>");
     expect(html).not.toContain("Spending is paused at the budget line.");
   });
 });

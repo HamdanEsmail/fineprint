@@ -6,6 +6,8 @@ export const MAX_MONITORS = 24;
 export const PUBLIC_SLOTS = 4;
 /** Public pages are recorded for this long, then removed. */
 export const PUBLIC_TTL_DAYS = 7;
+/** The day recording of the curated pages was paused. About says it only while a page is paused (src/site/views/about.tsx). */
+export const CURATED_PAUSED_ON = "8 Nov 2026";
 export const PUBLIC_ADDS_PER_IP_PER_DAY = 1;
 /** Discover-by-domain lookups a public caller gets per day (the admin has no limit). */
 export const DISCOVER_PER_IP_PER_DAY = 10;

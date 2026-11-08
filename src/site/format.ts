@@ -56,13 +56,15 @@ export const checksRun = (s: Stats): number => s.runs_by_trigger.webhook + s.run
 /**
  * The home's live line, in parts (the view sets them apart with " · "): "Recording since 3 Nov 2026",
  * "20 pages", "11 real changes", "150 checks", "8 noise events filtered". The figures are the stat blocks':
- * the active Monitors, Stats.changes, checksRun and every noise event. One sentence before any page is added.
+ * the active Monitors, Stats.changes, checksRun and every noise event. While any page is paused, "3 paused"
+ * follows the pages part. One sentence before any page is added.
  */
 export function liveParts(s: Stats): string[] {
   if (s.recording_since === null) return ["Not recording yet: no page has been added."];
   return [
     `Recording since ${formatDate(s.recording_since)}`,
     plural(s.monitors.active, "page"),
+    ...(s.monitors.paused > 0 ? [`${s.monitors.paused} paused`] : []),
     plural(s.changes, "real change"),
     plural(checksRun(s), "check"),
     `${plural(s.noise_suppressed, "noise event")} filtered`,
