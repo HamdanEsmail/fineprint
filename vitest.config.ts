@@ -51,6 +51,8 @@ export default defineConfig({
             SITE_ENABLED: "1",
             // Off for the suites that change data and read a screen again; tests/site-cache.test.ts turns it on.
             HTML_CACHE: "0",
+            // Empty in tests whatever wrangler.jsonc carries; tests/site-about.test.ts sets it per request.
+            REPO_URL: "",
             TEST_MIGRATIONS: await readD1Migrations("./migrations"),
             ...(live ? { LIVE_TINYFISH_API_KEY: live } : {}),
           },
