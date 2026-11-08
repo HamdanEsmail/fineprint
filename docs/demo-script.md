@@ -1,6 +1,6 @@
 # Fineprint demo script
 
-A shot list for the demo video of the TinyFish Time Machine bounty entry: seven shots, 87 seconds. Each shot is one URL on the live site and one line of narration, read at an even pace (about 2.5 words a second). Shots 2 to 4 open fixed records (fixed version ids and a fixed date), so what they answer is the same on any day; the home, the watchlist, About and `/api/stats` show live data.
+A shot list for the demo video of the TinyFish Time Machine bounty entry: seven shots, 87 seconds of narration, 96 seconds with the title and end cards. Each shot is one URL on the live site and one line of narration, read at an even pace (about 2.5 words a second). Shots 2 to 4 open fixed records (fixed version ids and a fixed date), so what they answer is the same on any day; the home, the watchlist, About and `/api/stats` show live data.
 
 Live site: https://fineprint.hamdanesmail12-7a9.workers.dev
 
@@ -75,13 +75,14 @@ On screen: the raw JSON in the browser (with Chrome's pretty-print turned on if 
 | 7 | `/api/stats` | 7 s |
 | | **Total** | **87 s** |
 
-## Recording notes
+## The video as made
 
-- **Who and where.** Hamdan records it himself, on his own screen, in one sitting.
-- **When.** Before 14 Nov 2026, 14:20 UTC. Until then Stripe pricing is a live public page on the watchlist (shot 5); after that the hourly job deletes its Monitor and marks the page expired, and its history is kept.
-- **Browser.** Chrome, the page area 1280 pixels wide, zoom at 100%, no bookmarks bar or extension icons in view.
-- **Pointer.** No cursor flourish: no circling, pointing or highlighting. Scroll slowly with the wheel or the arrow keys and leave the pointer off the content.
-- **Sound.** Narration only. No music, no sound effects.
-- **Between shots.** Cut between shots; do not type URLs on camera. Open each URL once before recording, so each screen comes up at once.
-- **Figures.** The narration names no live count, so the video stays true whatever the counts are on the day. The home, About and the watchlist can trail `/api/stats` by up to an hour; `/api/stats` is always live.
-- **Afterwards.** Export at 1280 pixels wide, upload, and paste the link into the demo slot in [submission.md](submission.md).
+The demo was produced on 8 Nov 2026 from screenshots of the live site rather than a screen recording, so that it could be made in one sitting on submission day:
+
+- **Shots.** The seven shots above, in order, between a title card (the wordmark, the lede and the bounty's name) and an end card (the live URL, the repository URL and the author). Each shot is a screenshot of its URL taken that afternoon at 1280 CSS pixels wide (rendered at 1.5x), still for the home and the figures, and a slow scroll for the others, ending where the narration's subject sits.
+- **Narration.** Each shot's narration line is shown as a caption on a paper band along the bottom of the frame, numbered 1 to 7, in the site's own type. There is no voice track and no music.
+- **The figures shot** shows the JSON of `/api/stats` as read at 17:05 UTC, set in the site's mono face on paper. The home's stored copy read 203 checks at the time, trailing `/api/stats` by its usual margin.
+- **Format.** 1920x1080, 30 frames a second, H.264, 96 seconds, silent. Shot durations follow the table above plus the crossfades between shots.
+- **Stripe pricing** was a live public page when the watchlist was photographed (shot 5); it expires on 14 Nov 2026 at 14:20 UTC, and its history stays.
+
+The video is not in the repository; its link is in the demo slot of [submission.md](submission.md).
