@@ -610,7 +610,7 @@ expect(costLine(stats({ spend_usd: 0.3, changes: 0 }))).toBe("TinyFish spend so 
 
 - [ ] **Step 2: Run; expect failure.**
 - [ ] **Step 3: Implement** the read model, the formatters, the view and the styles.
-- [ ] **Step 4: Look at it** on a scratch local D1/R2 seeded from the preview's real records, at 375px and 1280px; run `impeccable detect` on the changed files; `npm run check`.
+- [ ] **Step 4: Look at it** on a scratch local D1/R2 seeded from the preview's real records, at 375px and 1280px; check the changed files for layout and contrast problems; `npm run check`.
 - [ ] **Step 5: Commit** (`git commit -m "feat: home opens like a product and shows the bounty requirements with live proof"`).
 
 ### Task 8: Switch the site on (on the go-ahead only)
@@ -641,7 +641,7 @@ The build is complete; this task packages it for review. Nothing in it costs Tin
 - [ ] **10.5 Demo script** (`docs/demo-script.md`): a 60 to 90 second shot list, one URL and one line per shot.
 - [ ] **10.6 Posts** (`docs/posts.md`): an X post and a LinkedIn post in Hamdan's voice, figures filled from `/api/stats` on the day.
 - [ ] **10.7 Submission sheet** (`docs/submission.md`): links, a three-sentence description, the requirement-to-proof map, the reviewer's three clicks and the TinyFish endpoints.
-- [ ] **10.8 Before the repository goes public:** a secret scan of the whole history that prints counts only; `.impeccable/` ignored; `REPO_URL` set and deployed in the same hour; dated README figures; CI green; tag `v1.0.0`; Hamdan changes the visibility himself.
+- [ ] **10.8 Before the repository goes public:** a secret scan of the whole history that prints counts only; local tool folders ignored; `REPO_URL` set and deployed in the same hour; dated README figures; CI green; tag `v1.0.0`; Hamdan changes the visibility himself.
 
 ## Not in this plan
 
