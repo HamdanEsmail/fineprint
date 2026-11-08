@@ -1,6 +1,6 @@
 # Fineprint posts
 
-Two posts for the TinyFish Time Machine bounty entry, in Hamdan's own words: one on X, one on LinkedIn. Both go out after the repository is public on 16 Nov 2026, and before entries close on 17 Nov 2026.
+Two posts for the TinyFish Time Machine bounty entry, in Hamdan's own words: one on X, one on LinkedIn. Both go out on 8 Nov 2026, once the repository is public, and before entries close on 17 Nov 2026.
 
 ## Fill the figures on posting day
 
@@ -10,15 +10,15 @@ The posts carry three placeholders: `{pages}`, `{changes}` and `{days}`. One com
 curl -s https://fineprint.hamdanesmail12-7a9.workers.dev/api/stats | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log("pages="+j.monitors.active,"changes="+j.changes,"days="+Math.floor((Date.now()-Date.parse(j.recording_since))/864e5))})'
 ```
 
-It prints one line such as `pages=21 changes=12 days=4` (the reading on 8 Nov 2026, 06:56 UTC).
+It prints one line such as `pages=21 changes=13 days=5` (the reading on 8 Nov 2026, 16:47 UTC).
 
 - `{pages}` is `monitors.active`: the pages watched now, each by its own Monitor.
 - `{changes}` is `changes`: real changes, without the ones labelled layout-only.
-- `{days}` is the whole days since `recording_since` (3 Nov 2026, 14:17 UTC). On 16 Nov it reads 12 before 14:17 UTC and 13 after.
+- `{days}` is the whole days since `recording_since` (3 Nov 2026, 14:17 UTC). On 8 Nov it reads 5.
 
 ## X
 
-Under 280 characters including the link, which X counts as 23. Counted with the figures filled (two-digit `{changes}`): **272**. With a three-digit `{changes}`: 273.
+Under 280 characters including the link, which X counts as 23. Counted with the 8 Nov figures filled (21, 13, 5): **271**.
 
 ```text
 For the TinyFish Time Machine bounty I built Fineprint: a TinyFish Monitor reads each of {pages} pages of small print, and every real change is kept with a screenshot. {changes} caught in {days} days, one of them on Anthropic's pricing page on 7 Nov.
@@ -29,14 +29,14 @@ Have a look: https://fineprint.hamdanesmail12-7a9.workers.dev
 The repository link goes in a reply, posted straight after, so the post keeps one link and its card:
 
 ```text
-The code is public now: [REPO LINK: https://github.com/HamdanEsmail/fineprint, added once the repository is public]
+The code is public now: https://github.com/HamdanEsmail/fineprint
 ```
 
-**The image.** The card under the link shows `public/assets/social.png` (the Anthropic pricing catch of 7 Nov, before and after) when the live home carries the `og:image` and `twitter:card` tags. On 8 Nov 2026 the tags are in the code but not yet deployed: the live home has `og:title` and `og:description` only. Before posting, paste the link into the X composer and wait for the card: if it shows the image, post as it is; if not, attach `public/assets/social.png` to the post by hand.
+**The image.** The card under the link shows `public/assets/social.png` (the Anthropic pricing catch of 7 Nov, before and after): the live home has carried the `og:image` and `twitter:card` tags since 8 Nov 2026, 08:27 UTC. Before posting, paste the link into the X composer and wait for the card: if it shows the image, post as it is; if not, attach `public/assets/social.png` to the post by hand.
 
 ## LinkedIn
 
-Under 1,300 characters. Counted with the figures filled (two-digit `{changes}`) and the repository URL in its slot: **1,274**.
+Under 1,300 characters. Counted with the 8 Nov figures filled (21, 13, 5) and the repository URL in its slot: **1,273**.
 
 ```text
 For the TinyFish Time Machine bounty I built Fineprint, a dated record of the web's small print.
@@ -50,7 +50,7 @@ One catch: on 7 Nov, Anthropic's pricing page added Claude Code to the Pro plan'
 So far: {pages} pages, {changes} real changes in {days} days, each with a screenshot.
 
 Have a look: https://fineprint.hamdanesmail12-7a9.workers.dev
-The code: [REPO LINK: https://github.com/HamdanEsmail/fineprint, added once the repository is public]
+The code: https://github.com/HamdanEsmail/fineprint
 ```
 
 LinkedIn builds its preview from the first link, the live site.
