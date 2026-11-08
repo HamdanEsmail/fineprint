@@ -36,7 +36,7 @@ The code is public now: https://github.com/HamdanEsmail/fineprint
 
 ## LinkedIn
 
-Under 1,300 characters. Counted with the 8 Nov figures filled (21, 13, 5) and the repository URL in its slot: **1,281**.
+Under 1,300 characters. Counted with the 8 Nov figures filled (21, 13, 5) and the repository URL in its slot: **1,282**.
 
 ```text
 For the TinyFish Time Machine bounty I built Fineprint, a dated record of the web's small print.
