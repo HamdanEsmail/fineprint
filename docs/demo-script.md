@@ -85,4 +85,4 @@ The demo was produced on 8 Nov 2026 from screenshots of the live site rather tha
 - **Format.** 1920x1080, 30 frames a second, H.264, 96 seconds, silent. Shot durations follow the table above plus the crossfades between shots.
 - **Stripe pricing** was a live public page when the watchlist was photographed (shot 5); it expires on 14 Nov 2026 at 14:20 UTC, and its history stays.
 
-The video is not in the repository; its link is in the demo slot of [submission.md](submission.md).
+The video is not in the repository; it is attached to the bounty submission as a file.

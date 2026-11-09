@@ -1,6 +1,6 @@
 # Fineprint posts
 
-Two posts for the TinyFish Time Machine bounty entry, in Hamdan's own words: one on X, one on LinkedIn. Both go out on 9 Nov 2026, once the repository is public, and before entries close on 17 Nov 2026.
+Two posts for the TinyFish Time Machine bounty entry, in Hamdan's own words: one on X, one on LinkedIn. Both went out on 9 Nov 2026, once the repository was public: [the X post](https://x.com/DoomedFaz/status/2119646441408974895) and [the LinkedIn post](https://www.linkedin.com/posts/hamdanesmail_for-the-tinyfish-time-machine-bounty-i-built-share-7525412413949763584-gey3/).
 
 ## Fill the figures on posting day
 
@@ -18,10 +18,10 @@ It prints one line such as `pages=21 changes=13 days=5` (the reading on 8 Nov 20
 
 ## X
 
-Under 280 characters including the link, which X counts as 23. Counted with the 8 Nov figures filled (21, 13, 5): **273**.
+Under 280 characters including the link, which X counts as 23. Counted with the 8 Nov figures filled (21, 13, 5): **275**. The bounty asks for TinyFish to be tagged; its X account is `@Tiny_Fish`.
 
 ```text
-For the TinyFish Time Machine bounty I built Fineprint: a TinyFish Monitor watched each of {pages} pages of small print, and every real change is kept with a screenshot. {changes} caught in {days} days, one of them on Anthropic's pricing page on 7 Nov.
+For the @Tiny_Fish Time Machine bounty I built Fineprint: a TinyFish Monitor watched each of {pages} pages of small print, and every real change is kept with a screenshot. {changes} caught in {days} days, one of them on Anthropic's pricing page on 7 Nov.
 
 Have a look: https://fineprint.hamdanesmail12-7a9.workers.dev
 ```
@@ -35,6 +35,8 @@ The code is public now: https://github.com/HamdanEsmail/fineprint
 **The image.** The card under the link shows `public/assets/social.png` (the Anthropic pricing catch of 7 Nov, before and after): the live home has carried the `og:image` and `twitter:card` tags since 8 Nov 2026, 08:27 UTC. Before posting, paste the link into the X composer and wait for the card: if it shows the image, post as it is; if not, attach `public/assets/social.png` to the post by hand.
 
 ## LinkedIn
+
+As posted on 9 Nov 2026, the LinkedIn post carried the same short text as the X post. The longer text below was written for LinkedIn.
 
 Under 1,300 characters. Counted with the 8 Nov figures filled (21, 13, 5) and the repository URL in its slot: **1,282**.
 
@@ -61,6 +63,9 @@ LinkedIn builds its preview from the first link, the live site.
 - The GitHub layout-only change: [GitHub pricing, 5 Nov 2026 14:38 UTC](https://fineprint.hamdanesmail12-7a9.workers.dev/pages/b841e0ec-ccb0-4543-9059-b4480aca1f4e/compare?to=8b2800f4-e565-4de9-8770-fe39f9a2e545), labelled "Same words and figures, different structure."
 - How TinyFish is used: the table in the [README](../README.md#how-tinyfish-is-used) and on [About](https://fineprint.hamdanesmail12-7a9.workers.dev/about#tinyfish).
 
-## After posting
+## As posted
 
-Paste the two post links into their slots in [submission.md](submission.md).
+- X, 9 Nov 2026: https://x.com/DoomedFaz/status/2119646441408974895
+- LinkedIn, 9 Nov 2026: https://www.linkedin.com/posts/hamdanesmail_for-the-tinyfish-time-machine-bounty-i-built-share-7525412413949763584-gey3/
+
+Both links are also in the table at the top of [submission.md](submission.md).

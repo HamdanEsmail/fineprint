@@ -11,9 +11,9 @@ Figures below are `/api/stats` on 8 Nov 2026, 16:47 UTC, unless a line gives ano
 | Project | Fineprint |
 | Repository | https://github.com/HamdanEsmail/fineprint |
 | Live site | https://fineprint.hamdanesmail12-7a9.workers.dev |
-| Demo video | [DEMO LINK: paste after upload] |
-| X post | [X POST LINK: paste after posting] |
-| LinkedIn post | [LINKEDIN POST LINK: paste after posting] |
+| Demo video | Attached to the submission as a file: `fineprint-demo.mp4`, 96 seconds, captioned, silent (how it was made: [demo-script.md](demo-script.md)) |
+| X post | https://x.com/DoomedFaz/status/2119646441408974895 |
+| LinkedIn post | https://www.linkedin.com/posts/hamdanesmail_for-the-tinyfish-time-machine-bounty-i-built-share-7525412413949763584-gey3/ |
 
 **Description**
 
