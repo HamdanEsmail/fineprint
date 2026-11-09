@@ -577,7 +577,7 @@ function pausedNote(stats: Stats): string | null {
   const watched = stats.monitors.active + stats.monitors.failed;
   const still = watched === 0 ? "No page is watched now" : watched === 1 ? "One page is still watched" : `${watched} pages are still watched`;
   return (
-    `Recording of ${plural(paused, "curated page")} was paused on ${CURATED_PAUSED_ON}, after the bounty entry was submitted, to hold the TinyFish spend. ` +
+    `Recording of ${plural(paused, "curated page")} was paused on ${CURATED_PAUSED_ON}, once the bounty entry was ready to submit, to hold the TinyFish spend. ` +
     "Nothing was deleted: every version, screenshot, source, diff and check log is still shown. " +
     `${still}, and any page added on the watchlist starts a Monitor of its own for ${PUBLIC_TTL_DAYS} days.`
   );

@@ -205,14 +205,14 @@ describe("about", () => {
     await insertPage(db, page("held-1", { label: "Held terms", kind: "policy", status: "paused" }));
     await insertPage(db, page("held-2", { label: "Held fees", kind: "fees", status: "paused" }));
     expect(await note()).toBe(
-      `Recording of 2 curated pages was paused on ${CURATED_PAUSED_ON}, after the bounty entry was submitted, to hold the TinyFish spend. ${kept} 2 pages are still watched, ${added}`,
+      `Recording of 2 curated pages was paused on ${CURATED_PAUSED_ON}, once the bounty entry was ready to submit, to hold the TinyFish spend. ${kept} 2 pages are still watched, ${added}`,
     );
 
     // A failed page is still watched; one paused page is said in the singular.
     await db.prepare("UPDATE pages SET status = 'failed' WHERE id = 'privacy'").run();
     await db.prepare("UPDATE pages SET status = 'retired' WHERE id = 'held-2'").run();
     expect(await note()).toBe(
-      `Recording of 1 curated page was paused on ${CURATED_PAUSED_ON}, after the bounty entry was submitted, to hold the TinyFish spend. ${kept} 2 pages are still watched, ${added}`,
+      `Recording of 1 curated page was paused on ${CURATED_PAUSED_ON}, once the bounty entry was ready to submit, to hold the TinyFish spend. ${kept} 2 pages are still watched, ${added}`,
     );
 
     await db.prepare("UPDATE pages SET status = 'expired' WHERE id IN ('pricing', 'privacy')").run();

@@ -1,6 +1,6 @@
 # Fineprint posts
 
-Two posts for the TinyFish Time Machine bounty entry, in Hamdan's own words: one on X, one on LinkedIn. Both go out on 8 Nov 2026, once the repository is public, and before entries close on 17 Nov 2026.
+Two posts for the TinyFish Time Machine bounty entry, in Hamdan's own words: one on X, one on LinkedIn. Both go out on 9 Nov 2026, once the repository is public, and before entries close on 17 Nov 2026.
 
 ## Fill the figures on posting day
 
