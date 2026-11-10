@@ -18,7 +18,7 @@ import type { ChangeItem, PageSummary, Stats } from "../../readModel";
 import { BlockText } from "../blockText";
 import { LAYOUT_ONLY_LINE, ShotFigure, StatusChip } from "../components";
 import { formatUsd, formatUtc, ownPath, plural, sourceLabel, SUMMARY_ORIGIN, triggerLabel, webHref } from "../format";
-import { Layout, type ScreenLink } from "../layout";
+import { AUTHOR_URL, Layout, type ScreenLink } from "../layout";
 import { CatchCard, type Featured } from "./home";
 
 export type AboutProps = {
@@ -714,7 +714,11 @@ export function About(props: AboutProps) {
             </section>
 
             <p class="credit">
-              Built by Hamdan Esmail for the TinyFish Time Machine bounty.
+              Built by{" "}
+              <a class="by" href={AUTHOR_URL} rel="author">
+                Hamdan Esmail
+              </a>{" "}
+              for the TinyFish Time Machine bounty.
               {props.repoUrl === null ? null : (
                 <>
                   {" "}

@@ -20,6 +20,9 @@ export type ScreenLink = { base: string; path: string | null };
 /** The link-preview card (public/assets/social.png), 1200 by 630. */
 const SOCIAL_IMAGE = "/assets/social.png";
 
+/** Who built it: his GitHub, linked from his name in the footer of every page and on About. */
+export const AUTHOR_URL = "https://github.com/HamdanEsmail";
+
 const NAV: { key: Exclude<Current, null>; href: string; text: string }[] = [
   { key: "home", href: "/", text: "Changes" },
   { key: "watchlist", href: "/watchlist", text: "Watchlist" },
@@ -56,6 +59,7 @@ export function Layout(props: {
           {props.refreshSeconds === undefined ? null : <meta http-equiv="refresh" content={String(props.refreshSeconds)} />}
           <title>{props.title}</title>
           <meta name="description" content={props.description} />
+          <meta name="author" content="Hamdan Esmail" />
           <meta property="og:type" content="website" />
           <meta property="og:site_name" content="Fineprint" />
           <meta property="og:title" content={props.title} />
@@ -112,6 +116,12 @@ export function Layout(props: {
                 </li>
                 <li>
                   <a href="/about">How it works</a>
+                </li>
+                <li>
+                  Built by{" "}
+                  <a href={AUTHOR_URL} rel="author">
+                    Hamdan Esmail
+                  </a>
                 </li>
               </ul>
             </div>

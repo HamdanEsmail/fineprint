@@ -169,7 +169,7 @@ describe("about", () => {
     expect(html).toContain("One change, start to finish");
     expect(html).toContain(`curl ${env.PUBLIC_BASE_URL}/api/changes`);
     expect(html).toContain("partial render");
-    expect(html).not.toContain("github.com"); // REPO_URL unset
+    expect(html).not.toContain("Source code"); // REPO_URL unset: no link to the repository
     expect(html).toMatch(/<svg[^>]+role="img"[^>]+aria-labelledby=/);
 
     // One h1, the two sentences and the date recording began, from the earliest page.
@@ -401,7 +401,10 @@ describe("about", () => {
   it("credits Hamdan Esmail and links the source only when REPO_URL is set", async () => {
     await seed();
     const plain = await get("/about");
-    expect(plain).toContain("Built by Hamdan Esmail for the TinyFish Time Machine bounty.");
+    // His name is a link to his GitHub: once in the credit line here, once in the footer every page has.
+    expect(plain).toContain('Built by <a class="by" href="https://github.com/HamdanEsmail" rel="author">Hamdan Esmail</a> for the TinyFish Time Machine bounty.');
+    expect(plain).toContain('Built by <a href="https://github.com/HamdanEsmail" rel="author">Hamdan Esmail</a></li>');
+    expect(plain).toContain('<meta name="author" content="Hamdan Esmail"/>');
     expect(plain).not.toContain("Source code");
     const linked = await get("/about", { REPO_URL: "https://github.com/hamdan/fineprint" });
     expect(linked).toMatch(/<a href="https:\/\/github\.com\/hamdan\/fineprint">[^<]+<\/a>/);

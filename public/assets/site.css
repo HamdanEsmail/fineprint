@@ -654,6 +654,7 @@ section.add, section.find { padding-top: 64px; }
 
 .credit { margin-top: 64px; padding-top: 20px; font: italic 400 18px/1.5 var(--font-display); color: var(--ink-soft); border-top: var(--border); }
 .credit a { font-style: normal; font: 500 14px/1.5 var(--font-body); color: var(--ink); }
+.credit a.by { font: inherit; color: inherit; }
 
 /* --- The screenshot lightbox (public/assets/enhance.js): the full image over the page, no blur ------- */
 .lightbox { width: min(1120px, calc(100vw - 32px)); max-width: none; max-height: calc(100vh - 32px); padding: 0; color: var(--ink); background: var(--paper-raised); border: var(--border); border-radius: var(--r); box-shadow: var(--shadow); overflow: hidden; }
