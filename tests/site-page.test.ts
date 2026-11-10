@@ -620,6 +620,9 @@ describe("the version card's honest states", () => {
     expect(young).toContain('<meta http-equiv="refresh" content="5"');
     expect(young).toContain("Taking the screenshot…");
     expect(young).toContain("This page reloads itself every few seconds for the first two minutes.");
+    // While it reloads, a bar keeps moving and a clock counts from the moment the version was read.
+    expect(young).toContain('<div class="bar" role="progressbar" aria-label="Taking the screenshot"></div>');
+    expect(young).toMatch(/<span class="clock" data-since="[^"]+">0:3\d<\/span> so far\./);
     expect(young).not.toMatch(/<img[^>]+src="[^"]*\/shots\//);
 
     await seedState("old", { at: ago(10 * MIN), screenshot_key: null, html_key: null, capture_status: "partial" });
@@ -627,6 +630,9 @@ describe("the version card's honest states", () => {
     expect(old).not.toContain('http-equiv="refresh"');
     expect(old).toContain("Taking the screenshot…");
     expect(old).toContain(`If it does not arrive, the hourly repair tries again, up to ${CAPTURE_MAX_ATTEMPTS} attempts in all.`);
+    // A page that no longer reloads shows nothing moving and no counting clock.
+    expect(old).not.toContain('class="bar"');
+    expect(old).not.toContain("data-since");
     expect(old).not.toContain("until it is stored");
 
     // A selected older version does not refresh because the newest is pending.

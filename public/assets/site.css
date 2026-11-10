@@ -681,3 +681,19 @@ footer { margin-top: 72px; padding: 20px 0 40px; border-top: var(--border); }
 footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 24px; }
 .meterline { font-size: 12px; font-weight: 500; line-height: 1.5; letter-spacing: .02em; font-variant-numeric: tabular-nums; }
 footer ul { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 13px; }
+
+/* Waiting: while a new version's screenshot is being taken and the page reloads itself, a bar keeps
+   moving and a clock counts. A pressed button says what it is doing and cannot be pressed twice. */
+.vshot-none .bar { position: relative; height: 6px; max-width: 320px; overflow: hidden; background: var(--rule); border-radius: var(--r); }
+.vshot-none .bar::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 34%; background: var(--accent); }
+.vshot-none .clock { font: 500 13px/1.4 var(--font-data); color: var(--ink); font-variant-numeric: tabular-nums; }
+form[aria-busy="true"] button[aria-disabled="true"] { cursor: progress; pointer-events: none; }
+form[aria-busy="true"] button[aria-disabled="true"]::after { content: ""; display: inline-block; width: .85em; height: .85em; margin-left: .6em; vertical-align: -.1em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; }
+@media (prefers-reduced-motion: no-preference) {
+  .vshot-none .bar::after { animation: bar-run 1.6s var(--ease) infinite; }
+  @keyframes bar-run { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+  form[aria-busy="true"] button[aria-disabled="true"]::after { animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+}
+/* With motion turned off the bar stands still as a faint full track; the clock still counts. */
+@media (prefers-reduced-motion: reduce) { .vshot-none .bar::after { width: 100%; opacity: .4; } }

@@ -421,12 +421,14 @@ describe("about", () => {
     expect(await res.text()).toBe("404 Not Found");
   });
 
-  it("sends the security headers and loads enhance.js from this origin, deferred, with no inline script", async () => {
+  it("sends the security headers and loads its two scripts from this origin, deferred, with no inline script", async () => {
     await seed();
     const res = await call("/about");
     expect(res.headers.get("content-security-policy")).toContain("script-src 'self'");
     const html = await res.text();
     expect(html).toContain('<script src="/assets/enhance.js" defer=""></script>');
+    expect(html).toContain('<script src="/assets/wait.js" defer=""></script>');
+    expect(html.match(/<script[^>]*>/g)).toHaveLength(2);
     expect(html).not.toMatch(/<script(?![^>]*\bsrc=)[^>]*>/);
     expect(html).not.toMatch(/<style[\s>]/);
     // Every screen loads it.

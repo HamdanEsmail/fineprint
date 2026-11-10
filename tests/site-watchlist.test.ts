@@ -503,7 +503,8 @@ describe("adding a page from the watchlist", () => {
     expect(html).toMatch(/<button[^>]+type="submit"[^>]+aria-describedby="add-slots"[^>]+disabled/);
     // Open, the button needs no description.
     await db.prepare("UPDATE pages SET status = 'expired' WHERE id = 'pub0'").run();
-    expect(await get("/watchlist")).toMatch(/<button class="btn" type="submit">Start watching<\/button>/);
+    // Pressed, the button says what it is doing: the add reads the page before it answers.
+    expect(await get("/watchlist")).toMatch(/<button class="btn" type="submit" data-busy="Reading the page…">Start watching<\/button>/);
   });
 
   it("takes a multipart form as well", async () => {

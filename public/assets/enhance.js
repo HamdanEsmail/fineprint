@@ -1,4 +1,5 @@
-// Fineprint's one optional script: comfort only, never the content. Every screen works without it.
+// One of Fineprint's two optional scripts (the other is wait.js, which shows a pressed button working and
+// counts a waiting page's clock): comfort only, never the content. Every screen works without them.
 // - A screenshot link (a[data-full]) to this site opens the full image in a <dialog> over the page instead of
 //   leaving it; without <dialog> support, with a modifier key held, or to another origin, it is a plain link.
 // - A command on About (pre[data-copy]) gets a Copy button that writes its text to the clipboard and says

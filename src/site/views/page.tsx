@@ -360,7 +360,13 @@ function VersionList(props: { ctx: Ctx; selected: VersionItem }) {
   );
 }
 
-function Shot(props: { ctx: Ctx; v: VersionItem; refreshing: boolean }) {
+/** Minutes and seconds since a version was read, as "0:32". Never negative. */
+function waitClock(capturedAt: string, nowMs: number): string {
+  const seconds = Math.max(0, Math.floor((nowMs - Date.parse(capturedAt)) / 1000)) || 0;
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function Shot(props: { ctx: Ctx; v: VersionItem; refreshing: boolean; nowMs: number }) {
   const { ctx, v } = props;
   const time = formatUtc(v.captured_at);
   const state = shotState(v, isGone(ctx.detail.page.status));
@@ -380,6 +386,19 @@ function Shot(props: { ctx: Ctx; v: VersionItem; refreshing: boolean }) {
     return (
       <div class="vshot-none" role="status">
         <p class="vshot-state">Taking the screenshot…</p>
+        {/* While the page reloads itself, a bar keeps moving and a clock counts: a visitor who sees nothing
+            move reads a screenshot on its way as one that will never come. */}
+        {props.refreshing ? (
+          <>
+            <div class="bar" role="progressbar" aria-label="Taking the screenshot"></div>
+            <p>
+              <span class="clock" data-since={v.captured_at}>
+                {waitClock(v.captured_at, props.nowMs)}
+              </span>{" "}
+              so far.
+            </p>
+          </>
+        ) : null}
         <p>
           {props.refreshing
             ? "This page reloads itself every few seconds for the first two minutes."
@@ -421,7 +440,7 @@ function Facts(props: { v: VersionItem; factsPaused: boolean }) {
   );
 }
 
-function VersionCard(props: { ctx: Ctx; v: VersionItem; asOf: AsOf | null; text: string | null; factsPaused: boolean; refreshing: boolean }) {
+function VersionCard(props: { ctx: Ctx; v: VersionItem; asOf: AsOf | null; text: string | null; factsPaused: boolean; refreshing: boolean; nowMs: number }) {
   const { ctx, v, asOf, text } = props;
   const { versions, page } = ctx.detail;
   const index = versions.findIndex((x) => x.id === v.id);
@@ -451,7 +470,7 @@ function VersionCard(props: { ctx: Ctx; v: VersionItem; asOf: AsOf | null; text:
       <p class={v.summary === null && !v.is_baseline ? "vcard-summary is-pending" : "vcard-summary"}>{summaryText(v)}</p>
       {layoutOnly ? <p class="layout-note">{LAYOUT_ONLY_LINE}</p> : null}
       {v.summary_source === null ? null : <p class="origin">{SUMMARY_ORIGIN[v.summary_source]}</p>}
-      <Shot ctx={ctx} v={v} refreshing={props.refreshing} />
+      <Shot ctx={ctx} v={v} refreshing={props.refreshing} nowMs={props.nowMs} />
       <Facts v={v} factsPaused={props.factsPaused} />
       <p class="actions">
         {previous === undefined ? null : (
@@ -631,7 +650,7 @@ export function PageView(props: PageViewProps) {
             <section class="history" aria-label="History">
               <Timeline ctx={ctx} selected={selected} asOf={asOf} nowMs={nowMs} />
               <div class="history-grid">
-                <VersionCard ctx={ctx} v={selected} asOf={asOf} text={text} factsPaused={stats.facts_paused} refreshing={refreshing} />
+                <VersionCard ctx={ctx} v={selected} asOf={asOf} text={text} factsPaused={stats.facts_paused} refreshing={refreshing} nowMs={nowMs} />
                 <VersionList ctx={ctx} selected={selected} />
               </div>
             </section>

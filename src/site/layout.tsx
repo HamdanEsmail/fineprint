@@ -1,7 +1,7 @@
 // The document every screen shares: head (the title and description, the Open Graph and Twitter card tags for
-// link previews, styles, the two preloaded fonts, the optional enhance.js), the header (wordmark, stamp, nav) and
+// link previews, styles, the two preloaded fonts, the two optional scripts), the header (wordmark, stamp, nav) and
 // the footer (the spend meter). No inline script or style element: the CSP allows only files from this origin, and
-// every screen works without the script.
+// every screen works without the scripts.
 import type { Child } from "hono/jsx";
 import { raw } from "hono/html";
 import type { Stats } from "../readModel";
@@ -78,6 +78,7 @@ export function Layout(props: {
           <link rel="stylesheet" href="/assets/site.css" />
           <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
           <script src="/assets/enhance.js" defer></script>
+          <script src="/assets/wait.js" defer></script>
         </head>
         <body>
           <a class="skip" href="#main">

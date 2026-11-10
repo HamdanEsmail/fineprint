@@ -326,7 +326,7 @@ function AddPage(props: { stats: Stats; pages: PageSummary[]; form: WatchlistPro
           Left empty, the page's own title is used.
         </p>
       </div>
-      <button class="btn" type="submit" aria-describedby={closed ? "add-slots" : undefined} disabled={closed}>
+      <button class="btn" type="submit" data-busy="Reading the page…" aria-describedby={closed ? "add-slots" : undefined} disabled={closed}>
         Start watching
       </button>
     </form>
