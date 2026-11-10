@@ -260,3 +260,20 @@ What changed from the plan (`docs/plans/2026-11-03-fineprint-recorder.md`) while
 A few earlier TinySearch and TinyFetch calls were made to pick the four pages chosen during the build before a machine restart. They are free ($0.00) and are not itemised because no record of them survived the restart. The four Task 12a rows are the confirmation calls made afterwards.
 
 Total during the build: $0.002. From go-live on, the app's own spend ledger (`/api/stats`) is the record: $0.30 at 16:28 UTC on 3 Nov.
+
+## A screenshot on its way shows that it is coming, 10 November
+
+Adding a page reads it before the form answers, and for those seconds nothing on the screen moved. Then
+the new version's card said "Taking the screenshot" and stood still between reloads. While the page
+reloads itself, the card now shows a moving bar and a clock that counts from the moment the version was
+read. Once the two minutes of reloading are over there is no bar and no clock, only the sentence about
+the hourly repair.
+
+The four sites share one small script, `public/assets/wait.js`, served from the site itself and loaded
+`defer`. Every page works without it. On a POST form it marks the form busy, swaps the button's words for
+its `data-busy` label, shows a spinner, and refuses a second press; a page brought back by the Back button
+is reset. On a waiting page it counts the clock every second between the page's own reloads. I pressed
+each live button in a real browser at phone width, with the sending stopped so nothing was started: the
+label changed, the form was busy, and it went once.
+
+Live as version `417df07c` at 12:55 UTC.
