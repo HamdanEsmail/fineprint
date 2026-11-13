@@ -62,5 +62,8 @@ export default defineConfig({
   ],
   test: {
     setupFiles: ["./tests/setup.ts"],
+    // The suite runs inside the Workers runtime, where a test that writes to the database and R2 can take
+    // several seconds on a busy machine. The default of five seconds failed a different test on each full run.
+    testTimeout: 30_000,
   },
 });

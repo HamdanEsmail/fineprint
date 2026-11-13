@@ -692,9 +692,10 @@ describe("BlockText on hostile text stays linear", () => {
   for (const [name, make] of cases) {
     it(`renders ${name} at 40,000 characters in well under a quadratic time`, () => {
       const large = make(40_000);
-      // Quadratic work would take seconds here.
-      expect(timed(() => render(<BlockText text={large} />))).toBeLessThan(150);
-      expect(timed(() => plainText(`${large}${name}`))).toBeLessThan(150);
+      // Quadratic work would take many seconds here. The bound leaves room for a busy machine: linear work
+      // that reads 20 ms alone was seen at 397 ms while other suites ran beside it.
+      expect(timed(() => render(<BlockText text={large} />))).toBeLessThan(1000);
+      expect(timed(() => plainText(`${large}${name}`))).toBeLessThan(1000);
     });
   }
 
